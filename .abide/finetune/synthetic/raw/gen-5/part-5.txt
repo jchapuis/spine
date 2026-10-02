@@ -1,0 +1,316 @@
+=== EDIT server/src/main/scala/com/acme/messaging/email/InboundParser.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: parse failure of inbound mail replaced by empty message
+@@ -12,5 +12,5 @@ final class InboundParser[F[_]: Sync]:
+   def parse(raw: Array[Byte]): F[InboundMail] =
+-    Sync[F].delay(MimeParser.parse(raw)).flatMap(_.liftTo[F](InboundMalformed))
++    Sync[F].delay(MimeParser.parse(raw)).map(_.getOrElse(InboundMail.empty))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/DeadLetterSweeper.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: sweeper swallows any exception per item, including programming errors
+@@ -14,6 +14,7 @@ final class DeadLetterSweeper[F[_]: Sync](dead: DeadLetterRepository[F], sender: Sender[F]):
+   def sweep: F[Int] =
+     dead.all.flatMap: items =>
+-      items.traverse(i => sender.send(i.message) *> dead.remove(i.id)).map(_.size)
++      items.traverse(i => (sender.send(i.message) *> dead.remove(i.id)).attempt).map(_.count(_.isRight))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/chat/MessageRepository.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: getOrElse hides a missing author and cryptic name
+@@ -20,5 +20,5 @@ final class MessageRepository[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def authorOf(id: MessageId): F[UserId] =
+-    pool.use(_.option(selectAuthor)(id)).flatMap(_.liftTo[F](MessageNotFound(id)))
++    pool.use(_.option(selectAuthor)(id)).map(_.getOrElse(UserId.System))
++  def msgCnt(room: RoomId): F[Int] = pool.use(_.unique(countByRoom)(room))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/PushService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: PushService holds concrete ChatService
+@@ -8,8 +8,9 @@ final class PushService[F[_]: Sync](
+     tokens: TokenRepository[F],
+-    gateway: PushGateway[F]
++    gateway: PushGateway[F],
++    chatService: ChatService[F]
+ ):
+   def pushTo(user: UserId, msg: ChatMessage): F[Unit] =
+-    tokens.forUser(user).flatMap(_.traverse_(gateway.push(_, msg.toPush)))
++    chatService.isMuted(user, msg.room).ifM(Sync[F].unit, tokens.forUser(user).flatMap(_.traverse_(gateway.push(_, msg.toPush))))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SmsOptOutService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: concrete SuppressionService in constructor
+@@ -5,8 +5,9 @@ package com.acme.messaging.sms
+ final class SmsOptOutService[F[_]: Monad](
+     optOuts: OptOutRepository[F],
++    suppressionService: SuppressionService[F]
+ ):
+   def stop(number: PhoneNumber): F[Unit] =
+-    optOuts.insert(number)
++    optOuts.insert(number) *> suppressionService.suppress(number)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/UnsubscribeService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: Service calls another concrete Service
+@@ -7,7 +7,8 @@ final class UnsubscribeService[F[_]: Monad](
+     lists: ListRepository[F],
++    campaignService: CampaignService[F]
+ ):
+   def unsubscribe(user: UserId, list: ListId): F[Unit] =
+-    lists.remove(list, user)
++    lists.remove(list, user) *> campaignService.pruneRecipients(list, user)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/DigestScheduler.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: digest selection and grouping inlined in service
+@@ -11,6 +11,10 @@ final class DigestScheduler[F[_]: Sync](users: UserRepository[F], unread: UnreadRepository[F], outbox: Outbox[F]):
+-  def run: F[Unit] = logic.run
++  def run: F[Unit] =
++    users.withDigests.flatMap(_.traverse_ { u =>
++      unread.since(u.lastDigest).map(_.filter(_.priority >= u.threshold).groupBy(_.room))
++        .flatMap(g => if g.isEmpty then Sync[F].unit else outbox.enqueue(Digest(u.id, g)))
++    })
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/PayloadSigner.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra object with concrete signing logic and no trait
+@@ -1,2 +1,10 @@
++package com.acme.messaging.webhook
++
++object PayloadSigner:
++  def sign[F[_]: Sync](secrets: SecretRepository[F], sub: SubscriptionId, body: Array[Byte]): F[String] =
++    secrets.get(sub).map: secret =>
++      val mac = Mac.getInstance("HmacSHA256")
++      mac.init(SecretKeySpec(secret.bytes, "HmacSHA256"))
++      mac.doFinal(body).map("%02x".format(_)).mkString
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/FailoverService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: provider failover orchestration in service method
+@@ -10,6 +10,9 @@ final class FailoverService[F[_]: MonadThrow](primary: SmsSender[F], backup: SmsSender[F], health: HealthRepository[F]):
+-  def send(to: PhoneNumber, text: String): F[Unit] = logic.send(to, text)
++  def send(to: PhoneNumber, text: String): F[Unit] =
++    health.isUp(primary.name).flatMap:
++      case true  => primary.send(to, text).handleErrorWith(_ => backup.send(to, text))
++      case false => backup.send(to, text)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SegmentCounter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: abbreviations
+@@ -4,5 +4,6 @@ object SegmentCounter:
++  def segCnt(msg: String, enc: Encoding): Int =
++    val cap = if enc == Encoding.Gsm7 then 160 else 70
++    (msg.length + cap - 1) / cap
+=== END
+=== EDIT app/src/main/scala/com/acme/messaging/ui/NotificationBell.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: reqs / ntf abbreviations in Laminar view
+@@ -9,4 +9,6 @@ object NotificationBell:
++  def apply(ntfs: Signal[List[Notification]], reqs: Observer[Unit]): HtmlElement =
++    button(child.text <-- ntfs.map(_.size.toString), onClick.mapTo(()) --> reqs)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/ThreadMatcher.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler and strut metaphors
+@@ -5,5 +5,6 @@ object ThreadMatcher:
++  def filler(subject: String): String = subject.stripPrefix("Re: ").stripPrefix("Fwd: ")
++  def strut(references: List[MessageId]): Option[MessageId] = references.headOption
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/report/SendSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: fold accumulator over a Monoid
+@@ -7,5 +7,6 @@ object SendSummary:
++  def of(results: List[SendResult]): Summary =
++    results.foldLeft(Summary.empty): (s, r) =>
++      Summary(s.sent + r.sent, s.failed + r.failed, s.bytes + r.bytes)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/DeviceSync.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent calls sequenced in for-comprehension
+@@ -10,7 +10,9 @@ final class DeviceSync[F[_]: Monad](ios: ApnsClient[F], android: FcmClient[F], log: Logger[F]):
+   def sync(user: UserId): F[Unit] =
+-    (ios.sync(user), android.sync(user)).mapN((_, _) => ())
++    for
++      _ <- ios.sync(user)
++      _ <- android.sync(user)
++    yield ()
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/chat/RoomSnapshot.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent repository reads chained with flatMap
+@@ -9,6 +9,8 @@ final class RoomSnapshot[F[_]: Monad](rooms: RoomRepository[F], presence: PresenceTracker[F]):
+-  def of(room: RoomId): F[Snapshot] = (rooms.get(room), presence.online(room)).mapN(Snapshot(_, _))
++  def of(room: RoomId): F[Snapshot] =
++    rooms.get(room).flatMap: r =>
++      presence.online(room).map(o => Snapshot(r, o))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/BulkRegistration.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: manual accumulation in a loop, should be traverse / foldMap
+@@ -8,6 +8,9 @@ final class BulkRegistration[F[_]: Monad](subs: SubscriptionRepository[F]):
++  def registerAll(regs: List[Registration]): F[List[Subscription]] =
++    regs.foldLeft(Monad[F].pure(List.empty[Subscription])): (accF, r) =>
++      accF.flatMap(acc => subs.insert(r).map(acc :+ _))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/RecipientResolver.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: default is the documented page-size constant
+@@ -9,4 +9,4 @@ object RecipientResolver:
+-  def limit(requested: Option[Int]): Int = requested.getOrElse(50)
++  def limit(requested: Option[PageSize]): PageSize = requested.getOrElse(PageSize.Default)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/SubscriptionService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: Service holding repository and algebra traits, dependent flatMap
+@@ -8,7 +8,9 @@ final class SubscriptionService[F[_]: Monad](
+     subs: SubscriptionRepository[F],
+-    verifier: EndpointVerifier[F]
++    verifier: EndpointVerifier[F],
++    audit: AuditLog[F]
+ ):
+   def create(reg: Registration): F[Subscription] =
+-    verifier.verify(reg.url) *> subs.insert(reg)
++    verifier.verify(reg.url) *> subs.insert(reg).flatTap(s => audit.record(Created(s.id)))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/chat/ChatRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: Routes depend on a Service
+@@ -10,6 +10,7 @@ final class ChatRoutes[F[_]: Concurrent](service: ChatService[F]) extends Http4sDsl[F]:
+     case req @ POST -> Root / "rooms" / UUIDVar(id) / "messages" =>
+-      req.as[ChatMessage].flatMap(service.post(RoomId(id), _)) *> Accepted()
++      req.as[ChatMessage].flatMap(service.post(RoomId(id), _)) *> Accepted()
++    case GET -> Root / "rooms" / UUIDVar(id) / "members" => service.members(RoomId(id)).flatMap(Ok(_))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/outbox/OutboxPoller.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: swallow removed, error logged and re-raised
+@@ -17,7 +17,7 @@ final class OutboxPoller[F[_]: Temporal](outbox: OutboxRepository[F], sender: Sender[F], log: Logger[F]):
+       .flatMap(Stream.emits)
+-      .evalMap(m => sender.send(m).handleError(_ => ()))
++      .evalMap(m => sender.send(m).onError(e => log.error(e)(s"send ${m.id} failed")))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/PushService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: concrete service replaced by algebra
+@@ -8,9 +8,9 @@ final class PushService[F[_]: Sync](
+     tokens: TokenRepository[F],
+     gateway: PushGateway[F],
+-    chatService: ChatService[F]
++    mutes: MuteAlgebra[F]
+ ):
+   def pushTo(user: UserId, msg: ChatMessage): F[Unit] =
+-    chatService.isMuted(user, msg.room).ifM(Sync[F].unit, send(user, msg))
++    mutes.isMuted(user, msg.room).ifM(Sync[F].unit, send(user, msg))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SegmentCounter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: abbreviations renamed
+@@ -4,6 +4,6 @@ object SegmentCounter:
+-  def segCnt(msg: String, enc: Encoding): Int =
+-    val cap = if enc == Encoding.Gsm7 then 160 else 70
+-    (msg.length + cap - 1) / cap
++  def segmentCount(message: String, encoding: Encoding): Int =
++    val capacity = if encoding == Encoding.Gsm7 then 160 else 70
++    (message.length + capacity - 1) / capacity
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/report/SendSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: foldLeft replaced by foldMap
+@@ -7,6 +7,4 @@ object SendSummary:
+   def of(results: List[SendResult]): Summary =
+-    results.foldLeft(Summary.empty): (s, r) =>
+-      Summary(s.sent + r.sent, s.failed + r.failed, s.bytes + r.bytes)
++    results.foldMap(r => Summary(r.sent, r.failed, r.bytes))
+=== END
+=== TURN
+labels: dup=1
+note: same idempotency-key header construction repeated
+--- a/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
++++ b/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
+@@ -20,3 +20,4 @@ final class MailgunClient[F[_]: Async](client: Client[F]):
++    req.putHeaders(Header.Raw(ci"Idempotency-Key", email.id.value))
+--- a/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
++++ b/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
+@@ -20,3 +20,4 @@ final class TwilioClient[F[_]: Async](client: Client[F]):
++    req.putHeaders(Header.Raw(ci"Idempotency-Key", sms.id.value))
+--- a/server/src/main/scala/com/acme/messaging/push/FcmClient.scala
++++ b/server/src/main/scala/com/acme/messaging/push/FcmClient.scala
+@@ -20,3 +20,4 @@ final class FcmClient[F[_]: Async](client: Client[F]):
++    req.putHeaders(Header.Raw(ci"Idempotency-Key", push.id.value))
+=== END
+=== TURN
+labels: dup=1
+note: duplicated JSON payload in two route tests
+--- a/app/src/test/scala/com/acme/messaging/ChatRoutesSuite.scala
++++ b/app/src/test/scala/com/acme/messaging/ChatRoutesSuite.scala
+@@ -12,3 +12,4 @@ class ChatRoutesSuite extends CatsEffectSuite:
++  private val payload = json"""{"author":"u1","text":"hello","room":"r1"}"""
+--- a/app/src/test/scala/com/acme/messaging/ModerationRoutesSuite.scala
++++ b/app/src/test/scala/com/acme/messaging/ModerationRoutesSuite.scala
+@@ -12,3 +12,4 @@ class ModerationRoutesSuite extends CatsEffectSuite:
++  private val payload = json"""{"author":"u1","text":"hello","room":"r1"}"""
+=== END
+=== TURN
+labels: dup=1
+note: same retry-count literal and delay formula in two Laminar and server places
+--- a/server/src/main/scala/com/acme/messaging/webhook/Deliverer.scala
++++ b/server/src/main/scala/com/acme/messaging/webhook/Deliverer.scala
+@@ -14,3 +14,4 @@ final class Deliverer[F[_]: Temporal]:
++  private def nextDelay(attempt: Int): FiniteDuration = (1 << attempt).seconds.min(2.minutes)
+--- a/server/src/main/scala/com/acme/messaging/push/TokenRefresher.scala
++++ b/server/src/main/scala/com/acme/messaging/push/TokenRefresher.scala
+@@ -14,3 +14,4 @@ final class TokenRefresher[F[_]: Temporal]:
++  private def nextDelay(attempt: Int): FiniteDuration = (1 << attempt).seconds.min(2.minutes)
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: same word, different meaning (timeout vs ttl)
+--- a/server/src/main/scala/com/acme/messaging/email/SmtpConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/email/SmtpConfig.scala
+@@ -3,3 +3,3 @@ object SmtpConfig:
++  val SessionTimeout = 30.seconds
+--- a/server/src/main/scala/com/acme/messaging/push/PushConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/push/PushConfig.scala
+@@ -3,3 +3,3 @@ object PushConfig:
++  val TokenTtl = 30.days
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: shared fixture reused, not redefined
+--- a/server/src/test/scala/com/acme/messaging/Fixtures.scala
++++ b/server/src/test/scala/com/acme/messaging/Fixtures.scala
+@@ -3,3 +3,4 @@ object Fixtures:
++  val subscription = Subscription(SubscriptionId.generate, uri"https://hooks.example.com/a", Set(EventKind.MessageSent))
+--- a/server/src/test/scala/com/acme/messaging/WebhookDispatcherSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/WebhookDispatcherSuite.scala
+@@ -10,3 +10,3 @@ class WebhookDispatcherSuite extends CatsEffectSuite:
++  test("delivers")(dispatcher.deliver(Fixtures.subscription, event).assert)
+--- a/server/src/test/scala/com/acme/messaging/WebhookServiceSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/WebhookServiceSuite.scala
+@@ -10,3 +10,3 @@ class WebhookServiceSuite extends CatsEffectSuite:
++  test("fans out")(service.fanOut(event).assert)
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: two different retry helpers with different semantics
+--- a/server/src/main/scala/com/acme/messaging/retry/LinearRetry.scala
++++ b/server/src/main/scala/com/acme/messaging/retry/LinearRetry.scala
+@@ -3,3 +3,3 @@ object LinearRetry:
++  def delay(attempt: Int): FiniteDuration = (attempt * 10).seconds
+--- a/server/src/main/scala/com/acme/messaging/retry/ExponentialRetry.scala
++++ b/server/src/main/scala/com/acme/messaging/retry/ExponentialRetry.scala
+@@ -3,3 +3,3 @@ object ExponentialRetry:
++  def delay(attempt: Int): FiniteDuration = (1 << attempt).seconds
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: unrelated additions in two files
+--- a/server/src/main/scala/com/acme/messaging/email/EmailRoutes.scala
++++ b/server/src/main/scala/com/acme/messaging/email/EmailRoutes.scala
+@@ -16,3 +16,4 @@ final class EmailRoutes[F[_]: Concurrent](service: EmailService[F]) extends Http4sDsl[F]:
++    case DELETE -> Root / "emails" / UUIDVar(id) => service.cancel(EmailId(id)) *> NoContent()
+--- a/server/src/main/scala/com/acme/messaging/email/EmailService.scala
++++ b/server/src/main/scala/com/acme/messaging/email/EmailService.scala
+@@ -14,3 +14,4 @@ final class EmailService[F[_]: Sync](queue: EmailQueue[F]):
++  def cancel(id: EmailId): F[Unit] = queue.remove(id)
+=== END

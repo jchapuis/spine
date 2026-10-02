@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCALA_CLI="${SCALA_CLI:-scala-cli}"
+SPINE_SKILLS_ROOT="${SPINE_SKILLS_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+export SPINE_SKILLS_ROOT
+
+if ! command -v "$SCALA_CLI" >/dev/null 2>&1; then
+  echo "compliance-gate: scala-cli not on PATH (override with SCALA_CLI env var)" >&2
+  exit 2
+fi
+
+exec "$SCALA_CLI" run --quiet \
+  "$SCRIPT_DIR/project.scala" \
+  "$SCRIPT_DIR/src" \
+  -- "$@"

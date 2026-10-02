@@ -1,0 +1,255 @@
+=== EDIT server/src/main/scala/com/acme/payments/PayoutService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: subtle, one local def named proc in clean diff
+@@ -24,12 +24,18 @@ final class PayoutService[F[_]: Sync](payouts: PayoutRepository[F], bank: BankGateway[F]):
+   def release(id: PayoutId): F[Unit] =
+     for
+       payout <- payouts.get(id)
+       _ <- bank.transfer(payout.iban, payout.amount)
+       _ <- payouts.markReleased(id)
+     yield ()
++
++  def releaseAll(ids: List[PayoutId]): F[Unit] =
++    def proc(id: PayoutId): F[Unit] = release(id)
++    ids.traverse_(proc)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/TrafficFeed.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: usr truncation
+@@ -10,5 +10,7 @@ final class TrafficFeed[F[_]: Sync](feed: FeedClient[F]):
++  def incidentsNear(usr: UserLocation, radius: Meters): F[List[Incident]] =
++    feed.incidents(usr.position, radius)
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/RetryPlan.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung metaphor for attempt level
+@@ -6,6 +6,8 @@ object RetryPlan:
++  def delayAtRung(rung: Int): FiniteDuration =
++    (BaseDelay * math.pow(2, rung).toLong).min(MaxDelay)
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderAggregator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: x multi-line lambda
+@@ -18,6 +18,12 @@ object OrderAggregator:
++  def perCustomer(orders: List[Order]): Map[CustomerId, Money] =
++    orders.groupBy(_.customer).view.mapValues { x =>
++      val paid = x.filter(_.status == Status.Paid)
++      val refunded = x.filter(_.status == Status.Refunded)
++      paid.map(_.total).combineAll - refunded.map(_.total).combineAll
++    }.toMap
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/AlertRules.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: thr truncation
+@@ -9,4 +9,6 @@ object AlertRules:
++  def breaches(readings: List[Reading], thr: Double): List[Reading] =
++    readings.filter(_.value > thr)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/ReceiptPrinter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: vague stuff
+@@ -12,5 +12,8 @@ object ReceiptPrinter:
++  private def formatStuff(receipt: Receipt): String =
++    s"${receipt.merchant} ${receipt.total}"
++
+   def print(receipt: Receipt): String =
+-    s"${receipt.merchant} ${receipt.total}"
++    formatStuff(receipt)
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/InvoiceTable.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: Laminar multi-line lambda with r
+@@ -15,6 +15,11 @@ object InvoiceTable:
++  def rows(invoices: Signal[List[Invoice]]): Signal[List[HtmlElement]] =
++    invoices.map(_.map { r =>
++      tr(
++        td(r.number),
++        td(r.customer.name),
++        td(r.total.show)
++      )
++    })
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PlanService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=1 cats=0
+note: holds concrete UsageService; also mgr abbreviation
+@@ -6,5 +6,5 @@ import cats.effect.Sync
+
+-final class PlanService[F[_]: Sync](plans: PlanRepository[F]):
++final class PlanService[F[_]: Sync](plans: PlanRepository[F], usage: UsageService[F], mgr: QuotaMgr[F]):
+   def current(account: AccountId): F[Plan] =
+-    plans.current(account)
++    usage.billable(account).flatMap(plans.forUsage)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/CorridorBuilder.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: claim metaphor for reservation
+@@ -11,5 +11,7 @@ object CorridorBuilder:
++  final case class Claim(corridor: CorridorId, until: Instant)
++
++  def claim(corridor: CorridorId, now: Instant): Claim = Claim(corridor, now.plusSeconds(300))
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/ShiftService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=1 cats=0
+note: inline multi-step logic in Service with tmp name
+@@ -19,5 +19,13 @@ final class ShiftService[F[_]: Sync](shifts: ShiftRepository[F]):
++  def rebalance(team: TeamId): F[Unit] =
++    shifts.forTeam(team).flatMap { all =>
++      val tmp = all.sortBy(_.start)
++      val overlaps = tmp.zip(tmp.drop(1)).filter((a, b) => a.end.isAfter(b.start))
++      val moved = overlaps.map((a, b) => b.copy(start = a.end))
++      moved.traverse_(shifts.update)
++    }
+=== END
+=== EDIT server/src/test/scala/com/acme/routing/RoutePlannerSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rslt vowel-dropped in test
+@@ -22,6 +22,9 @@ class RoutePlannerSuite extends CatsEffectSuite:
++  test("plan returns a route ending at the destination"):
++    planner.plan(start, finish).map: rslt =>
++      assertEquals(rslt.legs.last.end, finish)
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/Histogram.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: bkts truncation
+@@ -5,6 +5,8 @@ final case class Histogram(bounds: Vector[Double], counts: Vector[Long]):
++  def bucketOf(value: Double): Int =
++    val bkts = bounds.indexWhere(value <= _)
++    if bkts < 0 then bounds.size else bkts
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/CurrencyConverter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: subtle private val rt
+@@ -8,14 +8,18 @@ final class CurrencyConverter(rates: Map[Currency, BigDecimal]):
+   def convert(amount: Money, to: Currency): Either[UnknownCurrency, Money] =
+-    rates.get(to).toRight(UnknownCurrency(to)).map(amount.times)
++    rt(to).map(amount.times)
++
++  private def rt(currency: Currency): Either[UnknownCurrency, BigDecimal] =
++    rates.get(currency).toRight(UnknownCurrency(currency))
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/StatusReporter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: ask metaphor plus foldLeft where foldMap fits
+@@ -13,5 +13,7 @@ object StatusReporter:
++  def ask(orders: List[Order]): Money =
++    orders.foldLeft(Money.zero)((acc, o) => acc + o.total)
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/Timetable.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: dt single-letter-ish param in multi-line lambda
+@@ -14,6 +14,10 @@ object Timetable:
++  def weekdays(dates: List[LocalDate]): List[Slot] =
++    dates.flatMap { dt =>
++      val dayOfWeek = dt.getDayOfWeek
++      if dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY then Nil
++      else List(Slot(dt, Opening, Closing))
++    }
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/AuthCache.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter params in def
+@@ -7,4 +7,6 @@ final class AuthCache[F[_]: Sync](ref: Ref[F, Map[TokenId, Session]]):
++  def put(k: TokenId, v: Session): F[Unit] =
++    ref.update(_.updated(k, v))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BillingConfig.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: required env var falls back to literal, plus cfg name
+@@ -9,5 +9,7 @@ object BillingConfig:
++  def cfgFromEnv: BillingConfig =
++    BillingConfig(
++      sys.env.getOrElse("BILLING_URL", "http://localhost:8080")
++    )
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/Weights.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: one-line lambdas, A type param
+@@ -4,4 +4,6 @@ object Weights:
++  def normalise[A](xs: List[(A, Double)]): List[(A, Double)] =
++    val total = xs.map(_._2).sum
++    xs.map((a, w) => a -> w / total)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/SettlementReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: foldMap and domain words
+@@ -9,4 +9,6 @@ object SettlementReport:
++  def invoiceTotal(invoices: List[Invoice]): Money =
++    invoices.foldMap(_.total)
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/Clock.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: ms suffix, url
+@@ -3,5 +3,7 @@ object CollectorSettings:
++  val FlushIntervalMs = 2000
++  val collectorUrl: Uri = uri"https://collector.acme.test/v1/spans"
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/Pipeline.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Lambda x => x * 2 and (a, b) => a + b
+@@ -6,4 +6,6 @@ object Pipeline:
++  def doubled(xs: List[Int]): List[Int] = xs.map(x => x * 2)
++  def sum(xs: List[Int]): Int = xs.reduce((a, b) => a + b)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/WebhookClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: t in handleErrorWith that re-raises
+@@ -16,6 +16,9 @@ final class WebhookClient[F[_]: Sync](http: HttpClient[F]):
++  def deliver(url: Uri, payload: Json): F[Unit] =
++    http.post(url, payload).handleErrorWith: t =>
++      Sync[F].raiseError(WebhookFailed(url, t))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/NodeIndex.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: waypoint, node, edge domain
+@@ -5,4 +5,6 @@ final case class NodeIndex(nodes: Map[NodeId, Node]):
++  def waypointsOf(edge: Edge): List[Waypoint] =
++    List(nodes(edge.from).waypoint, nodes(edge.to).waypoint)
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/WindowBuilder.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: long name but readable
+@@ -7,4 +7,7 @@ object WindowBuilder:
++  def earliestStartAfterMandatoryBreakElapsed(shift: Shift, breakLength: Duration): Instant =
++    shift.start.plus(breakLength)
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderAggregator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, x lambda renamed to orderGroup
+@@ -18,8 +18,8 @@ object OrderAggregator:
+   def perCustomer(orders: List[Order]): Map[CustomerId, Money] =
+-    orders.groupBy(_.customer).view.mapValues { x =>
+-      val paid = x.filter(_.status == Status.Paid)
+-      val refunded = x.filter(_.status == Status.Refunded)
++    orders.groupBy(_.customer).view.mapValues { customerOrders =>
++      val paid = customerOrders.filter(_.status == Status.Paid)
++      val refunded = customerOrders.filter(_.status == Status.Refunded)
+       paid.map(_.total).combineAll - refunded.map(_.total).combineAll
+     }.toMap
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/AuthCache.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, k v renamed
+@@ -7,5 +7,5 @@ final class AuthCache[F[_]: Sync](ref: Ref[F, Map[TokenId, Session]]):
+-  def put(k: TokenId, v: Session): F[Unit] =
+-    ref.update(_.updated(k, v))
++  def put(token: TokenId, session: Session): F[Unit] =
++    ref.update(_.updated(token, session))
+=== END
+=== EDIT build.sbt
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: sbt build with ordinary names
+@@ -20,4 +20,7 @@ lazy val server = project
++lazy val telemetryClient = project
++  .in(file("telemetry-client"))
++  .dependsOn(server)
++  .settings(name := "telemetry-client")
+=== END
+=== EDIT server/src/test/scala/com/acme/telemetry/HistogramSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: test, ok names
+@@ -10,4 +10,7 @@ class HistogramSuite extends ScalaCheckSuite:
++  property("every value lands in some bucket"):
++    forAll(Gen.double) { value =>
++      Histogram.default.bucketOf(value) <= Histogram.default.bounds.size
++    }
+=== END

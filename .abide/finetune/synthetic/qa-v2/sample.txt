@@ -1,0 +1,901 @@
+=== EDIT app/src/main/scala/com/acme/ui/Toast.scala
+labels: ?
+note: id=v001
+@@ -7,4 +7,6 @@ object Toast:
++  def view(messages: Signal[List[String]]): HtmlElement =
++    ul(children <-- messages.map(_.map(m => li(m))))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/PlanService.scala
+labels: ?
+note: id=v002
+@@ -6,5 +6,5 @@ import cats.effect.Sync
+ 
+-final class PlanService[F[_]: Sync](plans: PlanRepository[F], usage: UsageService[F], mgr: QuotaMgr[F]):
++final class PlanService[F[_]: Sync](plans: PlanRepository[F], usage: UsageMeter[F], quotas: QuotaPolicy[F]):
+   def current(account: AccountId): F[Plan] =
+     usage.billable(account).flatMap(plans.forUsage)
+=== END
+
+=== TURN
+labels: ?
+note: id=v003
+--- a/api/src/main/scala/com/acme/api/v1/CustomerDto.scala
++++ b/api/src/main/scala/com/acme/api/v1/CustomerDto.scala
+@@ -1,3 +1,9 @@
++package com.acme.api.v1
++
++final case class CustomerDto(
++  id: String,
++  name: String,
++  email: String
++) derives Codec.AsObject
+--- a/api/src/main/scala/com/acme/api/v2/CustomerDto.scala
++++ b/api/src/main/scala/com/acme/api/v2/CustomerDto.scala
+@@ -1,3 +1,9 @@
++package com.acme.api.v2
++
++final case class CustomerDto(
++  id: String,
++  name: String,
++  email: String
++) derives Codec.AsObject
+=== END
+
+=== TURN
+labels: ?
+note: id=v004
+--- a/ui/src/main/scala/com/acme/ui/SaveButton.scala
++++ b/ui/src/main/scala/com/acme/ui/SaveButton.scala
+@@ -8,3 +8,8 @@ object SaveButton:
++  def apply(onSave: Observer[Unit]): HtmlElement =
++    button(
++      cls := "px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700",
++      "Save",
++      onClick.mapTo(()) --> onSave
++    )
+--- a/ui/src/main/scala/com/acme/ui/SubmitButton.scala
++++ b/ui/src/main/scala/com/acme/ui/SubmitButton.scala
+@@ -8,3 +8,8 @@ object SubmitButton:
++  def apply(onSubmit: Observer[Unit]): HtmlElement =
++    button(
++      cls := "px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700",
++      "Submit",
++      onClick.mapTo(()) --> onSubmit
++    )
+=== END
+
+=== TURN
+labels: ?
+note: id=v005
+--- a/shared/jvm/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
++++ b/shared/jvm/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
+@@ -1,3 +1,10 @@
++package com.acme.codec
++
++class PlatformCodecSuite extends FunSuite:
++  test("round-trips a payload through the platform codec") {
++    val payload = Payload("hello", 3)
++    assertEquals(PlatformCodec.decode(PlatformCodec.encode(payload)), Right(payload))
++  }
+--- a/shared/js/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
++++ b/shared/js/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
+@@ -1,3 +1,10 @@
++package com.acme.codec
++
++class PlatformCodecSuite extends FunSuite:
++  test("round-trips a payload through the platform codec") {
++    val payload = Payload("hello", 3)
++    assertEquals(PlatformCodec.decode(PlatformCodec.encode(payload)), Right(payload))
++  }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reports/SalesReport.scala
+labels: ?
+note: id=v006
+@@ -11,6 +11,6 @@ object SalesReport:
+   def revenue(orders: List[Order]): Money =
+-    orders.map(_.total).reduce(_ + _)
++    orders.map(_.total).reduceOption(_ + _).getOrElse(Money.zero)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/Gauge.scala
+labels: ?
+note: id=v007
+@@ -5,4 +5,6 @@ final class Gauge(value: Ref[IO, Long]):
++  def footprint: IO[Long] = value.get
+=== END
+
+=== TURN
+labels: ?
+note: id=v008
+--- a/ui/src/main/scala/com/acme/ui/api/OrdersApi.scala
++++ b/ui/src/main/scala/com/acme/ui/api/OrdersApi.scala
+@@ -5,3 +5,6 @@ object OrdersApi:
++  private val BaseUrl = "https://api.acme.example/v3"
++  def listUrl: String = s"$BaseUrl/orders"
+--- a/ui/src/main/scala/com/acme/ui/api/CustomersApi.scala
++++ b/ui/src/main/scala/com/acme/ui/api/CustomersApi.scala
+@@ -5,3 +5,6 @@ object CustomersApi:
++  private val BaseUrl = "https://api.acme.example/v3"
++  def listUrl: String = s"$BaseUrl/customers"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/routing/Weights.scala
+labels: ?
+note: id=v009
+@@ -4,4 +4,6 @@ object Weights:
++  def normalise[A](xs: List[(A, Double)]): List[(A, Double)] =
++    val total = xs.map(_._2).sum
++    xs.map((a, w) => a -> w / total)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/Exporter.scala
+labels: ?
+note: id=v010
+@@ -14,5 +14,8 @@ final class Exporter[F[_]: Temporal](sink: Sink[F]):
++  def doIt(batch: Batch): F[Unit] =
++    sink.write(batch).handleErrorWith(_ => Temporal[F].sleep(1.second) >> doIt(batch))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/PayoutService.scala
+labels: ?
+note: id=v011
+@@ -24,12 +24,18 @@ final class PayoutService[F[_]: Sync](payouts: PayoutRepository[F], bank: BankGateway[F]):
+   def release(id: PayoutId): F[Unit] =
+     for
+       payout <- payouts.get(id)
+       _ <- bank.transfer(payout.iban, payout.amount)
+       _ <- payouts.markReleased(id)
+     yield ()
++
++  def releaseAll(ids: List[PayoutId]): F[Unit] =
++    def proc(id: PayoutId): F[Unit] = release(id)
++    ids.traverse_(proc)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/orders/OrderRoutes.scala
+labels: ?
+note: id=v012
+@@ -20,4 +20,6 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++    case DELETE -> Root / "orders" / UUIDVar(id) =>
++      orders.cancel(OrderId(id)) *> NoContent()
+=== END
+
+=== EDIT server/src/main/scala/com/acme/config/ConfigStore.scala
+labels: ?
+note: id=v013
+@@ -12,6 +12,6 @@ final class ConfigStore(files: FileReader[IO]):
+   def load(path: Path): IO[AppConfig] =
+-    files.read(path).flatMap(raw => IO.fromEither(parser.decode[AppConfig](raw)))
++    files.read(path).flatMap(raw => IO.fromEither(parser.decode[AppConfig](raw))).handleError(_ => AppConfig.default)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/http/HttpSettings.scala
+labels: ?
+note: id=v014
+@@ -10,6 +10,7 @@ object HttpSettings:
+   def from(conf: Config): HttpSettings =
+     HttpSettings(
+       host = conf.getString("http.host"),
+-      port = conf.getInt("http.port")
++      port = Try(conf.getInt("http.port")).getOrElse(8080)
+     )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ReportBuilder.scala
+labels: ?
+note: id=v015
+@@ -12,6 +12,8 @@ final class ReportBuilder[F[_]: Monad](cpu: CpuProbe[F], mem: MemProbe[F]):
++  def footprint: F[Report] =
++    cpu.read.flatMap(c => mem.read.map(m => Report(c, m)))
+=== END
+
+=== TURN
+labels: ?
+note: id=v016
+--- a/server/src/test/scala/com/acme/gen/Generators.scala
++++ b/server/src/test/scala/com/acme/gen/Generators.scala
+@@ -1,3 +1,8 @@
++package com.acme.gen
++
++object Generators:
++  val genOrder: Gen[Order] =
++    for id <- Gen.posNum[Long]; lines <- Gen.nonEmptyListOf(genLine)
++    yield Order(OrderId(id), lines)
+--- a/server/src/test/scala/com/acme/orders/OrderTotalsProps.scala
++++ b/server/src/test/scala/com/acme/orders/OrderTotalsProps.scala
+@@ -8,3 +8,5 @@ class OrderTotalsProps extends ScalaCheckSuite:
++  property("total is non-negative")(forAll(Generators.genOrder)(o => OrderTotals.total(o).cents >= 0))
+--- a/server/src/test/scala/com/acme/orders/OrderRenderProps.scala
++++ b/server/src/test/scala/com/acme/orders/OrderRenderProps.scala
+@@ -8,3 +8,5 @@ class OrderRenderProps extends ScalaCheckSuite:
++  property("render is non-empty")(forAll(Generators.genOrder)(o => OrderRender.text(o).nonEmpty))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/PayoutService.scala
+labels: ?
+note: id=v017
+@@ -30,4 +30,3 @@ final class PayoutService[F[_]: Sync](payouts: PayoutRepository[F], bank: BankGateway[F]):
+   def releaseAll(ids: List[PayoutId]): F[Unit] =
+-    def proc(id: PayoutId): F[Unit] = release(id)
+-    ids.traverse_(proc)
++    ids.traverse_(release)
+=== END
+
+=== TURN
+labels: ?
+note: id=v018
+--- a/app/src/test/scala/com/acme/planner/LegSplitterSuite.scala
++++ b/app/src/test/scala/com/acme/planner/LegSplitterSuite.scala
+@@ -12,3 +12,17 @@ class LegSplitterSuite extends FunSuite:
++  test("splits at zone border") {
++    val zone = Zone("alpine-north", Bearing(312.5), Meters(18_500))
++    val legs = LegSplitter.split(route, zone)
++    assertEquals(legs.size, 2)
++  }
++
++  test("keeps single leg inside the zone") {
++    val zone = Zone("alpine-north", Bearing(312.5), Meters(18_500))
++    val legs = LegSplitter.split(shortRoute, zone)
++    assertEquals(legs.size, 1)
++  }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/ui/ProfileView.scala
+labels: ?
+note: id=v019
+@@ -9,5 +9,6 @@ object ProfileView:
+   def render(user: Signal[User]): HtmlElement =
+     div(
+-      cls := "profile",
++      cls := "profile",
++      div(cls := "strut", height := "16px"),
+       child.text <-- user.map(_.displayName)
+     )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/orders/OrderAggregator.scala
+labels: ?
+note: id=v020
+@@ -18,6 +18,12 @@ object OrderAggregator:
++  def perCustomer(orders: List[Order]): Map[CustomerId, Money] =
++    orders.groupBy(_.customer).view.mapValues { x =>
++      val paid = x.filter(_.status == Status.Paid)
++      val refunded = x.filter(_.status == Status.Refunded)
++      paid.map(_.total).combineAll - refunded.map(_.total).combineAll
++    }.toMap
+=== END
+
+=== TURN
+labels: ?
+note: id=v021
+--- a/akka-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
++++ b/akka-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
+@@ -10,3 +10,9 @@ class DispatcherSuite extends ActorSuite:
++  test("drops message for unknown shard") {
++    val probe = createTestProbe[Envelope]()
++    dispatcher.route(Envelope(ShardId("none"), "ping"))
++    probe.expectNoMessage(100.millis)
++  }
+--- a/pekko-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
++++ b/pekko-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
+@@ -10,3 +10,9 @@ class DispatcherSuite extends ActorSuite:
++  test("drops message for unknown shard") {
++    val probe = createTestProbe[Envelope]()
++    dispatcher.route(Envelope(ShardId("none"), "ping"))
++    probe.expectNoMessage(100.millis)
++  }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/geo/RegionResolver.scala
+labels: ?
+note: id=v022
+@@ -9,6 +9,9 @@ object RegionResolver:
+-  def resolve(params: Map[String, String]): Region =
+-    Region.parseOrThrow(params.getOrElse("region", "us-east-1"))
++  /** The region is optional on search requests; Region.Default applies when omitted. */
++  def resolve(region: Option[Region]): Region =
++    region.getOrElse(Region.Default)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/Ftp.scala
+labels: ?
+note: id=v023
+@@ -3,5 +3,7 @@ object SettlementUpload:
++  val ConnectTimeoutMs = 5000
++  def remotePath(sku: Sku, batch: BatchId): String =
++    s"/settlements/${batch.value}/${sku.value}.csv"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/mail/SmtpSettings.scala
+labels: ?
+note: id=v024
+@@ -6,6 +6,7 @@ final case class SmtpSettings(host: String, port: Int)
+ object SmtpSettings:
+-  def fromEnv: SmtpSettings = SmtpSettings(sys.env("SMTP_HOST"), sys.env("SMTP_PORT").toInt)
++  def fromEnv: IO[SmtpSettings] =
++    IO(sys.env("SMTP_HOST")).flatMap: host =>
++      IO(sys.env("SMTP_PORT").toInt).map(port => SmtpSettings(host, port))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/CreditNoteService.scala
+labels: ?
+note: id=v025
+@@ -3,6 +3,10 @@ package com.acme.billing
++object CreditNotes:
++  def issue[F[_]: Sync](invoices: InvoiceRepository[F], id: InvoiceId): F[CreditNote] =
++    invoices.get(id).flatMap { inv =>
++      val tmpl = CreditNote.template(inv)
++      invoices.save(inv.copy(credited = true)).as(tmpl)
++    }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/scheduling/Timetable.scala
+labels: ?
+note: id=v026
+@@ -14,6 +14,10 @@ object Timetable:
++  def weekdays(dates: List[LocalDate]): List[Slot] =
++    dates.flatMap { dt =>
++      val dayOfWeek = dt.getDayOfWeek
++      if dayOfWeek == DayOfWeek.SATURDAY || dayOfWeek == DayOfWeek.SUNDAY then Nil
++      else List(Slot(dt, Opening, Closing))
++    }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/config/Environment.scala
+labels: ?
+note: id=v027
+@@ -6,6 +6,6 @@ enum Environment:
+ object Environment:
+   def current: Environment =
+-    parseOrThrow(sys.env("ENVIRONMENT"))
++    parseOrThrow(sys.env.getOrElse("ENVIRONMENT", "dev"))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/net/Reconnect.scala
+labels: ?
+note: id=v028
+@@ -8,5 +8,6 @@ object Reconnect:
+-  def connect(broker: Broker[IO]): IO[Connection] = broker.open
++  def connect(broker: Broker[IO]): IO[Connection] =
++    broker.open.handleErrorWith(_ => IO.sleep(1.second) *> connect(broker))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/DiscountSettings.scala
+labels: ?
+note: id=v029
+@@ -5,8 +5,11 @@ object DiscountSettings:
++  /** discount.cap is optional; without it no discount may exceed this share of the price. */
++  val DefaultCap: Percent = Percent(30)
++
+   def cap(conf: Map[String, String]): Percent =
+-    Percent.parseOrThrow(conf("discount.cap"))
++    conf.get("discount.cap").fold(DefaultCap)(Percent.parseOrThrow)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/db/Credentials.scala
+labels: ?
+note: id=v030
+@@ -5,8 +5,12 @@ final case class Credentials(user: String, password: String)
+ object Credentials:
+-  def fromEnv: Credentials =
+-    Credentials(sys.env("DB_USER"), sys.env.getOrElse("DB_PASSWORD", "postgres"))
++  def fromEnv: IO[Credentials] =
++    (env("DB_USER"), env("DB_PASSWORD")).mapN(Credentials.apply)
++
++  private def env(key: String): IO[String] =
++    sys.env.get(key).toRight(MissingSetting(key)).liftTo[IO]
+=== END
+
+=== EDIT server/src/main/scala/com/acme/webhooks/WebhookSender.scala
+labels: ?
+note: id=v031
+@@ -13,6 +13,10 @@ final class WebhookSender(http: Client[IO], maxAttempts: Int):
+-  def deliver(hook: Webhook): IO[Unit] = http.expect[Unit](request(hook))
++  def deliver(hook: Webhook, attempt: Int = 1): IO[Unit] =
++    http.expect[Unit](request(hook)).handleErrorWith: _ =>
++      if attempt < maxAttempts then IO.sleep(attempt.seconds) *> deliver(hook, attempt + 1)
++      else IO.unit
+=== END
+
+=== EDIT server/src/main/scala/com/acme/mail/SmtpClient.scala
+labels: ?
+note: id=v032
+@@ -18,6 +18,7 @@ final class SmtpClient(transport: Transport[IO]):
+-  def send(mail: Mail): IO[Unit] = transport.deliver(mail)
++  def send(mail: Mail): IO[Unit] =
++    transport.deliver(mail).handleErrorWith(_ => IO.sleep(2.seconds) *> send(mail))
+=== END
+
+=== EDIT server/src/test/scala/com/acme/scheduling/TimetableSuite.scala
+labels: ?
+note: id=v033
+@@ -12,4 +12,7 @@ class TimetableSuite extends FunSuite:
++  test("weekends are skipped"):
++    val filler = List(LocalDate.of(2026, 1, 3), LocalDate.of(2026, 1, 4))
++    assertEquals(Timetable.weekdays(filler), Nil)
+=== END
+
+=== TURN
+labels: ?
+note: id=v034
+--- a/shared/src/main/scala/com/acme/geo/Latitude.scala
++++ b/shared/src/main/scala/com/acme/geo/Latitude.scala
+@@ -6,3 +6,8 @@ object Latitude:
++  def parse(s: String): Either[String, Latitude] =
++    s.toDoubleOption.toRight(s"not a number: $s").flatMap: d =>
++      Either.cond(d >= -90 && d <= 90, Latitude(d), s"out of range: $d")
+--- a/shared/src/main/scala/com/acme/geo/Longitude.scala
++++ b/shared/src/main/scala/com/acme/geo/Longitude.scala
+@@ -6,3 +6,8 @@ object Longitude:
++  def parse(s: String): Either[String, Longitude] =
++    s.toDoubleOption.toRight(s"not a number: $s").flatMap: d =>
++      Either.cond(d >= -180 && d <= 180, Longitude(d), s"out of range: $d")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/Main.scala
+labels: ?
+note: id=v035
+@@ -12,6 +12,6 @@ object Main extends IOApp.Simple:
+   val run: IO[Unit] =
+-    val port = sys.env("PORT").toInt
++    val port = sys.env.get("PORT").flatMap(_.toIntOption).getOrElse(8080)
+     Server.start(port).useForever
+=== END
+
+=== EDIT server/src/main/scala/com/acme/http/ApiClient.scala
+labels: ?
+note: id=v036
+@@ -11,6 +11,9 @@ object ApiClient:
+   def apply(base: Client[IO]): Client[IO] =
+-    base
++    val policy = RetryPolicy[IO](RetryPolicy.exponentialBackoff(maxWait = 10.seconds, maxRetry = 4))
++    Retry[IO](policy)(base)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/StripeSettings.scala
+labels: ?
+note: id=v037
+@@ -6,6 +6,6 @@ final case class StripeSettings(apiKey: String, webhookSecret: String)
+ object StripeSettings:
+   def fromEnv: StripeSettings =
+     StripeSettings(
+-      apiKey = sys.env("STRIPE_API_KEY"),
++      apiKey = sys.env.getOrElse("STRIPE_API_KEY", ""),
+       webhookSecret = sys.env("STRIPE_WEBHOOK_SECRET")
+     )
+=== END
+
+=== EDIT tools/src/main/scala/com/acme/tools/Cli.scala
+labels: ?
+note: id=v038
+@@ -9,6 +9,6 @@ object Cli:
+   def parse(args: List[String]): Config =
+-    OParser.parse(parser, args, Config()).getOrElse(sys.exit(2))
++    OParser.parse(parser, args, Config()).getOrElse(Config())
+=== END
+
+=== EDIT server/src/main/scala/com/acme/jobs/RetryingJob.scala
+labels: ?
+note: id=v039
+@@ -9,9 +9,13 @@ import retry.*
+ final class RetryingJob(job: IO[Unit], logger: Logger[IO]):
+-  private val policy = RetryPolicies.constantDelay[IO](5.seconds)
++  private val policy = RetryPolicies.limitRetries[IO](5).join(RetryPolicies.exponentialBackoff[IO](1.second))
+   val run: IO[Unit] =
+-    retryingOnAllErrors(job, policy, (_: Throwable, _: RetryDetails) => IO.unit)
++    retryingOnAllErrors(job, policy, (e: Throwable, d: RetryDetails) => logger.warn(e)(s"job failed: $d"))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/db/PoolService.scala
+labels: ?
+note: id=v040
+@@ -14,6 +14,12 @@ final class PoolService(conf: Config, pools: PoolFactory[IO]):
+-  def open: Resource[IO, Pool] = pools.create(conf.getInt("pool.size"))
++  def open: Resource[IO, Pool] =
++    val size = Try(conf.getInt("pool.size")).getOrElse(10)
++    val timeout = conf.getDuration("pool.timeout").toScala
++    val lifetime = timeout * 4
++    val params = PoolParams(size, timeout, lifetime)
++    pools.create(params).evalTap(pool => pool.validate(size / 2))
+=== END
+
+=== TURN
+labels: ?
+note: id=v041
+--- a/shared/src/main/scala/com/acme/units/Meters.scala
++++ b/shared/src/main/scala/com/acme/units/Meters.scala
+@@ -5,3 +5,7 @@ object Meters:
++  def sum(xs: List[Meters]): Meters =
++    xs.foldLeft(Meters(0.0))((acc, x) => Meters(acc.value + x.value))
++  def max(xs: List[Meters]): Option[Meters] =
++    xs.maxByOption(_.value)
+--- a/shared/src/main/scala/com/acme/units/Seconds.scala
++++ b/shared/src/main/scala/com/acme/units/Seconds.scala
+@@ -5,3 +5,7 @@ object Seconds:
++  def sum(xs: List[Seconds]): Seconds =
++    xs.foldLeft(Seconds(0.0))((acc, x) => Seconds(acc.value + x.value))
++  def max(xs: List[Seconds]): Option[Seconds] =
++    xs.maxByOption(_.value)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/scheduling/JobScheduler.scala
+labels: ?
+note: id=v042
+@@ -30,4 +30,7 @@ object JobScheduler:
++  def merge(a: Schedule, b: Schedule): Schedule =
++    Schedule(a.slots ++ b.slots, a.timezone)
++
+   def empty: Schedule = Schedule(Nil, ZoneOffset.UTC)
+=== END
+
+=== TURN
+labels: ?
+note: id=v043
+--- a/server/src/main/scala/com/acme/db/OrderQueries.scala
++++ b/server/src/main/scala/com/acme/db/OrderQueries.scala
+@@ -12,3 +12,8 @@ object OrderQueries:
++  val selectActive: Query[Void, Order] =
++    sql"""SELECT id, customer_id, total_cents, status
++          FROM orders
++          WHERE deleted_at IS NULL AND status <> 'cancelled'""".query(orderCodec)
+--- a/server/src/main/scala/com/acme/db/OrderExportQueries.scala
++++ b/server/src/main/scala/com/acme/db/OrderExportQueries.scala
+@@ -10,3 +10,8 @@ object OrderExportQueries:
++  val selectActiveForExport: Query[Void, Order] =
++    sql"""SELECT id, customer_id, total_cents, status
++          FROM orders
++          WHERE deleted_at IS NULL AND status <> 'cancelled'""".query(orderCodec)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/db/DatabaseConfig.scala
+labels: ?
+note: id=v044
+@@ -8,7 +8,7 @@ object DatabaseConfig:
+   def fromEnv: IO[DatabaseConfig] = IO:
+     DatabaseConfig(
+       host = sys.env("DB_HOST"),
+-      port = sys.env("DB_PORT").toInt,
++      port = sys.env.getOrElse("DB_PORT", "5432").toInt,
+       name = sys.env("DB_NAME")
+     )
+=== END
+
+=== TURN
+labels: ?
+note: id=v045
+--- a/shared/jvm/src/main/scala/com/acme/net/PlatformHttp.scala
++++ b/shared/jvm/src/main/scala/com/acme/net/PlatformHttp.scala
+@@ -1,3 +1,9 @@
++package com.acme.net
++
++object PlatformHttp:
++  /** Backed by the JDK client; blocking calls are shifted to the blocking pool. */
++  def client[F[_]: Async]: Resource[F, Client[F]] =
++    JdkHttpClient.simple[F]
+--- a/shared/js/src/main/scala/com/acme/net/PlatformHttp.scala
++++ b/shared/js/src/main/scala/com/acme/net/PlatformHttp.scala
+@@ -1,3 +1,9 @@
++package com.acme.net
++
++object PlatformHttp:
++  /** Backed by the browser fetch API. */
++  def client[F[_]: Async]: Resource[F, Client[F]] =
++    FetchClientBuilder[F].resource
+=== END
+
+=== TURN
+labels: ?
+note: id=v046
+--- a/server/src/main/scala/com/acme/sku/SkuParser.scala
++++ b/server/src/main/scala/com/acme/sku/SkuParser.scala
+@@ -4,3 +4,7 @@ object SkuParser:
++  private val Pattern = "^[A-Z]{2}-[0-9]{4}$".r
++
++  def parse(s: String): Option[Sku] =
++    Option.when(Pattern.matches(s))(Sku(s))
+--- a/server/src/main/scala/com/acme/sku/SkuImport.scala
++++ b/server/src/main/scala/com/acme/sku/SkuImport.scala
+@@ -5,3 +5,7 @@ object SkuImport:
++  private val Pattern = "^[A-Z]{2}-[0-9]{4}$".r
++
++  def isValidRow(row: Csv.Row): Boolean =
++    row.get("sku").exists(Pattern.matches)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/BillingConfig.scala
+labels: ?
+note: id=v047
+@@ -9,5 +9,7 @@ object BillingConfig:
++  def cfgFromEnv: BillingConfig =
++    BillingConfig(
++      sys.env.getOrElse("BILLING_URL", "http://localhost:8080")
++    )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/http/ClientSettings.scala
+labels: ?
+note: id=v048
+@@ -9,6 +9,6 @@ import scala.util.Try
+ object ClientSettings:
+   def timeout(raw: Map[String, String]): FiniteDuration =
+-    Duration(raw("timeout")).asInstanceOf[FiniteDuration]
++    Try(Duration(raw("timeout")).asInstanceOf[FiniteDuration]).getOrElse(30.seconds)
+=== END
+
+=== TURN
+labels: ?
+note: id=v049
+--- a/ui/src/main/scala/com/acme/ui/views/OrderListView.scala
++++ b/ui/src/main/scala/com/acme/ui/views/OrderListView.scala
+@@ -20,3 +20,7 @@ object OrderListView:
++    child <-- state.splitOne(_.isLoading):
++      case (true, _, _)  => div(cls := "spinner", "Loading...")
++      case (false, _, _) => emptyNode
+--- a/ui/src/main/scala/com/acme/ui/views/InvoiceListView.scala
++++ b/ui/src/main/scala/com/acme/ui/views/InvoiceListView.scala
+@@ -18,3 +18,7 @@ object InvoiceListView:
++    child <-- state.splitOne(_.isLoading):
++      case (true, _, _)  => div(cls := "spinner", "Loading...")
++      case (false, _, _) => emptyNode
+=== END
+
+=== TURN
+labels: ?
+note: id=v050
+--- a/api/src/main/scala/com/acme/api/v1/OrderRoutes.scala
++++ b/api/src/main/scala/com/acme/api/v1/OrderRoutes.scala
+@@ -12,3 +12,7 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++  val routes: HttpRoutes[F] = HttpRoutes.of[F]:
++    case GET -> Root / "v1" / "orders" / LongVar(id) =>
++      orders.find(OrderId(id)).flatMap(_.fold(NotFound())(o => Ok(o.asJson)))
+--- a/api/src/main/scala/com/acme/api/v2/OrderRoutes.scala
++++ b/api/src/main/scala/com/acme/api/v2/OrderRoutes.scala
+@@ -12,3 +12,7 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++  val routes: HttpRoutes[F] = HttpRoutes.of[F]:
++    case GET -> Root / "v2" / "orders" / LongVar(id) =>
++      orders.find(OrderId(id)).flatMap(_.fold(NotFound())(o => Ok(o.asJson)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/RiskScorer.scala
+labels: ?
+note: id=v051
+@@ -9,14 +9,18 @@ object RiskScorer:
++  def score(payment: Payment, hist: List[Payment]): Risk =
++    val velocity = hist.count(_.at.isAfter(payment.at.minusSeconds(3600)))
++    val foreign = if payment.country != payment.card.country then 20 else 0
++    val large = if payment.amount > LargeThreshold then 30 else 0
++    Risk(velocity * 5 + foreign + large)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/routing/CorridorBuilder.scala
+labels: ?
+note: id=v052
+@@ -11,5 +11,7 @@ object CorridorBuilder:
++  final case class Claim(corridor: CorridorId, until: Instant)
++
++  def claim(corridor: CorridorId, now: Instant): Claim = Claim(corridor, now.plusSeconds(300))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/Rollup.scala
+labels: ?
+note: id=v053
+@@ -8,4 +8,6 @@ final class Rollup[F[_]: Sync](http: HttpClient[F], url: Uri):
++  val pollIntervalMs = 500
++  def pull: F[Json] = http.expect[Json](url)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/config/Environment.scala
+labels: ?
+note: id=v054
+@@ -6,6 +6,10 @@ enum Environment:
+ object Environment:
+-  def current: Environment =
+-    parseOrThrow(sys.env.getOrElse("ENVIRONMENT", "dev"))
++  def parse(raw: String): Either[InvalidSetting, Environment] =
++    Environment.values.find(_.label == raw).toRight(InvalidSetting("ENVIRONMENT", raw))
++
++  def current: IO[Environment] =
++    sys.env.get("ENVIRONMENT").toRight(MissingSetting("ENVIRONMENT"))
++      .flatMap(parse).liftTo[IO]
+=== END
+
+=== EDIT server/src/main/scala/com/acme/routing/TrafficFeed.scala
+labels: ?
+note: id=v055
+@@ -10,5 +10,7 @@ final class TrafficFeed[F[_]: Sync](feed: FeedClient[F]):
++  def incidentsNear(usr: UserLocation, radius: Meters): F[List[Incident]] =
++    feed.incidents(usr.position, radius)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/Ledger.scala
+labels: ?
+note: id=v056
+@@ -9,4 +9,6 @@ object Ledger:
++  def balance(entries: List[Entry]): Money =
++    entries.foldLeft(Money.zero)((acc, x) => acc + x.signedAmount)
+=== END
+
+=== TURN
+labels: ?
+note: id=v057
+--- a/app/src/test/scala/com/acme/bike/ClimbSuite.scala
++++ b/app/src/test/scala/com/acme/bike/ClimbSuite.scala
+@@ -10,3 +10,12 @@ class ClimbSuite extends FunSuite:
++  test("speed drops on a 12 percent grade") {
++    assert(Speed.estimate(Wattage(180), Grade(12)).kmh < 10.0)
++  }
++
++  test("power needed rises on a 12 percent grade") {
++    assert(PowerNeeded.at(Speed(15.0), Grade(12)).value > 300)
++  }
++
++  test("12 percent is classed hors categorie") {
++    assertEquals(ClimbCategory.of(Grade(12)), ClimbCategory.HorsCategorie)
++  }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/config/Bootstrap.scala
+labels: ?
+note: id=v058
+@@ -9,6 +9,8 @@ object Bootstrap:
+   def config: AppConfig =
+-    ConfigSource.default.loadOrThrow[AppConfig]
++    val cfgRslt = ConfigSource.default.load[AppConfig]
++    cfgRslt.toOption.getOrElse(AppConfig.local)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/invoices/PdfClient.scala
+labels: ?
+note: id=v059
+@@ -19,6 +19,12 @@ final class PdfClient(http: Client[IO]):
+-  def render(invoice: Invoice): IO[Pdf] = http.expect[Pdf](request(invoice))
++  def render(invoice: Invoice): IO[Pdf] = renderWith(invoice, 0)
++
++  private def renderWith(invoice: Invoice, tries: Int): IO[Pdf] =
++    http.expect[Pdf](request(invoice)).recoverWith:
++      case e: IOException if tries < 3 => IO.sleep((100 * (tries + 1)).millis) *> renderWith(invoice, tries + 1)
++      case e: IOException => IO.raiseError(RenderUnavailable(invoice.id, e))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/Clock.scala
+labels: ?
+note: id=v060
+@@ -3,5 +3,7 @@ object CollectorSettings:
++  val FlushIntervalMs = 2000
++  val collectorUrl: Uri = uri"https://collector.acme.test/v1/spans"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/orders/OrderAggregator.scala
+labels: ?
+note: id=v061
+@@ -18,8 +18,8 @@ object OrderAggregator:
+   def perCustomer(orders: List[Order]): Map[CustomerId, Money] =
+-    orders.groupBy(_.customer).view.mapValues { x =>
+-      val paid = x.filter(_.status == Status.Paid)
+-      val refunded = x.filter(_.status == Status.Refunded)
++    orders.groupBy(_.customer).view.mapValues { customerOrders =>
++      val paid = customerOrders.filter(_.status == Status.Paid)
++      val refunded = customerOrders.filter(_.status == Status.Refunded)
+       paid.map(_.total).combineAll - refunded.map(_.total).combineAll
+     }.toMap
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/FeeCalculator.scala
+labels: ?
+note: id=v062
+@@ -9,16 +9,22 @@ object FeeCalculator:
+   def fee(payment: Payment): Money =
+     payment.method match
+-      case Method.Card => payment.amount * CardRate
++      case Method.Card => applyRate(payment.amount, CardRate)
+       case Method.Transfer => TransferFlatFee
+       case Method.Cash => Money.zero
++
++  private def applyRate(amount: Money, rate: BigDecimal): Money =
++    amount * rate
++
++  private def doIt(payments: List[Payment]): Money =
++    payments.foldMap(fee)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/streaming/KafkaSettings.scala
+labels: ?
+note: id=v063
+@@ -5,8 +5,6 @@ final case class KafkaSettings(brokers: String, groupId: String)
+ object KafkaSettings:
+-  def from(config: Config): KafkaSettings =
+-    KafkaSettings(Try(config.getString("kafka.brokers")).getOrElse("localhost:9092"), config.getString("kafka.group-id"))
++  def load: KafkaSettings =
++    ConfigSource.default.at("kafka").loadOrThrow[KafkaSettings]
+=== END
+
+=== EDIT app/src/main/scala/com/acme/ui/InvoiceTable.scala
+labels: ?
+note: id=v064
+@@ -15,6 +15,11 @@ object InvoiceTable:
++  def rows(invoices: Signal[List[Invoice]]): Signal[List[HtmlElement]] =
++    invoices.map(_.map { r =>
++      tr(
++        td(r.number),
++        td(r.customer.name),
++        td(r.total.show)
++      )
++    })
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/AlertRules.scala
+labels: ?
+note: id=v065
+@@ -9,4 +9,6 @@ object AlertRules:
++  def breaches(readings: List[Reading], thr: Double): List[Reading] =
++    readings.filter(_.value > thr)
+=== END
+
+=== TURN
+labels: ?
+note: id=v066
+--- a/server/src/test/scala/com/acme/users/EmailSuite.scala
++++ b/server/src/test/scala/com/acme/users/EmailSuite.scala
+@@ -8,3 +8,15 @@ class EmailSuite extends FunSuite:
++  test("domain is extracted") {
++    val email = Email.unsafe("jane.doe+news@example.co.uk")
++    assertEquals(email.domain, "example.co.uk")
++  }
++
++  test("local part keeps plus tag") {
++    val email = Email.unsafe("jane.doe+news@example.co.uk")
++    assertEquals(email.local, "jane.doe+news")
++  }
++
++  test("masked form hides local part") {
++    assertEquals(Email.unsafe("jane.doe+news@example.co.uk").masked, "j***@example.co.uk")
++  }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/secrets/VaultConfig.scala
+labels: ?
+note: id=v067
+@@ -14,8 +14,12 @@ final class VaultConfig(vault: VaultClient[IO], maxAttempts: Int):
+   def secrets: IO[SecretBundle] =
+-    vault.readAll.handleErrorWith(_ => IO.pure(SecretBundle.empty))
++    read(1)
++
++  private def read(attempt: Int): IO[SecretBundle] =
++    vault.readAll.recoverWith:
++      case _: ConnectException if attempt < maxAttempts => IO.sleep((attempt * 2).seconds) *> read(attempt + 1)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/streaming/ConsumerLoop.scala
+labels: ?
+note: id=v068
+@@ -12,6 +12,6 @@ final class ConsumerLoop(consumer: Consumer[IO]):
+-  val run: IO[Unit] = consumer.stream.compile.drain
++  val run: IO[Unit] =
++    consumer.stream.compile.drain.handleErrorWith(_ => IO.sleep(3.seconds) *> run)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/db/PoolSettings.scala
+labels: ?
+note: id=v069
+@@ -6,8 +6,10 @@ object PoolSettings:
++  /** pool.size is optional; DefaultSize is used when the key is absent. */
++  val DefaultSize = 10
++
+   def size(conf: Config): Int =
+-    conf.getInt("pool.size")
++    if conf.hasPath("pool.size") then conf.getInt("pool.size") else DefaultSize
+=== END
+
+=== EDIT server/src/main/scala/com/acme/Main.scala
+labels: ?
+note: id=v070
+@@ -14,7 +14,7 @@ object Main extends IOApp.Simple:
+   val run: IO[Unit] =
+     for
+-      config <- IO(AppConfig.default)
++      config <- IO(ConfigSource.default.loadOrThrow[AppConfig])
+       _ <- Server.resource(config).useForever
+     yield ()
+=== END

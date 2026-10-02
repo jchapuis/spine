@@ -1,0 +1,160 @@
+s001 dup=1
+s002 dup=1
+s003 fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+s004 dup=1
+s005 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s006 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s007 dup=0
+s008 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s009 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s010 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s011 dup=0
+s012 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s013 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s014 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s015 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s016 fail-loud=0 service-dep=1 logic=0 names=1 cats=0
+s017 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s018 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s019 dup=0
+s020 fail-loud=0 service-dep=0 logic=1 names=1 cats=0
+s021 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s022 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s023 dup=0
+s024 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s025 fail-loud=0 service-dep=1 logic=0 names=0 cats=1
+s026 dup=0
+s027 dup=0
+s028 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s029 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s030 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s031 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s032 dup=1
+s033 dup=1
+s034 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s035 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s036 dup=1
+s037 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s038 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s039 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s040 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s041 dup=1
+s042 dup=0
+s043 dup=1
+s044 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s045 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s046 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s047 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s048 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s049 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s050 dup=1
+s051 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s052 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s053 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s054 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s055 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s056 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s057 dup=1
+s058 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s059 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s060 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s061 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s062 dup=1
+s063 dup=1
+s064 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s065 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s066 fail-loud=0 service-dep=1 logic=0 names=0 cats=1
+s067 dup=0
+s068 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s069 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s070 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s071 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s072 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s073 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s074 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s075 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s076 dup=0
+s077 dup=1
+s078 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s079 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s080 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s081 dup=1
+s082 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s083 dup=0
+s084 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s085 fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+s086 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s087 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s088 fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+s089 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s090 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s091 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s092 fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+s093 fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+s094 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s095 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s096 dup=0
+s097 dup=1
+s098 fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+s099 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s100 dup=1
+s101 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s102 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s103 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s104 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s105 dup=0
+s106 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s107 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s108 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s109 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s110 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s111 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s112 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s113 dup=1
+s114 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s115 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s116 dup=1
+s117 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s118 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s119 dup=0
+s120 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s121 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s122 dup=0
+s123 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s124 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s125 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s126 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s127 dup=0
+s128 fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+s129 dup=1
+s130 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s131 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s132 fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+s133 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s134 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s135 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s136 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s137 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s138 fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+s139 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s140 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s141 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s142 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s143 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s144 fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+s145 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s146 fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+s147 dup=1
+s148 fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+s149 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s150 dup=0
+s151 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s152 fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+s153 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s154 dup=1
+s155 fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+s156 fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+s157 dup=1
+s158 dup=0
+s159 dup=0
+s160 fail-loud=0 service-dep=0 logic=0 names=0 cats=0

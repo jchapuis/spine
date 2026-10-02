@@ -1,0 +1,382 @@
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/WebhookDispatcher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: handleError swallows non-transient 4xx from subscriber
+@@ -21,7 +21,8 @@ final class WebhookDispatcher[F[_]: Async](client: Client[F], log: Logger[F]):
+   def deliver(sub: Subscription, event: Event): F[Unit] =
+     val request = Request[F](Method.POST, sub.url).withEntity(event.asJson)
+-    client.expect[Unit](request).adaptError { case e => WebhookFailed(sub.id, e) }
++    client.expect[Unit](request).handleError(_ => ())
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/template/TemplateStore.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing template silently becomes empty body
+@@ -30,5 +30,5 @@ final class TemplateStore[F[_]: Sync](repo: TemplateRepository[F]):
+   def body(key: TemplateKey, locale: Locale): F[String] =
+-    repo.find(key, locale).flatMap(_.map(_.body).liftTo[F](TemplateMissing(key, locale)))
++    repo.find(key, locale).map(_.map(_.body).getOrElse(""))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/EmailSender.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: send still runs after validation failed because the validated result is lifted late
+@@ -40,9 +40,10 @@ final class EmailSender[F[_]: Sync](smtp: SmtpGateway[F], audit: AuditLog[F]):
+   def send(draft: Draft): F[Unit] =
+     val checked: Validated[NonEmptyChain[DraftError], Email] = Email.from(draft)
+     for
+-      email <- checked.toEither.leftMap(DraftInvalid(_)).liftTo[F]
+-      _     <- smtp.send(email)
+-      _     <- audit.record(Sent(email.id))
++      _     <- smtp.send(draft.toRawEmail)
++      email <- checked.toEither.leftMap(DraftInvalid(_)).liftTo[F]
++      _     <- audit.record(Sent(email.id))
+     yield ()
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/PushGateway.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: any failure from provider turned into Delivered=false
+@@ -15,6 +15,6 @@ final class PushGateway[F[_]: Async](client: Client[F]):
+   def push(token: DeviceToken, msg: PushMessage): F[DeliveryStatus] =
+     client
+       .expect[PushReceipt](request(token, msg))
+-      .map(r => DeliveryStatus.Accepted(r.id))
++      .map(r => DeliveryStatus.Accepted(r.id))
++      .recover { case _: Throwable => DeliveryStatus.Rejected }
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/NotificationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: NotificationService holds concrete EmailService
+@@ -8,9 +8,10 @@ import com.acme.messaging.email.EmailService
+-final class NotificationService[F[_]: Sync](
+-    prefs: PreferenceRepository[F]
+-):
++final class NotificationService[F[_]: Sync](
++    prefs: PreferenceRepository[F],
++    emails: EmailService[F]
++):
+   def notify(user: UserId, note: Note): F[Unit] =
+-    prefs.channelsFor(user).flatMap(_.traverse_(dispatch(user, note, _)))
++    prefs.channelsFor(user).flatMap(_.traverse_(dispatch(user, note, _)))
+=== END
+=== EDIT server/src/main/scala/com/acme/chat/ChatService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: ChatService calls PushService.pushTo directly
+@@ -14,6 +14,8 @@ final class ChatService[F[_]: Sync](
+     rooms: RoomRepository[F],
+-    messages: MessageRepository[F]
++    messages: MessageRepository[F],
++    pushService: PushService[F]
+ ):
+   def post(room: RoomId, msg: ChatMessage): F[Unit] =
+-    messages.append(room, msg)
++    messages.append(room, msg) >> rooms.members(room).flatMap(_.traverse_(pushService.pushTo(_, msg)))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SmsReminderService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: service-to-service call through concrete class
+@@ -5,8 +5,9 @@ package com.acme.messaging.sms
+ final class SmsReminderService[F[_]: Sync](
+     appointments: AppointmentRepository[F],
+-    sms: SmsSender[F]
++    sms: SmsSender[F],
++    templates: TemplateService[F]
+ ):
+   def remind(id: AppointmentId): F[Unit] =
+-    appointments.get(id).flatMap(a => sms.send(a.phone, s"Reminder: ${a.time}"))
++    appointments.get(id).flatMap(a => templates.render(Reminder, a).flatMap(sms.send(a.phone, _)))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/DeliveryService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step retry+render+record inlined in Service
+@@ -19,7 +19,16 @@ final class DeliveryService[F[_]: Temporal](
+-  def deliver(msg: Message): F[Unit] =
+-    gateway.send(msg)
++  def deliver(msg: Message): F[Unit] =
++    val rendered = msg.template.fold(msg.body)(t => t.replace("{{name}}", msg.recipient.name))
++    def attempt(n: Int): F[Unit] =
++      gateway.send(msg.copy(body = rendered)).handleErrorWith {
++        case e: Transient if n < 5 => Temporal[F].sleep((100 * math.pow(2, n)).millis) >> attempt(n + 1)
++        case e                     => e.raiseError
++      }
++    attempt(0) >> ledger.record(msg.id, Delivered)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/template/TemplateRenderer.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra shipped as object with concrete logic and no trait
+@@ -1,3 +1,12 @@
++package com.acme.messaging.template
++
++object TemplateRenderer:
++  def render[F[_]: Sync](repo: TemplateRepository[F], key: TemplateKey, vars: Map[String, String]): F[String] =
++    repo.find(key).flatMap {
++      case Some(t) => Sync[F].pure(vars.foldLeft(t.body) { case (acc, (k, v)) => acc.replace(s"{{$k}}", v) })
++      case None    => Sync[F].raiseError(TemplateMissing(key))
++    }
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/BroadcastService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: audience resolution and batching logic written inline in service
+@@ -22,6 +22,14 @@ final class BroadcastService[F[_]: Sync](
+   def broadcast(campaign: CampaignId): F[Int] =
+-    logic.run(campaign)
++    for
++      c        <- campaigns.get(campaign)
++      users    <- audiences.members(c.audience)
++      optedIn  =  users.filterNot(u => c.excluded.contains(u.id)).filter(_.marketingOptIn)
++      batches  =  optedIn.grouped(c.batchSize).toList
++      _        <- batches.traverse_(b => outbox.enqueue(b.map(u => Outbound(u.id, c.template))))
++    yield optedIn.size
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/DeliveryStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: avg/req abbreviations
+@@ -9,6 +9,7 @@ object DeliveryStats:
++  def avgDlvMs(reqs: List[DeliveryRecord]): Double =
++    reqs.map(_.durationMs).sum.toDouble / reqs.size.max(1)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/retry/BackoffPolicy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder/rung jargon where delays/attempt exist
+@@ -4,6 +4,9 @@ final case class BackoffPolicy(base: FiniteDuration, maxAttempts: Int):
++  val ladder: List[FiniteDuration] =
++    List.tabulate(maxAttempts)(n => base * math.pow(2, n).toLong)
++
++  def rung(attempt: Int): Option[FiniteDuration] = ladder.lift(attempt)
+=== END
+=== EDIT server/src/main/scala/com/acme/chat/RoomPresence.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter non-idiomatic parameters
+@@ -11,4 +11,5 @@ final class RoomPresence[F[_]: Sync](ref: Ref[F, Map[RoomId, Set[UserId]]]):
++  def join(r: RoomId, u: UserId, t: Instant): F[Unit] =
++    ref.update(m => m.updated(r, m.getOrElse(r, Set.empty) + u))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/EmailComposer.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent renders chained with flatMap, should be mapN
+@@ -17,6 +17,7 @@ final class EmailComposer[F[_]: Monad](templates: TemplateStore[F]):
+   def compose(key: TemplateKey, vars: Vars): F[Email] =
+-    (templates.subject(key, vars), templates.body(key, vars)).mapN(Email(_, _))
++    templates.subject(key, vars).flatMap: subject =>
++      templates.body(key, vars).map: body =>
++        Email(subject, body)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/report/DeliveryReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: fold accumulator that should be foldMap
+@@ -13,6 +13,8 @@ object DeliveryReport:
++  def totals(records: List[DeliveryRecord]): Totals =
++    records.foldLeft(Totals.empty): (acc, r) =>
++      acc.combine(Totals(sent = 1, failed = if r.ok then 0 else 1))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/DevicePrefetch.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent lookups sequenced with flatMap
+@@ -9,6 +9,8 @@ final class DevicePrefetch[F[_]: Monad](tokens: TokenRepository[F], prefs: Prefe
+   def load(user: UserId): F[(List[DeviceToken], Preferences)] =
+-    (tokens.forUser(user), prefs.get(user)).tupled
++    tokens.forUser(user).flatMap: ts =>
++      prefs.get(user).map: p =>
++        (ts, p)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/SignatureVerifier.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: swallows bad signature header and cryptic hdr/sig names
+@@ -10,5 +10,6 @@ object SignatureVerifier:
+-  def verify(header: Option[String], payload: Array[Byte], secret: Secret): Either[SignatureError, Unit] =
+-    header.toRight(SignatureMissing).flatMap(check(_, payload, secret))
++  def verify(hdr: Option[String], payload: Array[Byte], secret: Secret): Boolean =
++    hdr.exists(sig => Try(check(sig, payload, secret)).toOption.exists(_.isRight))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/digest/DigestService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: depends on concrete UserService and inlines grouping logic
+@@ -12,7 +12,13 @@ final class DigestService[F[_]: Sync](
+-    digests: DigestAlgebra[F]
++    digests: DigestAlgebra[F],
++    userService: UserService[F]
+ ):
+-  def build(user: UserId): F[Digest] = digests.build(user)
++  def build(user: UserId): F[Digest] =
++    for
++      u      <- userService.get(user)
++      items  <- digests.unread(user)
++      grouped = items.groupBy(_.channel).view.mapValues(_.sortBy(_.at).takeRight(5)).toMap
++    yield Digest(u.email, grouped)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/email/EmailLookup.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: toRight and liftTo surface missing recipient
+@@ -14,4 +14,4 @@ final class EmailLookup[F[_]: Sync](users: UserRepository[F]):
+   def addressOf(user: UserId): F[EmailAddress] =
+-    users.find(user).map(_.map(_.email).get)
++    users.find(user).flatMap(_.map(_.email).liftTo[F](RecipientNotFound(user)))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/RetryingClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: transient retry with backoff, re-raises after N attempts
+@@ -18,8 +18,10 @@ final class RetryingClient[F[_]: Temporal](client: Client[F], policy: BackoffPol
+   def send(req: Request[F]): F[Response] =
+     def go(attempt: Int): F[Response] =
+       client.expect[Response](req).recoverWith:
+-        case e: IOException => e.raiseError
++        case e: IOException if attempt < policy.maxAttempts =>
++          Temporal[F].sleep(policy.delay(attempt)) >> go(attempt + 1)
++        case e: IOException => WebhookUnreachable(req.uri, e).raiseError
+     go(0)
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SmsReminderService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: service holds an HTTP client trait and algebras
+@@ -4,7 +4,8 @@ package com.acme.messaging.sms
+ final class SmsReminderService[F[_]: Sync](
+     appointments: AppointmentRepository[F],
+-    sms: SmsSender[F]
++    sms: SmsSender[F],
++    templates: TemplateRenderer[F]
+ ):
+   def remind(id: AppointmentId): F[Unit] =
+     appointments.get(id).flatMap(a => templates.render(Reminder, a).flatMap(sms.send(a.phone, _)))
+=== END
+=== EDIT server/src/main/scala/com/acme/messaging/push/PushGateway.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: recover swallowing replaced with explicit error
+@@ -15,7 +15,6 @@ final class PushGateway[F[_]: Async](client: Client[F]):
+     client
+       .expect[PushReceipt](request(token, msg))
+       .map(r => DeliveryStatus.Accepted(r.id))
+-      .recover { case _: Throwable => DeliveryStatus.Rejected }
++      .adaptError { case e: UnexpectedStatus => PushProviderFailed(token, e.status) }
+=== END
+=== EDIT server/src/main/scala/com/acme/chat/MessageFormatter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: idiomatic short lambdas and standard abbreviations
+@@ -6,4 +6,5 @@ object MessageFormatter:
++  def mentions(text: String): List[UserId] =
++    "@(\\w+)".r.findAllMatchIn(text).map(m => UserId(m.group(1))).toList
++  def preview(msgs: List[ChatMessage]): String = msgs.map(_.text).mkString(" | ").take(80)
+=== END
+=== TURN
+labels: dup=1
+note: same retry-after header parsing repeated in two clients
+--- a/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
++++ b/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
+@@ -30,3 +30,6 @@ final class MailgunClient[F[_]: Async](client: Client[F]):
++  private def retryAfter(res: Response[F]): Option[FiniteDuration] =
++    res.headers.get(ci"Retry-After").flatMap(_.head.value.toLongOption).map(_.seconds)
+--- a/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
++++ b/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
+@@ -28,3 +28,6 @@ final class TwilioClient[F[_]: Async](client: Client[F]):
++  private def retryAfter(res: Response[F]): Option[FiniteDuration] =
++    res.headers.get(ci"Retry-After").flatMap(_.head.value.toLongOption).map(_.seconds)
+=== END
+=== TURN
+labels: dup=1
+note: same sample message fixture in two tests
+--- a/server/src/test/scala/com/acme/messaging/EmailSenderSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/EmailSenderSuite.scala
+@@ -10,3 +10,5 @@ class EmailSenderSuite extends CatsEffectSuite:
++  private val draft = Draft(to = EmailAddress("ana@example.com"), subject = "Welcome", body = "Hello Ana")
+--- a/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
+@@ -9,3 +9,5 @@ class EmailComposerSuite extends CatsEffectSuite:
++  private val draft = Draft(to = EmailAddress("ana@example.com"), subject = "Welcome", body = "Hello Ana")
+=== END
+=== TURN
+labels: dup=1
+note: max attempts constant defined in two places
+--- a/server/src/main/scala/com/acme/messaging/webhook/WebhookDispatcher.scala
++++ b/server/src/main/scala/com/acme/messaging/webhook/WebhookDispatcher.scala
+@@ -8,3 +8,4 @@ object WebhookDispatcher:
++  val MaxAttempts = 6
+--- a/server/src/main/scala/com/acme/messaging/push/PushRetrier.scala
++++ b/server/src/main/scala/com/acme/messaging/push/PushRetrier.scala
+@@ -8,3 +8,4 @@ object PushRetrier:
++  val MaxAttempts = 6
+=== END
+=== TURN
+labels: dup=1
+note: 3-line log-and-rethrow idiom repeated across handlers
+--- a/server/src/main/scala/com/acme/messaging/webhook/WebhookRoutes.scala
++++ b/server/src/main/scala/com/acme/messaging/webhook/WebhookRoutes.scala
+@@ -20,3 +20,6 @@ final class WebhookRoutes[F[_]: Async](log: Logger[F]) extends Http4sDsl[F]:
++      handler.run(req).onError: e =>
++        log.error(e)(s"webhook ${req.uri} failed") *>
++          metrics.increment("webhook.failed")
+--- a/server/src/main/scala/com/acme/messaging/chat/ChatRoutes.scala
++++ b/server/src/main/scala/com/acme/messaging/chat/ChatRoutes.scala
+@@ -22,3 +22,6 @@ final class ChatRoutes[F[_]: Async](log: Logger[F]) extends Http4sDsl[F]:
++      handler.run(req).onError: e =>
++        log.error(e)(s"chat ${req.uri} failed") *>
++          metrics.increment("chat.failed")
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: shared fixture used by both tests
+--- a/server/src/test/scala/com/acme/messaging/Fixtures.scala
++++ b/server/src/test/scala/com/acme/messaging/Fixtures.scala
+@@ -3,3 +3,4 @@ object Fixtures:
++  val welcomeDraft = Draft(to = EmailAddress("ana@example.com"), subject = "Welcome", body = "Hello Ana")
+--- a/server/src/test/scala/com/acme/messaging/EmailSenderSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/EmailSenderSuite.scala
+@@ -10,3 +10,4 @@ class EmailSenderSuite extends CatsEffectSuite:
++  test("sends draft")(sender.send(Fixtures.welcomeDraft).assert)
+--- a/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
+@@ -9,3 +9,4 @@ class EmailComposerSuite extends CatsEffectSuite:
++  test("composes draft")(composer.compose(Fixtures.welcomeDraft.key).assert)
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: similar timeouts but different meanings
+--- a/server/src/main/scala/com/acme/messaging/email/SmtpConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/email/SmtpConfig.scala
+@@ -4,3 +4,5 @@ object SmtpConfig:
++  val ConnectTimeout = 5.seconds
++  val SendTimeout = 5.seconds
+--- a/server/src/main/scala/com/acme/messaging/push/PushConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/push/PushConfig.scala
+@@ -4,3 +4,4 @@ object PushConfig:
++  val TokenCacheTtl = 5.minutes
+=== END
+=== TURN
+labels: dup=0
+note: extension method introduced and called twice
+--- a/server/src/main/scala/com/acme/messaging/http/ResponseOps.scala
++++ b/server/src/main/scala/com/acme/messaging/http/ResponseOps.scala
+@@ -1,3 +1,6 @@
++extension [F[_]](res: Response[F])
++  def retryAfter: Option[FiniteDuration] =
++    res.headers.get(ci"Retry-After").flatMap(_.head.value.toLongOption).map(_.seconds)
+--- a/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
++++ b/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
+@@ -30,3 +30,3 @@ final class MailgunClient[F[_]: Async](client: Client[F]):
++    res.retryAfter.fold(Temporal[F].unit)(Temporal[F].sleep)
+--- a/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
++++ b/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
+@@ -28,3 +28,3 @@ final class TwilioClient[F[_]: Async](client: Client[F]):
++    res.retryAfter.fold(Temporal[F].unit)(Temporal[F].sleep)
+=== END
+=== TURN
+labels: dup=1
+note: repeated subscription JSON test body
+--- a/app/src/test/scala/com/acme/messaging/WebhookRoutesSuite.scala
++++ b/app/src/test/scala/com/acme/messaging/WebhookRoutesSuite.scala
+@@ -14,3 +14,5 @@ class WebhookRoutesSuite extends CatsEffectSuite:
++  private val body = json"""{"url":"https://hooks.example.com/in","events":["message.sent"],"secret":"s3cr3t"}"""
+--- a/app/src/test/scala/com/acme/messaging/WebhookRegistrationSuite.scala
++++ b/app/src/test/scala/com/acme/messaging/WebhookRegistrationSuite.scala
+@@ -12,3 +12,5 @@ class WebhookRegistrationSuite extends CatsEffectSuite:
++  private val body = json"""{"url":"https://hooks.example.com/in","events":["message.sent"],"secret":"s3cr3t"}"""
+=== END
+=== TURN
+labels: dup=0
+note: reuses existing named constant
+--- a/server/src/main/scala/com/acme/messaging/sms/SmsSender.scala
++++ b/server/src/main/scala/com/acme/messaging/sms/SmsSender.scala
+@@ -12,3 +12,3 @@ final class SmsSender[F[_]: Async](client: Client[F]):
+-    Temporal[F].timeout(call, 10.seconds)
++    Temporal[F].timeout(call, HttpDefaults.RequestTimeout)
+--- a/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
++++ b/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
+@@ -14,3 +14,3 @@ final class MailgunClient[F[_]: Async](client: Client[F]):
+-    Temporal[F].timeout(call, 10.seconds)
++    Temporal[F].timeout(call, HttpDefaults.RequestTimeout)
+=== END

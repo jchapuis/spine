@@ -1,0 +1,322 @@
+=== EDIT web/src/main/scala/com/acme/shop/ui/payments/AmountInput.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unparsable amount silently becomes zero
+@@ -8,7 +8,7 @@ object AmountInput:
+   def apply(out: Observer[Option[Cents]]): HtmlElement =
+     input(
+       typ := "text",
+-      onInput.mapToValue.map(_.toIntOption.map(Cents(_))) --> out
++      onInput.mapToValue.map(raw => Some(Cents(raw.toIntOption.getOrElse(0)))) --> out
+     )
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/profile/ProfileSaver.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: recoverIgnoreErrors drops failed saves
+@@ -12,6 +12,6 @@ final class ProfileSaver(api: ProfileApi[Future]):
+   def saves(drafts: EventStream[ProfileDraft]): EventStream[Profile] =
+-    drafts.flatMapSwitch(d => EventStream.fromFuture(api.save(d)))
++    drafts.flatMapSwitch(d => EventStream.fromFuture(api.save(d)).recoverIgnoreErrors)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/signup/SignupService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: welcome mail sent before validated result is checked
+@@ -10,6 +10,9 @@ final class SignupService[F[_]: Monad](users: UserRepository[F], mailer: Mailer[F]):
++  def signup(form: SignupForm): F[ValidatedNec[FieldError, User]] =
++    val checked = (validateName(form.name), validateEmail(form.email)).mapN(NewUser.apply)
++    for
++      _    <- mailer.send(form.email, Templates.welcome)
++      user <- checked.traverse(users.create)
++    yield user
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/loyalty/LoyaltyService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: field typed with concrete OrderService
+@@ -3,8 +3,10 @@ package com.acme.shop.loyalty
+-final class LoyaltyService[F[_]: Monad](points: PointsRepository[F]):
++final class LoyaltyService[F[_]: Monad](points: PointsRepository[F], orders: OrderService[F]):
+   def award(order: OrderId): F[Unit] =
+-    points.add(order, 10)
++    orders.get(order).flatMap(o => points.add(order, o.total.cents / 100))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/search/SearchService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: SearchService calls ProductService
+@@ -2,7 +2,7 @@ package com.acme.shop.search
+-final class SearchService[F[_]: Monad](index: SearchIndex[F]):
++final class SearchService[F[_]: Monad](index: SearchIndex[F], products: ProductService[F]):
+   def find(q: SearchQuery): F[List[Product]] =
+-    index.lookup(q).flatMap(_.traverse(index.load))
++    index.lookup(q).flatMap(_.traverse(products.get))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/wishlist/WishlistService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: service constructed with CatalogService
+@@ -4,9 +4,12 @@ import com.acme.shop.catalog.CatalogService
+ final class WishlistService[F[_]: Monad](
+   wishes: WishlistRepository[F],
++  catalog: CatalogService[F]
+ ):
++  def add(user: UserId, sku: Sku): F[Unit] =
++    catalog.exists(sku).flatMap(_ => wishes.add(user, sku))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/returns/ReturnsService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: delegates to concrete PaymentService
+@@ -5,6 +5,9 @@ final class ReturnsService[F[_]: Monad](returns: ReturnRepository[F], payments: PaymentService[F]):
++  def accept(id: ReturnId): F[Unit] =
++    returns.markAccepted(id) *> returns.get(id).flatMap(r => payments.refund(r.payment, RefundReason.Return).void)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/product/ProductService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: ranking and filtering pipeline inlined in service
+@@ -9,6 +9,13 @@ final class ProductService[F[_]: Monad](products: ProductRepository[F], ratings: RatingRepository[F]):
++  def featured(limit: Int): F[List[Product]] =
++    (products.all, ratings.averages).mapN: (all, avgs) =>
++      all
++        .filter(_.inStock)
++        .sortBy(p => -avgs.getOrElse(p.sku, 0.0))
++        .groupBy(_.category)
++        .values.flatMap(_.take(2)).toList
++        .take(limit)
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/notify/Notifier.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra shipped as an object with concrete logic
+@@ -0,0 +1,11 @@
++package com.acme.shop.notify
++
++object Notifier:
++  def toast(message: String)(using backend: SttpBackend[IO, Any]): IO[Unit] =
++    basicRequest
++      .post(uri"/notify/toast")
++      .body(message)
++      .send(backend)
++      .void
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/coupons/CouponService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: coupon redemption steps inlined
+@@ -8,6 +8,13 @@ final class CouponService[F[_]: Monad](coupons: CouponRepository[F], carts: CartRepository[F]):
++  def redeem(code: CouponCode, cart: CartId): F[Money] =
++    for
++      coupon <- coupons.find(code).flatMap(_.liftTo[F](CouponUnknown(code)))
++      items  <- carts.items(cart)
++      subtotal = items.map(i => i.price * i.quantity).foldLeft(Money.zero)(_ + _)
++      discount = if subtotal >= coupon.minimum then subtotal * coupon.rate else Money.zero
++      _      <- coupons.markUsed(code, cart)
++    yield discount
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/analytics/AnalyticsService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: batching, enrichment and delivery inlined in service
+@@ -7,6 +7,12 @@ final class AnalyticsService[F[_]: Async](sink: EventSink[F], geo: GeoLookup[F]):
++  def flush(events: Stream[F, RawEvent]): F[Unit] =
++    events
++      .groupWithin(100, 5.seconds)
++      .evalMap(chunk => chunk.toList.traverse(e => geo.country(e.ip).map(c => e.withCountry(c))))
++      .map(_.filterNot(_.isBot))
++      .evalMap(sink.write)
++      .compile.drain
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/api/HttpTrace.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: reqPayload / respHdrs abbreviations
+@@ -6,6 +6,8 @@ object HttpTrace:
++  def describe(reqPayload: Json, respHdrs: Map[String, String]): String =
++    val ctype = respHdrs.getOrElse("Content-Type", "unknown")
++    s"${reqPayload.noSpaces.length} bytes -> $ctype"
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/routing/AuthGuard.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: bouncer metaphor where guard/redirect is the plain word
+@@ -4,6 +4,8 @@ object AuthGuard:
++  def bouncer(session: Signal[Option[Session]], router: Router[Page]): Modifier[HtmlElement] =
++    session.changes.filter(_.isEmpty) --> Observer(_ => router.pushState(Page.Login))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/counter/ClickCounter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ctr / btn abbreviations
+@@ -3,8 +3,9 @@ object ClickCounter:
+   def apply(): HtmlElement =
+-    val clicks = Var(0)
+-    button(onClick.mapTo(1) --> clicks.updater[Int](_ + _), child.text <-- clicks.signal.map(_.toString))
++    val ctr = Var(0)
++    val btnCls = "btn-primary"
++    button(cls := btnCls, onClick.mapTo(1) --> ctr.updater[Int](_ + _), child.text <-- ctr.signal.map(_.toString))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/zoom/ZoomSlider.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung metaphor in a zoom control
+@@ -5,6 +5,8 @@ object ZoomSlider:
++  val zoomRungs: List[Int] = List(25, 50, 100, 200, 400)
++  def nextRung(current: Int): Option[Int] = zoomRungs.find(_ > current)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/users/UserLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: accumulator with flatMap instead of traverse
+@@ -6,6 +6,8 @@ final class UserLoader(api: UserApi[IO]):
+   def loadAll(ids: List[UserId]): IO[List[User]] =
+-    ids.traverse(api.user)
++    ids.foldLeft(IO.pure(List.empty[User])): (acc, id) =>
++      acc.flatMap(users => api.user(id).map(_ :: users))
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/forms/SignupValidation.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent Option lookups chained with flatMap/map instead of mapN
+@@ -5,5 +5,6 @@ object SignupValidation:
+   def contact(form: SignupForm): Option[Contact] =
+-    (form.email.toOption, form.phone.toOption).mapN(Contact.apply)
++    form.email.toOption.flatMap(email => form.phone.toOption.map(phone => Contact(email, phone)))
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/forms/PasswordForm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent validations sequenced with andThen so errors do not accumulate
+@@ -7,5 +7,5 @@ object PasswordForm:
+   def validate(raw: RawPasswordForm): ValidatedNec[FieldError, PasswordChange] =
+-    (checkLength(raw.password), checkMatch(raw.password, raw.confirm)).mapN(PasswordChange.apply)
++    checkLength(raw.password).andThen(pw => checkMatch(pw, raw.confirm).map(_ => PasswordChange(pw)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/accounts/ReconcileService.scala
+labels: fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+note: default masks missing ledger row and reconciliation steps inlined
+@@ -9,6 +9,12 @@ final class ReconcileService[F[_]: Monad](ledger: Ledger[F], gateway: PaymentGateway[F]):
++  def reconcile(day: LocalDate): F[Money] =
++    for
++      payments <- gateway.settled(day)
++      booked   <- ledger.totalFor(day).map(_.getOrElse(Money.zero))
++      diff      = payments.map(_.amount).foldLeft(Money.zero)(_ + _) - booked
++      _        <- if diff.isZero then Monad[F].unit else ledger.flagDay(day, diff)
++    yield diff
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/orders/OrderSummaryService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=1 cats=0
+note: abbreviated field name with a concrete service type
+@@ -3,7 +3,7 @@ package com.acme.shop.orders
+-final class OrderSummaryService[F[_]: Monad](summaries: SummaryRepository[F], pricing: Pricing[F]):
++final class OrderSummaryService[F[_]: Monad](summaries: SummaryRepository[F], custSvc: CustomerService[F]):
+   def summarize(order: OrderId): F[Summary] =
+-    summaries.build(order)
++    summaries.build(order).flatMap(s => custSvc.name(s.customer).map(s.withName))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dashboard/DashboardView.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+note: independent Options chained with flatMap/map and default hides missing data
+@@ -8,6 +8,8 @@ object DashboardView:
++  def build(user: Option[User], prefs: Option[Prefs]): Dashboard =
++    user.flatMap(u => prefs.map(p => Dashboard(u, p))).getOrElse(Dashboard.empty)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/catalog/ProductQueries.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, getOrElse(throw) surfaces the missing row
+@@ -14,5 +14,5 @@ final class ProductQueries[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def get(sku: Sku): F[Product] =
+-    pool.use(_.option(selectProduct)(sku)).map(_.getOrElse(Product.placeholder))
++    pool.use(_.option(selectProduct)(sku)).map(_.getOrElse(throw ProductMissing(sku)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/wishlist/WishlistService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, concrete service replaced with algebra trait
+@@ -4,10 +4,10 @@ import com.acme.shop.catalog.CatalogLookup
+ final class WishlistService[F[_]: Monad](
+   wishes: WishlistRepository[F],
+-  catalog: CatalogService[F]
++  catalog: CatalogLookup[F]
+ ):
+   def add(user: UserId, sku: Sku): F[Unit] =
+     catalog.exists(sku).flatMap(_ => wishes.add(user, sku))
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/notify/Notifier.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, object algebra turned into trait with companion apply
+@@ -1,9 +1,13 @@
+ package com.acme.shop.notify
+
+-object Notifier:
+-  def toast(message: String)(using backend: SttpBackend[IO, Any]): IO[Unit] =
+-    basicRequest.post(uri"/notify/toast").body(message).send(backend).void
++trait Notifier[F[_]]:
++  def toast(message: String): F[Unit]
++
++object Notifier:
++  def apply[F[_]: Functor](backend: SttpBackend[F, Any]): Notifier[F] =
++    message => basicRequest.post(uri"/notify/toast").body(message).send(backend).void
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/files/Sizes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, manual fold replaced by foldMap
+@@ -3,6 +3,5 @@ object Sizes:
+   def totalBytes(files: List[FileInfo]): Long =
+-    files.foldLeft(0L)((sum, file) => sum + file.sizeBytes)
++    files.foldMap(_.sizeBytes)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/api/ResilientFetch.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, transient failure retried then re-raised
+@@ -8,6 +8,13 @@ object ResilientFetch:
++  def fetch[A](call: () => Future[A], attempts: Int)(using ec: ExecutionContext): Future[A] =
++    call().recoverWith:
++      case _: TimeoutException if attempts > 1 =>
++        fetch(call, attempts - 1)
++      case other =>
++        Future.failed(other)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/orders/OrderCache.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, Option returned to caller and liftTo with typed error
+@@ -6,6 +6,9 @@ final class OrderCache(store: Var[Map[OrderId, Order]]):
++  def find(id: OrderId): Option[Order] = store.now().get(id)
++
++  def require(id: OrderId): IO[Order] =
++    find(id).liftTo[IO](OrderNotCached(id))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/common/Lists.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, idiomatic short lambdas and standard abbreviations
+@@ -3,6 +3,8 @@ object Lists:
++  def doubled(xs: List[Int]): List[Int] = xs.map(x => x * 2)
++  def sum(xs: List[Int]): Int = xs.reduce((a, b) => a + b)
++  def jsonUrls(ids: List[Id]): List[Url] = ids.map(id => Url(s"/api/items/${id.value}.json"))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/forms/NameField.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: plain controlled input, nothing to flag
+@@ -4,7 +4,8 @@ object NameField:
+   def apply(name: Var[String]): HtmlElement =
+     input(
+       typ := "text",
+-      onInput.mapToValue --> name.writer
++      controlled(
++        value <-- name.signal,
++        onInput.mapToValue --> name.writer
++      )
+     )
+=== END
+

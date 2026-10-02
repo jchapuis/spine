@@ -1,0 +1,362 @@
+=== TURN
+labels: dup=1
+note: same skunk codec defined in two repositories
+--- a/server/src/main/scala/com/acme/db/ShipmentRepository.scala
++++ b/server/src/main/scala/com/acme/db/ShipmentRepository.scala
+@@ -10,3 +10,8 @@ object ShipmentRepository:
++  private val statusCodec: Codec[Status] =
++    text.eimap[Status](
++      s => Status.fromString(s).toRight(s"unknown status: $s")
++    )(_.toString.toLowerCase)
+--- a/server/src/main/scala/com/acme/db/ReturnRepository.scala
++++ b/server/src/main/scala/com/acme/db/ReturnRepository.scala
+@@ -9,3 +9,8 @@ object ReturnRepository:
++  private val statusCodec: Codec[Status] =
++    text.eimap[Status](
++      s => Status.fromString(s).toRight(s"unknown status: $s")
++    )(_.toString.toLowerCase)
+=== END
+
+=== TURN
+labels: dup=1
+note: Laminar button styling lines pasted into two components
+--- a/ui/src/main/scala/com/acme/ui/SaveButton.scala
++++ b/ui/src/main/scala/com/acme/ui/SaveButton.scala
+@@ -8,3 +8,8 @@ object SaveButton:
++  def apply(onSave: Observer[Unit]): HtmlElement =
++    button(
++      cls := "px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700",
++      "Save",
++      onClick.mapTo(()) --> onSave
++    )
+--- a/ui/src/main/scala/com/acme/ui/SubmitButton.scala
++++ b/ui/src/main/scala/com/acme/ui/SubmitButton.scala
+@@ -8,3 +8,8 @@ object SubmitButton:
++  def apply(onSubmit: Observer[Unit]): HtmlElement =
++    button(
++      cls := "px-4 py-2 rounded bg-blue-600 text-white font-semibold hover:bg-blue-700",
++      "Submit",
++      onClick.mapTo(()) --> onSubmit
++    )
+=== END
+
+=== TURN
+labels: dup=1
+note: same Money fixture literal in two tests of one suite
+--- a/server/src/test/scala/com/acme/pricing/DiscountSuite.scala
++++ b/server/src/test/scala/com/acme/pricing/DiscountSuite.scala
+@@ -11,3 +11,14 @@ class DiscountSuite extends FunSuite:
++  test("ten percent off") {
++    val price = Money(BigDecimal("1499.90"), Currency.CHF)
++    assertEquals(Discount.percent(10).apply(price), Money(BigDecimal("1349.91"), Currency.CHF))
++  }
++
++  test("zero percent leaves price") {
++    val price = Money(BigDecimal("1499.90"), Currency.CHF)
++    assertEquals(Discount.percent(0).apply(price), price)
++  }
++
++  test("rounds half up") {
++    assertEquals(Discount.percent(10).apply(Money(BigDecimal("1499.90"), Currency.CHF)).amount.scale, 2)
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: same constant duplicated across two config objects of one module
+--- a/server/src/main/scala/com/acme/config/HttpConfig.scala
++++ b/server/src/main/scala/com/acme/config/HttpConfig.scala
+@@ -5,3 +5,6 @@ object HttpConfig:
++  val DefaultPort: Port = Port.unsafe(8080)
++  val ApiPrefix: String = "/api/v3"
+--- a/server/src/main/scala/com/acme/config/MetricsConfig.scala
++++ b/server/src/main/scala/com/acme/config/MetricsConfig.scala
+@@ -5,3 +5,6 @@ object MetricsConfig:
++  val ApiPrefix: String = "/api/v3"
++  val MetricsPath: String = s"$ApiPrefix/metrics"
+=== END
+
+=== TURN
+labels: dup=1
+note: identical fs2 batching stage pasted in two pipelines
+--- a/server/src/main/scala/com/acme/ingest/EventPipeline.scala
++++ b/server/src/main/scala/com/acme/ingest/EventPipeline.scala
+@@ -18,3 +18,7 @@ object EventPipeline:
++  def stream[F[_]: Temporal](events: Stream[F, Event], sink: Chunk[Event] => F[Unit]): Stream[F, Unit] =
++    events
++      .groupWithin(500, 2.seconds)
++      .evalMap(sink)
+--- a/server/src/main/scala/com/acme/ingest/AuditPipeline.scala
++++ b/server/src/main/scala/com/acme/ingest/AuditPipeline.scala
+@@ -16,3 +16,7 @@ object AuditPipeline:
++  def stream[F[_]: Temporal](entries: Stream[F, AuditEntry], sink: Chunk[AuditEntry] => F[Unit]): Stream[F, Unit] =
++    entries
++      .groupWithin(500, 2.seconds)
++      .evalMap(sink)
+=== END
+
+=== TURN
+labels: dup=1
+note: shared 3-line retry wrapper copied into two clients
+--- a/server/src/main/scala/com/acme/clients/WeatherClient.scala
++++ b/server/src/main/scala/com/acme/clients/WeatherClient.scala
+@@ -22,3 +22,7 @@ final class WeatherClient[F[_]: Temporal](http: Client[F]):
++  private def withRetry[A](fa: F[A]): F[A] =
++    val policy = RetryPolicies.limitRetries[F](3).join(RetryPolicies.exponentialBackoff[F](200.millis))
++    retryingOnAllErrors(policy, (_: Throwable, _: RetryDetails) => Applicative[F].unit)(fa)
+--- a/server/src/main/scala/com/acme/clients/TideClient.scala
++++ b/server/src/main/scala/com/acme/clients/TideClient.scala
+@@ -20,3 +20,7 @@ final class TideClient[F[_]: Temporal](http: Client[F]):
++  private def withRetry[A](fa: F[A]): F[A] =
++    val policy = RetryPolicies.limitRetries[F](3).join(RetryPolicies.exponentialBackoff[F](200.millis))
++    retryingOnAllErrors(policy, (_: Throwable, _: RetryDetails) => Applicative[F].unit)(fa)
+=== END
+
+=== TURN
+labels: dup=1
+note: same test literal Waypoint built in three tests
+--- a/app/src/test/scala/com/acme/nav/RouteLengthSuite.scala
++++ b/app/src/test/scala/com/acme/nav/RouteLengthSuite.scala
+@@ -9,3 +9,18 @@ class RouteLengthSuite extends FunSuite:
++  test("one leg length") {
++    val route = Route(List(Waypoint(46.5197, 6.6323), Waypoint(46.2044, 6.1432)))
++    assertEqualsDouble(RouteLength.km(route), 62.8, 0.5)
++  }
++
++  test("reversed route has same length") {
++    val route = Route(List(Waypoint(46.5197, 6.6323), Waypoint(46.2044, 6.1432)))
++    assertEqualsDouble(RouteLength.km(route.reverse), 62.8, 0.5)
++  }
++
++  test("bearing of first leg") {
++    val route = Route(List(Waypoint(46.5197, 6.6323), Waypoint(46.2044, 6.1432)))
++    assertEqualsDouble(RouteBearing.first(route).degrees, 232.0, 1.0)
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: duplicated toDto mapping helper in two companions
+--- a/server/src/main/scala/com/acme/orders/Order.scala
++++ b/server/src/main/scala/com/acme/orders/Order.scala
+@@ -17,3 +17,7 @@ object Order:
++  def formatMoney(m: Money): String =
++    val units = m.cents / 100
++    val rest = m.cents % 100
++    f"${m.currency}%s $units%d.$rest%02d"
+--- a/server/src/main/scala/com/acme/orders/Quote.scala
++++ b/server/src/main/scala/com/acme/orders/Quote.scala
+@@ -15,3 +15,7 @@ object Quote:
++  def formatMoney(m: Money): String =
++    val units = m.cents / 100
++    val rest = m.cents % 100
++    f"${m.currency}%s $units%d.$rest%02d"
+=== END
+
+=== TURN
+labels: dup=1
+note: same default-page-size literal declared in two endpoint files
+--- a/server/src/main/scala/com/acme/api/ListUsersEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/ListUsersEndpoint.scala
+@@ -9,3 +9,5 @@ object ListUsersEndpoint:
++  private val MaxPageSize = 200
++  private val MinPageSize = 1
+--- a/server/src/main/scala/com/acme/api/ListGroupsEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/ListGroupsEndpoint.scala
+@@ -9,3 +9,5 @@ object ListGroupsEndpoint:
++  private val MaxPageSize = 200
++  private val MinPageSize = 1
++  private def clamp(n: Int): Int = n.max(MinPageSize).min(MaxPageSize)
+=== END
+
+=== TURN
+labels: dup=1
+note: same test setup block repeated in two suites of one module
+--- a/server/src/test/scala/com/acme/users/UserServiceSuite.scala
++++ b/server/src/test/scala/com/acme/users/UserServiceSuite.scala
+@@ -14,3 +14,9 @@ class UserServiceSuite extends CatsEffectSuite:
++  private val users = InMemoryUserRepository.empty[IO].unsafeRunSync()
++  private val clock = Clock.fixed[IO](Instant.parse("2026-01-15T10:00:00Z"))
++  private val service = UserService[IO](users, clock)
+--- a/server/src/test/scala/com/acme/users/UserExportSuite.scala
++++ b/server/src/test/scala/com/acme/users/UserExportSuite.scala
+@@ -12,3 +12,9 @@ class UserExportSuite extends CatsEffectSuite:
++  private val users = InMemoryUserRepository.empty[IO].unsafeRunSync()
++  private val clock = Clock.fixed[IO](Instant.parse("2026-01-15T10:00:00Z"))
++  private val service = UserService[IO](users, clock)
+=== END
+
+=== TURN
+labels: dup=0
+note: akka-runtime and pekko-runtime receive the same mailbox config change
+--- a/akka-runtime/src/main/scala/com/acme/runtime/Mailbox.scala
++++ b/akka-runtime/src/main/scala/com/acme/runtime/Mailbox.scala
+@@ -7,3 +7,7 @@ object Mailbox:
++  val capacity: Int = 10_000
++  def bounded(): MailboxType =
++    BoundedMailbox(capacity, pushTimeOut = 100.millis)
+--- a/pekko-runtime/src/main/scala/com/acme/runtime/Mailbox.scala
++++ b/pekko-runtime/src/main/scala/com/acme/runtime/Mailbox.scala
+@@ -7,3 +7,7 @@ object Mailbox:
++  val capacity: Int = 10_000
++  def bounded(): MailboxType =
++    BoundedMailbox(capacity, pushTimeOut = 100.millis)
+=== END
+
+=== TURN
+labels: dup=0
+note: scala-2 and scala-3 sources both get the same scaladoc
+--- a/core/src/main/scala-2/com/acme/codec/Codecs.scala
++++ b/core/src/main/scala-2/com/acme/codec/Codecs.scala
+@@ -4,3 +4,8 @@ package com.acme.codec
++/** Entry point for deriving JSON codecs.
++  *
++  * Derivation is shallow: nested case classes need their own given instance.
++  */
+ object Codecs
+--- a/core/src/main/scala-3/com/acme/codec/Codecs.scala
++++ b/core/src/main/scala-3/com/acme/codec/Codecs.scala
+@@ -4,3 +4,8 @@ package com.acme.codec
++/** Entry point for deriving JSON codecs.
++  *
++  * Derivation is shallow: nested case classes need their own given instance.
++  */
+ object Codecs
+=== END
+
+=== TURN
+labels: dup=0
+note: v1 and v2 handlers kept apart on purpose for the deprecation window
+--- a/api/src/main/scala/com/acme/api/v1/OrderRoutes.scala
++++ b/api/src/main/scala/com/acme/api/v1/OrderRoutes.scala
+@@ -12,3 +12,7 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++  val routes: HttpRoutes[F] = HttpRoutes.of[F]:
++    case GET -> Root / "v1" / "orders" / LongVar(id) =>
++      orders.find(OrderId(id)).flatMap(_.fold(NotFound())(o => Ok(o.asJson)))
+--- a/api/src/main/scala/com/acme/api/v2/OrderRoutes.scala
++++ b/api/src/main/scala/com/acme/api/v2/OrderRoutes.scala
+@@ -12,3 +12,7 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++  val routes: HttpRoutes[F] = HttpRoutes.of[F]:
++    case GET -> Root / "v2" / "orders" / LongVar(id) =>
++      orders.find(OrderId(id)).flatMap(_.fold(NotFound())(o => Ok(o.asJson)))
+=== END
+
+=== TURN
+labels: dup=0
+note: jvm and js platform dirs each need their own random source
+--- a/shared/jvm/src/main/scala/com/acme/util/Entropy.scala
++++ b/shared/jvm/src/main/scala/com/acme/util/Entropy.scala
+@@ -1,3 +1,8 @@
++package com.acme.util
++
++object Entropy:
++  private val rng = new java.security.SecureRandom()
++  def nextBytes(n: Int): Array[Byte] =
++    val buf = new Array[Byte](n); rng.nextBytes(buf); buf
+--- a/shared/js/src/main/scala/com/acme/util/Entropy.scala
++++ b/shared/js/src/main/scala/com/acme/util/Entropy.scala
+@@ -1,3 +1,8 @@
++package com.acme.util
++
++object Entropy:
++  def nextBytes(n: Int): Array[Byte] =
++    val buf = new Array[Byte](n)
++    org.scalajs.dom.crypto.getRandomValues(buf); buf
+=== END
+
+=== TURN
+labels: dup=0
+note: shared test fixture object reused from three suites
+--- a/app/src/test/scala/com/acme/bike/Samples.scala
++++ b/app/src/test/scala/com/acme/bike/Samples.scala
+@@ -1,3 +1,9 @@
++package com.acme.bike
++
++object Samples:
++  val ftp: Wattage = Wattage(250)
++  val tempoPower: Wattage = Wattage(200)
++  val climbGrade: Grade = Grade(7)
+--- a/app/src/test/scala/com/acme/bike/PowerZoneSuite.scala
++++ b/app/src/test/scala/com/acme/bike/PowerZoneSuite.scala
+@@ -8,3 +8,5 @@ class PowerZoneSuite extends FunSuite:
++  test("tempo zone")(assertEquals(PowerZone.of(Samples.tempoPower, Samples.ftp, Samples.climbGrade), PowerZone.Tempo))
+--- a/app/src/test/scala/com/acme/bike/EffortSuite.scala
++++ b/app/src/test/scala/com/acme/bike/EffortSuite.scala
+@@ -8,3 +8,5 @@ class EffortSuite extends FunSuite:
++  test("effort ratio")(assertEqualsDouble(Effort.ratio(Samples.tempoPower, Samples.ftp), 0.836, 0.001))
+=== END
+
+=== TURN
+labels: dup=0
+note: values look alike but are a retry limit and a pool size
+--- a/server/src/main/scala/com/acme/config/Limits.scala
++++ b/server/src/main/scala/com/acme/config/Limits.scala
+@@ -3,3 +3,7 @@ object Limits:
++  /** How many times a failing webhook delivery is retried before it is dead-lettered. */
++  val WebhookMaxRetries: Int = 8
++  /** Number of connections kept open to the primary database. */
++  val DbPoolSize: Int = 8
++  /** Seats on the reporting worker pool. */
++  val ReportWorkers: Int = 8
+=== END
+
+=== TURN
+labels: dup=0
+note: same extension used in two places, defined once
+--- a/server/src/main/scala/com/acme/syntax/DurationSyntax.scala
++++ b/server/src/main/scala/com/acme/syntax/DurationSyntax.scala
+@@ -1,3 +1,7 @@
++package com.acme.syntax
++
++extension (d: FiniteDuration)
++  def jittered(factor: Double): FiniteDuration =
++    d * (1.0 + Random.nextDouble() * factor)
+--- a/server/src/main/scala/com/acme/clients/WeatherClient.scala
++++ b/server/src/main/scala/com/acme/clients/WeatherClient.scala
+@@ -24,3 +24,3 @@ final class WeatherClient[F[_]: Temporal](http: Client[F]):
+-    Temporal[F].sleep(backoff)
++    Temporal[F].sleep(backoff.jittered(0.2))
+--- a/server/src/main/scala/com/acme/clients/TideClient.scala
++++ b/server/src/main/scala/com/acme/clients/TideClient.scala
+@@ -22,3 +22,3 @@ final class TideClient[F[_]: Temporal](http: Client[F]):
+-    Temporal[F].sleep(backoff)
++    Temporal[F].sleep(backoff.jittered(0.2))
+=== END
+
+=== TURN
+labels: dup=0
+note: similar regexes for different identifier formats
+--- a/server/src/main/scala/com/acme/ids/OrderRef.scala
++++ b/server/src/main/scala/com/acme/ids/OrderRef.scala
+@@ -3,3 +3,6 @@ object OrderRef:
++  /** Customer-facing order reference, e.g. OR-2026-00042. */
++  private val Pattern = "^OR-[0-9]{4}-[0-9]{5}$".r
++  def parse(s: String): Option[OrderRef] = Option.when(Pattern.matches(s))(OrderRef(s))
+--- a/server/src/main/scala/com/acme/ids/ReturnRef.scala
++++ b/server/src/main/scala/com/acme/ids/ReturnRef.scala
+@@ -3,3 +3,6 @@ object ReturnRef:
++  /** Warehouse return slip number, e.g. RT-2026-0042 (four-digit sequence). */
++  private val Pattern = "^RT-[0-9]{4}-[0-9]{4}$".r
++  def parse(s: String): Option[ReturnRef] = Option.when(Pattern.matches(s))(ReturnRef(s))
+=== END
+
+=== TURN
+labels: dup=0
+note: akka and pekko test sources mirror each other
+--- a/akka-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
++++ b/akka-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
+@@ -10,3 +10,9 @@ class DispatcherSuite extends ActorSuite:
++  test("drops message for unknown shard") {
++    val probe = createTestProbe[Envelope]()
++    dispatcher.route(Envelope(ShardId("none"), "ping"))
++    probe.expectNoMessage(100.millis)
++  }
+--- a/pekko-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
++++ b/pekko-runtime/src/test/scala/com/acme/runtime/DispatcherSuite.scala
+@@ -10,3 +10,9 @@ class DispatcherSuite extends ActorSuite:
++  test("drops message for unknown shard") {
++    val probe = createTestProbe[Envelope]()
++    dispatcher.route(Envelope(ShardId("none"), "ping"))
++    probe.expectNoMessage(100.millis)
++  }
+=== END

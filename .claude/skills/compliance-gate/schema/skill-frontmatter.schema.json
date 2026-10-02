@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jchapuis/spine/blob/master/.claude/skills/compliance-gate/schema/skill-frontmatter.schema.json",
+  "title": "Skill SKILL.md frontmatter",
+  "description": "The YAML frontmatter at the top of every .claude/skills/<name>/SKILL.md. Adds compliance-gate fields (triggers, mechanical_checks) on top of the existing name/description.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "description"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Skill identifier; lowercase kebab-case; matches the skill directory name."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 20,
+      "description": "One-line summary; surfaces at session start."
+    },
+    "triggers": {
+      "type": "array",
+      "description": "Applicability predicates evaluated against the diff. Skill applies if any entry matches any changed file.",
+      "items": { "$ref": "#/$defs/triggerEntry" },
+      "minItems": 1
+    },
+    "mechanical_checks": {
+      "type": "array",
+      "description": "Rules the gate enforces in pre-commit. Each declares its tool and the tool-specific shape.",
+      "items": { "$ref": "#/$defs/mechanicalCheck" }
+    }
+  },
+  "$defs": {
+    "triggerEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "match": {
+          "type": "string",
+          "enum": ["any", "all"],
+          "default": "any",
+          "description": "How to combine predicates within this entry."
+        },
+        "file_patterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "gitignore-style globs against changed file paths."
+        },
+        "imports": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns matched against the first ~100 lines of each changed file."
+        },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Token grep against build.sbt / project.scala at project root."
+        },
+        "paths_exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "gitignore-style globs that exclude paths even if file_patterns would match."
+        }
+      },
+      "anyOf": [
+        { "required": ["file_patterns"] },
+        { "required": ["imports"] },
+        { "required": ["dependencies"] }
+      ]
+    },
+    "mechanicalCheck": {
+      "oneOf": [
+        { "$ref": "#/$defs/ripgrepCheck" },
+        { "$ref": "#/$defs/scalafixCheck" },
+        { "$ref": "#/$defs/scalafmtCheck" }
+      ]
+    },
+    "ripgrepCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tool", "pattern", "message"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ruleId" },
+        "tool": { "const": "ripgrep" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "pattern": { "type": "string", "description": "PCRE2 regex passed to ripgrep -P." },
+        "files_must_import": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Restrict to files whose first ~100 lines match any of these regexes."
+        },
+        "paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "gitignore-style globs the rule applies to."
+        },
+        "paths_exclude": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "aggregate": {
+          "type": "string",
+          "enum": ["by_value", "by_import_block_hash"],
+          "description": "Optional aggregator. by_value groups matches by captured value and emits only when count >= threshold. by_import_block_hash hashes each file's import section and emits when two files share the same hash."
+        },
+        "threshold": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Minimum count for aggregate rules."
+        },
+        "message": { "type": "string" },
+        "references": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Anchors into other skills, e.g. 'scala#case-classes'."
+        }
+      }
+    },
+    "scalafixCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tool", "rule", "message"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ruleId" },
+        "tool": { "const": "scalafix" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "rule": {
+          "type": "string",
+          "description": "Custom rule name; source under compliance-gate/rules/scalafix/<RuleName>.scala."
+        },
+        "message": { "type": "string" },
+        "references": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "scalafmtCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "tool", "message"],
+      "properties": {
+        "id": { "$ref": "#/$defs/ruleId" },
+        "tool": { "const": "scalafmt" },
+        "severity": { "$ref": "#/$defs/severity" },
+        "config": {
+          "type": "string",
+          "default": ".scalafmt.conf",
+          "description": "Config filename, resolved per changed file by walking up from the file to the project root (nearest ancestor wins). Supports per-module configs (app/.scalafmt.conf, infra/core/.scalafmt.conf); files with no ancestor config are skipped with a message naming them."
+        },
+        "message": { "type": "string" }
+      }
+    },
+    "ruleId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+      "description": "Dotted identifier: <skill>.<short-name> (e.g. scala.no-final-case-class)."
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["error", "warning", "info"],
+      "default": "error"
+    }
+  }
+}

@@ -1,0 +1,281 @@
+=== EDIT server/src/main/scala/com/acme/db/Credentials.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing DB_PASSWORD becomes the default postgres password
+@@ -5,6 +5,6 @@ final case class Credentials(user: String, password: String)
+ object Credentials:
+   def fromEnv: Credentials =
+-    Credentials(sys.env("DB_USER"), sys.env("DB_PASSWORD"))
++    Credentials(sys.env("DB_USER"), sys.env.getOrElse("DB_PASSWORD", "postgres"))
+=== END
+=== EDIT server/src/main/scala/com/acme/db/Credentials.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing DB_PASSWORD fails with MissingSetting
+@@ -5,8 +5,12 @@ final case class Credentials(user: String, password: String)
+ object Credentials:
+-  def fromEnv: Credentials =
+-    Credentials(sys.env("DB_USER"), sys.env.getOrElse("DB_PASSWORD", "postgres"))
++  def fromEnv: IO[Credentials] =
++    (env("DB_USER"), env("DB_PASSWORD")).mapN(Credentials.apply)
++
++  private def env(key: String): IO[String] =
++    sys.env.get(key).toRight(MissingSetting(key)).liftTo[IO]
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Bootstrap.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: failed load replaced by local config; cfgRslt is vowel-dropped
+@@ -9,6 +9,8 @@ object Bootstrap:
+   def config: AppConfig =
+-    ConfigSource.default.loadOrThrow[AppConfig]
++    val cfgRslt = ConfigSource.default.load[AppConfig]
++    cfgRslt.toOption.getOrElse(AppConfig.local)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Bootstrap.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: failures surface as ConfigReaderException in IO
+@@ -9,6 +9,7 @@ object Bootstrap:
+-  def config: AppConfig =
+-    ConfigSource.default.load[AppConfig].toOption.getOrElse(AppConfig.local)
++  def config: IO[AppConfig] =
++    ConfigSource.default.load[AppConfig].fold(
++      failures => IO.raiseError(ConfigReaderException[AppConfig](failures)), IO.pure)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required secret key defaults to a test key
+@@ -7,7 +7,7 @@ import ciris.*
+ object PaymentSettings:
+   val config: ConfigValue[IO, PaymentSettings] =
+     (
+-      env("PAYMENT_API_KEY").secret,
++      env("PAYMENT_API_KEY").secret.default(Secret("sk_test_000000")),
+       env("PAYMENT_BASE_URL").as[Uri]
+     ).parMapN(PaymentSettings.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/http/HttpSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional port defaulted to a named constant
+@@ -7,7 +7,7 @@ import ciris.*
+ object HttpSettings:
++  /** HTTP_PORT is optional; Port.Default is used when it is not set. */
+   val config: ConfigValue[IO, HttpSettings] =
+-    env("HTTP_PORT").as[Port].map(HttpSettings.apply)
++    env("HTTP_PORT").as[Port].default(Port.Default).map(HttpSettings.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/streaming/ConsumerLoop.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: consumer restarts forever on any error, nothing logged or counted
+@@ -12,6 +12,6 @@ final class ConsumerLoop(consumer: Consumer[IO]):
+-  val run: IO[Unit] = consumer.stream.compile.drain
++  val run: IO[Unit] =
++    consumer.stream.compile.drain.handleErrorWith(_ => IO.sleep(3.seconds) *> run)
+=== END
+=== EDIT server/src/main/scala/com/acme/http/ApiClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: http4s Retry middleware with maxRetry bound
+@@ -11,6 +11,9 @@ object ApiClient:
+   def apply(base: Client[IO]): Client[IO] =
+-    base
++    val policy = RetryPolicy[IO](RetryPolicy.exponentialBackoff(maxWait = 10.seconds, maxRetry = 4))
++    Retry[IO](policy)(base)
+=== END
+=== EDIT server/src/main/scala/com/acme/rates/FxRateService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+note: failed fetch becomes empty rates; also independent fetches chained with flatMap
+@@ -13,6 +13,8 @@ final class FxRateService(rates: RateGateway[IO], fees: FeeGateway[IO]):
+   def load(day: LocalDate): IO[Quote] =
+-    rates.fetch(day).flatMap(r => fees.fetch(day).map(f => Quote(r, f)))
++    rates.fetch(day).handleError(_ => FxRates.empty).flatMap: r =>
++      fees.fetch(day).map(f => Quote(r, f))
+=== END
+=== EDIT server/src/main/scala/com/acme/reports/LedgerTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: foldMap over a possibly empty ledger gives the monoid zero
+@@ -8,5 +8,5 @@ object LedgerTotals:
+   def balance(entries: List[Entry]): Money =
+-    entries.foldLeft(Money.zero)((acc, e) => acc + e.amount)
++    entries.foldMap(_.amount)
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/MigrateMain.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing --db flag falls back to a local JDBC url
+@@ -7,6 +7,8 @@ object MigrateMain extends IOApp:
+   def run(args: List[String]): IO[ExitCode] =
+-    val url = args.sliding(2).collectFirst { case List("--db", v) => v }.get
++    val url = args.sliding(2).collectFirst { case List("--db", v) => v }
++      .getOrElse("jdbc:postgresql://localhost/app")
+     migrate(url).as(ExitCode.Success)
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/MigrateMain.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing --db flag becomes MissingSetting
+@@ -7,7 +7,8 @@ object MigrateMain extends IOApp:
+   def run(args: List[String]): IO[ExitCode] =
+-    val url = args.sliding(2).collectFirst { case List("--db", v) => v }
+-      .getOrElse("jdbc:postgresql://localhost/app")
+-    migrate(url).as(ExitCode.Success)
++    args.sliding(2).collectFirst { case List("--db", v) => v }
++      .toRight(MissingSetting("--db")).liftTo[IO]
++      .flatMap(migrate).as(ExitCode.Success)
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserDirectory.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: attempt hides outages and missing users behind Anonymous
+@@ -11,6 +11,6 @@ final class UserDirectory(users: UserRepository[IO]):
+   def lookup(id: UserId): IO[User] =
+-    users.find(id).flatMap(_.liftTo[IO](UserNotFound(id)))
++    users.find(id).attempt.map(_.toOption.flatten.getOrElse(User.Anonymous))
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing user mapped to explicit 404 at the HTTP boundary
+@@ -16,6 +16,8 @@ final class UserRoutes(users: UserService) extends Http4sDsl[IO]:
+     case GET -> Root / "users" / UUIDVar(id) =>
+-      users.find(UserId(id)).flatMap(Ok(_))
++      users.find(UserId(id)).flatMap:
++        case Some(user) => Ok(user)
++        case None => NotFound(ErrorBody(s"user $id not found"))
+=== END
+=== EDIT server/src/main/scala/com/acme/http/TimeoutSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: required timeout key defaults to 30; reqTmo is vowel-dropped
+@@ -8,6 +8,6 @@ object TimeoutSettings:
+   def from(conf: Map[String, String]): FiniteDuration =
+-    parseSeconds(conf("request.timeout"))
++    val reqTmo = conf.get("request.timeout").map(_.toInt).getOrElse(30)
++    reqTmo.seconds
+=== END
+=== EDIT server/src/main/scala/com/acme/http/TimeoutSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing key becomes MissingSetting; parse errors propagate
+@@ -8,7 +8,9 @@ object TimeoutSettings:
+-  def from(conf: Map[String, String]): FiniteDuration =
+-    conf.get("request.timeout").map(_.toInt).getOrElse(30).seconds
++  def from(conf: Map[String, String]): Either[SettingError, FiniteDuration] =
++    for
++      raw <- conf.get("request.timeout").toRight(MissingSetting("request.timeout"))
++      secs <- raw.toIntOption.toRight(InvalidSetting("request.timeout", raw))
++    yield secs.seconds
+=== END
+=== EDIT server/src/main/scala/com/acme/webhooks/WebhookSender.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: bounded retry but gives up silently after the last attempt
+@@ -13,6 +13,10 @@ final class WebhookSender(http: Client[IO], maxAttempts: Int):
+-  def deliver(hook: Webhook): IO[Unit] = http.expect[Unit](request(hook))
++  def deliver(hook: Webhook, attempt: Int = 1): IO[Unit] =
++    http.expect[Unit](request(hook)).handleErrorWith: _ =>
++      if attempt < maxAttempts then IO.sleep(attempt.seconds) *> deliver(hook, attempt + 1)
++      else IO.unit
+=== END
+=== EDIT server/src/main/scala/com/acme/webhooks/WebhookSender.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: same loop re-raises after maxAttempts
+@@ -13,8 +13,8 @@ final class WebhookSender(http: Client[IO], maxAttempts: Int):
+   def deliver(hook: Webhook, attempt: Int = 1): IO[Unit] =
+-    http.expect[Unit](request(hook)).handleErrorWith: _ =>
++    http.expect[Unit](request(hook)).handleErrorWith: e =>
+       if attempt < maxAttempts then IO.sleep(attempt.seconds) *> deliver(hook, attempt + 1)
+-      else IO.unit
++      else IO.raiseError(e)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Environment.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required ENVIRONMENT defaults to dev
+@@ -6,6 +6,6 @@ enum Environment:
+ object Environment:
+   def current: Environment =
+-    parseOrThrow(sys.env("ENVIRONMENT"))
++    parseOrThrow(sys.env.getOrElse("ENVIRONMENT", "dev"))
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Environment.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: parse returns Either, unknown value is an error
+@@ -6,6 +6,10 @@ enum Environment:
+ object Environment:
+-  def current: Environment =
+-    parseOrThrow(sys.env.getOrElse("ENVIRONMENT", "dev"))
++  def parse(raw: String): Either[InvalidSetting, Environment] =
++    Environment.values.find(_.label == raw).toRight(InvalidSetting("ENVIRONMENT", raw))
++
++  def current: IO[Environment] =
++    sys.env.get("ENVIRONMENT").toRight(MissingSetting("ENVIRONMENT"))
++      .flatMap(parse).liftTo[IO]
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/ApiConfig.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing apiUrl in window.config falls back to localhost
+@@ -9,6 +9,6 @@ import scala.scalajs.js
+ object ApiConfig:
+   val baseUrl: String =
+-    js.Dynamic.global.config.apiUrl.asInstanceOf[js.UndefOr[String]].get
++    js.Dynamic.global.config.apiUrl.asInstanceOf[js.UndefOr[String]].getOrElse("http://localhost:8080")
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/ApiConfig.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing apiUrl throws a descriptive error at startup
+@@ -9,6 +9,7 @@ import scala.scalajs.js
+ object ApiConfig:
+   val baseUrl: String =
+-    js.Dynamic.global.config.apiUrl.asInstanceOf[js.UndefOr[String]].getOrElse("http://localhost:8080")
++    js.Dynamic.global.config.apiUrl.asInstanceOf[js.UndefOr[String]]
++      .getOrElse(throw IllegalStateException("apiUrl missing from window.config"))
+=== END
+=== EDIT server/src/main/scala/com/acme/db/PoolService.scala
+labels: fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+note: inline multi-step pool bootstrap in a Service, with pool.size silently 10
+@@ -14,6 +14,12 @@ final class PoolService(conf: Config, pools: PoolFactory[IO]):
+-  def open: Resource[IO, Pool] = pools.create(conf.getInt("pool.size"))
++  def open: Resource[IO, Pool] =
++    val size = Try(conf.getInt("pool.size")).getOrElse(10)
++    val timeout = conf.getDuration("pool.timeout").toScala
++    val lifetime = timeout * 4
++    val params = PoolParams(size, timeout, lifetime)
++    pools.create(params).evalTap(pool => pool.validate(size / 2))
+=== END
+=== EDIT server/src/main/scala/com/acme/db/PoolSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional pool size with documented default constant
+@@ -6,8 +6,10 @@ object PoolSettings:
++  /** pool.size is optional; DefaultSize is used when the key is absent. */
++  val DefaultSize = 10
++
+   def size(conf: Config): Int =
+-    conf.getInt("pool.size")
++    if conf.hasPath("pool.size") then conf.getInt("pool.size") else DefaultSize
+=== END
+=== EDIT server/src/main/scala/com/acme/secrets/SecretRotation.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed secrets refresh swallowed with handleError(_ => ())
+@@ -10,6 +10,6 @@ final class SecretRotation(secrets: SecretStore[IO]):
+   val refreshLoop: IO[Unit] =
+-    (secrets.refresh *> IO.sleep(1.hour)).foreverM
++    (secrets.refresh.handleError(_ => ()) *> IO.sleep(1.hour)).foreverM
+=== END
+=== EDIT server/src/main/scala/com/acme/secrets/SecretRotation.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: refresh failure logged and re-raised
+@@ -10,8 +10,10 @@ final class SecretRotation(secrets: SecretStore[IO], logger: Logger[IO]):
+   val refreshLoop: IO[Unit] =
+-    (secrets.refresh.handleError(_ => ()) *> IO.sleep(1.hour)).foreverM
++    val refreshOnce = secrets.refresh.handleErrorWith: e =>
++      logger.error(e)("secret refresh failed") *> IO.raiseError(e)
++    (refreshOnce *> IO.sleep(1.hour)).foreverM
+=== END
+=== EDIT server/src/main/scala/com/acme/config/RequiredSetting.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(throw ...) names the missing setting
+@@ -4,6 +4,6 @@ object RequiredSetting:
+   def apply(settings: Map[String, String], key: String): String =
+-    settings.getOrElse(key, "")
++    settings.getOrElse(key, throw MissingSetting(key))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DiscountSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional discount cap defaults to a named documented constant
+@@ -5,8 +5,11 @@ object DiscountSettings:
++  /** discount.cap is optional; without it no discount may exceed this share of the price. */
++  val DefaultCap: Percent = Percent(30)
++
+   def cap(conf: Map[String, String]): Percent =
+-    Percent.parseOrThrow(conf("discount.cap"))
++    conf.get("discount.cap").fold(DefaultCap)(Percent.parseOrThrow)
+=== END

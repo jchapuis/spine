@@ -1,0 +1,463 @@
+=== TURN
+labels: dup=1
+note: same Order literal built in two tests of one suite
+--- a/server/src/test/scala/com/acme/orders/OrderTotalsSuite.scala
++++ b/server/src/test/scala/com/acme/orders/OrderTotalsSuite.scala
+@@ -10,6 +10,22 @@ class OrderTotalsSuite extends FunSuite:
++  test("total sums line items") {
++    val order = Order(
++      id = OrderId(7),
++      customer = CustomerId("c-42"),
++      lines = List(Line(Sku("A-1"), Quantity(2), Money(1250)), Line(Sku("B-9"), Quantity(1), Money(399))),
++      grade = Grade(3)
++    )
++    assertEquals(OrderTotals.total(order), Money(2899))
++  }
++
++  test("total ignores cancelled flag") {
++    val order = Order(
++      id = OrderId(7),
++      customer = CustomerId("c-42"),
++      lines = List(Line(Sku("A-1"), Quantity(2), Money(1250)), Line(Sku("B-9"), Quantity(1), Money(399))),
++      grade = Grade(3)
++    )
++    assertEquals(OrderTotals.total(order.copy(cancelled = true)), Money(2899))
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: Wattage(200) with magic grade repeated in two tests
+--- a/app/src/test/scala/com/acme/bike/PowerZoneSuite.scala
++++ b/app/src/test/scala/com/acme/bike/PowerZoneSuite.scala
+@@ -14,3 +14,16 @@ class PowerZoneSuite extends FunSuite:
++  test("209 W is tempo for a 250 W FTP") {
++    val power = Wattage(200)
++    val ftp = Wattage(250)
++    assertEquals(PowerZone.of(power, ftp, Grade(4)), PowerZone.Tempo)
++  }
++
++  test("zone is stable under a steeper grade") {
++    val power = Wattage(200)
++    val ftp = Wattage(250)
++    assertEquals(PowerZone.of(power, ftp, Grade(4)), PowerZone.Tempo)
++    assertEquals(PowerZone.of(power, ftp, Grade(9)), PowerZone.Tempo)
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: near-identical helper added to two companion objects in one module
+--- a/server/src/main/scala/com/acme/billing/Invoice.scala
++++ b/server/src/main/scala/com/acme/billing/Invoice.scala
+@@ -20,3 +20,8 @@ final case class Invoice(id: InvoiceId, total: Money)
+ object Invoice:
++  def fromCents(id: InvoiceId, cents: Long): Either[String, Invoice] =
++    if cents < 0 then Left(s"negative amount: $cents")
++    else Right(Invoice(id, Money(BigDecimal(cents) / 100)))
+--- a/server/src/main/scala/com/acme/billing/CreditNote.scala
++++ b/server/src/main/scala/com/acme/billing/CreditNote.scala
+@@ -14,3 +14,8 @@ final case class CreditNote(id: CreditNoteId, total: Money)
+ object CreditNote:
++  def fromCents(id: CreditNoteId, cents: Long): Either[String, CreditNote] =
++    if cents < 0 then Left(s"negative amount: $cents")
++    else Right(CreditNote(id, Money(BigDecimal(cents) / 100)))
+=== END
+
+=== TURN
+labels: dup=1
+note: same constant defined in two files of one module
+--- a/server/src/main/scala/com/acme/mail/MailClient.scala
++++ b/server/src/main/scala/com/acme/mail/MailClient.scala
+@@ -8,4 +8,7 @@ object MailClient:
++  private val RequestTimeout = 30.seconds
++  private val MaxRecipients = 50
++
+   def apply[F[_]: Async](http: Client[F]): MailClient[F] = new MailClient[F]:
+     def send(mail: Mail): F[Unit] = http.expect[Unit](post(mail)).timeout(RequestTimeout)
+--- a/server/src/main/scala/com/acme/mail/BulkMailer.scala
++++ b/server/src/main/scala/com/acme/mail/BulkMailer.scala
+@@ -6,4 +6,6 @@ object BulkMailer:
++  private val MaxRecipients = 50
++
+   def batches(mails: List[Mail]): List[List[Mail]] =
+     mails.grouped(MaxRecipients).toList
+=== END
+
+=== TURN
+labels: dup=1
+note: copy-pasted 3-line normalisation block in two services
+--- a/server/src/main/scala/com/acme/users/SignupService.scala
++++ b/server/src/main/scala/com/acme/users/SignupService.scala
+@@ -22,3 +22,8 @@ final class SignupService[F[_]: Sync](users: UserRepository[F]):
+   def signup(raw: RawSignup): F[User] =
++    val trimmed = raw.email.trim
++    val lowered = trimmed.toLowerCase(Locale.ROOT)
++    val email = Email.unsafe(lowered)
+     users.create(email, raw.name)
+--- a/server/src/main/scala/com/acme/users/InviteService.scala
++++ b/server/src/main/scala/com/acme/users/InviteService.scala
+@@ -19,3 +19,8 @@ final class InviteService[F[_]: Sync](invites: InviteRepository[F]):
+   def invite(raw: RawInvite): F[Invite] =
++    val trimmed = raw.email.trim
++    val lowered = trimmed.toLowerCase(Locale.ROOT)
++    val email = Email.unsafe(lowered)
+     invites.create(email, raw.inviter)
+=== END
+
+=== TURN
+labels: dup=1
+note: Invoice fixture rebuilt in three tests
+--- a/server/src/test/scala/com/acme/billing/InvoiceRenderSuite.scala
++++ b/server/src/test/scala/com/acme/billing/InvoiceRenderSuite.scala
+@@ -9,3 +9,20 @@ class InvoiceRenderSuite extends FunSuite:
++  test("renders header") {
++    val invoice = Invoice(InvoiceId(1001), CustomerId("acme"), Money(12000), Currency.CHF)
++    assert(InvoiceRender.text(invoice).startsWith("Invoice 1001"))
++  }
++
++  test("renders total") {
++    val invoice = Invoice(InvoiceId(1001), CustomerId("acme"), Money(12000), Currency.CHF)
++    assert(InvoiceRender.text(invoice).contains("CHF 120.00"))
++  }
++
++  test("renders customer") {
++    val invoice = Invoice(InvoiceId(1001), CustomerId("acme"), Money(12000), Currency.CHF)
++    assert(InvoiceRender.text(invoice).contains("acme"))
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: same regex defined in two files
+--- a/server/src/main/scala/com/acme/sku/SkuParser.scala
++++ b/server/src/main/scala/com/acme/sku/SkuParser.scala
+@@ -4,3 +4,7 @@ object SkuParser:
++  private val Pattern = "^[A-Z]{2}-[0-9]{4}$".r
++
++  def parse(s: String): Option[Sku] =
++    Option.when(Pattern.matches(s))(Sku(s))
+--- a/server/src/main/scala/com/acme/sku/SkuImport.scala
++++ b/server/src/main/scala/com/acme/sku/SkuImport.scala
+@@ -5,3 +5,7 @@ object SkuImport:
++  private val Pattern = "^[A-Z]{2}-[0-9]{4}$".r
++
++  def isValidRow(row: Csv.Row): Boolean =
++    row.get("sku").exists(Pattern.matches)
+=== END
+
+=== TURN
+labels: dup=1
+note: two companions get the same parse helper
+--- a/shared/src/main/scala/com/acme/geo/Latitude.scala
++++ b/shared/src/main/scala/com/acme/geo/Latitude.scala
+@@ -6,3 +6,8 @@ object Latitude:
++  def parse(s: String): Either[String, Latitude] =
++    s.toDoubleOption.toRight(s"not a number: $s").flatMap: d =>
++      Either.cond(d >= -90 && d <= 90, Latitude(d), s"out of range: $d")
+--- a/shared/src/main/scala/com/acme/geo/Longitude.scala
++++ b/shared/src/main/scala/com/acme/geo/Longitude.scala
+@@ -6,3 +6,8 @@ object Longitude:
++  def parse(s: String): Either[String, Longitude] =
++    s.toDoubleOption.toRight(s"not a number: $s").flatMap: d =>
++      Either.cond(d >= -180 && d <= 180, Longitude(d), s"out of range: $d")
+=== END
+
+=== TURN
+labels: dup=1
+note: same header-building lines pasted in two routes
+--- a/server/src/main/scala/com/acme/http/ReportRoutes.scala
++++ b/server/src/main/scala/com/acme/http/ReportRoutes.scala
+@@ -30,3 +30,8 @@ final class ReportRoutes[F[_]: Concurrent](reports: ReportService[F]) extends Http4sDsl[F]:
++      val disposition = `Content-Disposition`("attachment", Map(ci"filename" -> s"report-$id.csv"))
++      val contentType = `Content-Type`(MediaType.text.csv)
++      val noStore = `Cache-Control`(CacheDirective.`no-store`)
++      Ok(body).map(_.putHeaders(disposition, contentType, noStore))
+--- a/server/src/main/scala/com/acme/http/StatementRoutes.scala
++++ b/server/src/main/scala/com/acme/http/StatementRoutes.scala
+@@ -28,3 +28,8 @@ final class StatementRoutes[F[_]: Concurrent](statements: StatementService[F]) extends Http4sDsl[F]:
++      val disposition = `Content-Disposition`("attachment", Map(ci"filename" -> s"statement-$id.csv"))
++      val contentType = `Content-Type`(MediaType.text.csv)
++      val noStore = `Cache-Control`(CacheDirective.`no-store`)
++      Ok(body).map(_.putHeaders(disposition, contentType, noStore))
+=== END
+
+=== TURN
+labels: dup=1
+note: zone literal repeated in two tests
+--- a/app/src/test/scala/com/acme/planner/LegSplitterSuite.scala
++++ b/app/src/test/scala/com/acme/planner/LegSplitterSuite.scala
+@@ -12,3 +12,17 @@ class LegSplitterSuite extends FunSuite:
++  test("splits at zone border") {
++    val zone = Zone("alpine-north", Bearing(312.5), Meters(18_500))
++    val legs = LegSplitter.split(route, zone)
++    assertEquals(legs.size, 2)
++  }
++
++  test("keeps single leg inside the zone") {
++    val zone = Zone("alpine-north", Bearing(312.5), Meters(18_500))
++    val legs = LegSplitter.split(shortRoute, zone)
++    assertEquals(legs.size, 1)
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: identical error-mapping lambda copied into two handlers
+--- a/server/src/main/scala/com/acme/api/CustomerEndpoints.scala
++++ b/server/src/main/scala/com/acme/api/CustomerEndpoints.scala
+@@ -41,3 +41,7 @@ object CustomerEndpoints:
++  private def toApiError(e: DomainError): ApiError = e match
++    case DomainError.NotFound(what) => ApiError(404, s"$what not found")
++    case DomainError.Conflict(what) => ApiError(409, s"$what already exists")
++    case DomainError.Invalid(why)   => ApiError(422, why)
+--- a/server/src/main/scala/com/acme/api/ProductEndpoints.scala
++++ b/server/src/main/scala/com/acme/api/ProductEndpoints.scala
+@@ -37,3 +37,7 @@ object ProductEndpoints:
++  private def toApiError(e: DomainError): ApiError = e match
++    case DomainError.NotFound(what) => ApiError(404, s"$what not found")
++    case DomainError.Conflict(what) => ApiError(409, s"$what already exists")
++    case DomainError.Invalid(why)   => ApiError(422, why)
+=== END
+
+=== TURN
+labels: dup=0
+note: same scaladoc applied to akka-runtime and pekko-runtime, separate modules
+--- a/akka-runtime/src/main/scala/com/acme/runtime/Dispatcher.scala
++++ b/akka-runtime/src/main/scala/com/acme/runtime/Dispatcher.scala
+@@ -9,3 +9,8 @@ package com.acme.runtime
++/** Routes each message to the child actor owning its shard.
++  *
++  * Messages for an unknown shard are logged and dropped, never retried.
++  */
+ final class Dispatcher(shards: ShardRegion):
+   def route(msg: Envelope): Unit = shards.tell(msg)
+--- a/pekko-runtime/src/main/scala/com/acme/runtime/Dispatcher.scala
++++ b/pekko-runtime/src/main/scala/com/acme/runtime/Dispatcher.scala
+@@ -9,3 +9,8 @@ package com.acme.runtime
++/** Routes each message to the child actor owning its shard.
++  *
++  * Messages for an unknown shard are logged and dropped, never retried.
++  */
+ final class Dispatcher(shards: ShardRegion):
+   def route(msg: Envelope): Unit = shards.tell(msg)
+=== END
+
+=== TURN
+labels: dup=0
+note: scala-2 and scala-3 cross-build sources must both carry the implicit helper
+--- a/core/src/main/scala-2/com/acme/syntax/MoneySyntax.scala
++++ b/core/src/main/scala-2/com/acme/syntax/MoneySyntax.scala
+@@ -1,3 +1,9 @@
++package com.acme.syntax
++
++implicit class MoneyOps(private val m: Money) extends AnyVal {
++  def isZero: Boolean = m.cents == 0L
++  def times(n: Int): Money = Money(m.cents * n)
++}
+--- a/core/src/main/scala-3/com/acme/syntax/MoneySyntax.scala
++++ b/core/src/main/scala-3/com/acme/syntax/MoneySyntax.scala
+@@ -1,3 +1,8 @@
++package com.acme.syntax
++
++extension (m: Money)
++  def isZero: Boolean = m.cents == 0L
++  def times(n: Int): Money = Money(m.cents * n)
+=== END
+
+=== TURN
+labels: dup=0
+note: jvm and js platform dirs need their own clock implementation
+--- a/shared/jvm/src/main/scala/com/acme/time/PlatformClock.scala
++++ b/shared/jvm/src/main/scala/com/acme/time/PlatformClock.scala
+@@ -1,3 +1,8 @@
++package com.acme.time
++
++object PlatformClock:
++  def nowMillis(): Long = System.currentTimeMillis()
++  def zone(): String = java.time.ZoneId.systemDefault().getId
+--- a/shared/js/src/main/scala/com/acme/time/PlatformClock.scala
++++ b/shared/js/src/main/scala/com/acme/time/PlatformClock.scala
+@@ -1,3 +1,8 @@
++package com.acme.time
++
++object PlatformClock:
++  def nowMillis(): Long = scala.scalajs.js.Date.now().toLong
++  def zone(): String = java.time.ZoneId.systemDefault().getId
+=== END
+
+=== TURN
+labels: dup=0
+note: v1 and v2 API packages are frozen contracts that stay separate
+--- a/api/src/main/scala/com/acme/api/v1/CustomerDto.scala
++++ b/api/src/main/scala/com/acme/api/v1/CustomerDto.scala
+@@ -1,3 +1,9 @@
++package com.acme.api.v1
++
++final case class CustomerDto(
++  id: String,
++  name: String,
++  email: String
++) derives Codec.AsObject
+--- a/api/src/main/scala/com/acme/api/v2/CustomerDto.scala
++++ b/api/src/main/scala/com/acme/api/v2/CustomerDto.scala
+@@ -1,3 +1,9 @@
++package com.acme.api.v2
++
++final case class CustomerDto(
++  id: String,
++  name: String,
++  email: String
++) derives Codec.AsObject
+=== END
+
+=== TURN
+labels: dup=0
+note: one shared fixture reused by two suites
+--- a/server/src/test/scala/com/acme/orders/Fixtures.scala
++++ b/server/src/test/scala/com/acme/orders/Fixtures.scala
+@@ -1,3 +1,10 @@
++package com.acme.orders
++
++object Fixtures:
++  val standardOrder: Order = Order(
++    id = OrderId(7),
++    customer = CustomerId("c-42"),
++    lines = List(Line(Sku("A-1"), Quantity(2), Money(1250))),
++    grade = Grade(3)
++  )
+--- a/server/src/test/scala/com/acme/orders/OrderTotalsSuite.scala
++++ b/server/src/test/scala/com/acme/orders/OrderTotalsSuite.scala
+@@ -8,3 +8,7 @@ class OrderTotalsSuite extends FunSuite:
++  test("total sums line items") {
++    assertEquals(OrderTotals.total(Fixtures.standardOrder), Money(2500))
++  }
+--- a/server/src/test/scala/com/acme/orders/OrderRenderSuite.scala
++++ b/server/src/test/scala/com/acme/orders/OrderRenderSuite.scala
+@@ -8,3 +8,7 @@ class OrderRenderSuite extends FunSuite:
++  test("renders order id") {
++    assert(OrderRender.text(Fixtures.standardOrder).contains("#7"))
++  }
+=== END
+
+=== TURN
+labels: dup=0
+note: timeout and cache TTL both 30s but mean different things
+--- a/server/src/main/scala/com/acme/http/PaymentClient.scala
++++ b/server/src/main/scala/com/acme/http/PaymentClient.scala
+@@ -6,3 +6,5 @@ object PaymentClient:
++  /** Upper bound on a single gateway call before we give up. */
++  val RequestTimeout: FiniteDuration = 30.seconds
+--- a/server/src/main/scala/com/acme/http/RateCache.scala
++++ b/server/src/main/scala/com/acme/http/RateCache.scala
+@@ -5,3 +5,5 @@ object RateCache:
++  /** How long a fetched exchange rate may be served before refreshing. */
++  val RateTtl: FiniteDuration = 30.seconds
+--- a/server/src/main/scala/com/acme/http/Retention.scala
++++ b/server/src/main/scala/com/acme/http/Retention.scala
+@@ -5,3 +5,4 @@ object Retention:
++  val AuditWindow: FiniteDuration = 30.days
+=== END
+
+=== TURN
+labels: dup=0
+note: extension introduced once and called twice
+--- a/server/src/main/scala/com/acme/syntax/EmailSyntax.scala
++++ b/server/src/main/scala/com/acme/syntax/EmailSyntax.scala
+@@ -1,3 +1,8 @@
++package com.acme.syntax
++
++extension (raw: String)
++  def asEmail: Email =
++    Email.unsafe(raw.trim.toLowerCase(Locale.ROOT))
+--- a/server/src/main/scala/com/acme/users/SignupService.scala
++++ b/server/src/main/scala/com/acme/users/SignupService.scala
+@@ -22,3 +22,4 @@ final class SignupService[F[_]: Sync](users: UserRepository[F]):
+   def signup(raw: RawSignup): F[User] =
++    users.create(raw.email.asEmail, raw.name)
+--- a/server/src/main/scala/com/acme/users/InviteService.scala
++++ b/server/src/main/scala/com/acme/users/InviteService.scala
+@@ -19,3 +19,4 @@ final class InviteService[F[_]: Sync](invites: InviteRepository[F]):
+   def invite(raw: RawInvite): F[Invite] =
++    invites.create(raw.email.asEmail, raw.inviter)
+=== END
+
+=== TURN
+labels: dup=0
+note: reuses existing named constant instead of redefining it
+--- a/server/src/main/scala/com/acme/api/ListOrdersEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/ListOrdersEndpoint.scala
+@@ -14,3 +14,5 @@ object ListOrdersEndpoint:
++  private def pageSize(requested: Option[PageSize]): PageSize =
++    requested.getOrElse(PageSize.Default)
+--- a/server/src/main/scala/com/acme/api/ListInvoicesEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/ListInvoicesEndpoint.scala
+@@ -13,3 +13,5 @@ object ListInvoicesEndpoint:
++  private def pageSize(requested: Option[PageSize]): PageSize =
++    requested.getOrElse(PageSize.Default)
+=== END
+
+=== TURN
+labels: dup=0
+note: akka and pekko modules both get the same supervisor fix
+--- a/akka-runtime/src/main/scala/com/acme/runtime/Supervisor.scala
++++ b/akka-runtime/src/main/scala/com/acme/runtime/Supervisor.scala
+@@ -12,3 +12,8 @@ object Supervisor:
++  val strategy: SupervisorStrategy =
++    SupervisorStrategy
++      .restartWithBackoff(minBackoff = 200.millis, maxBackoff = 10.seconds, randomFactor = 0.2)
++      .withMaxRestarts(5)
+--- a/pekko-runtime/src/main/scala/com/acme/runtime/Supervisor.scala
++++ b/pekko-runtime/src/main/scala/com/acme/runtime/Supervisor.scala
+@@ -12,3 +12,8 @@ object Supervisor:
++  val strategy: SupervisorStrategy =
++    SupervisorStrategy
++      .restartWithBackoff(minBackoff = 200.millis, maxBackoff = 10.seconds, randomFactor = 0.2)
++      .withMaxRestarts(5)
+=== END
+
+=== TURN
+labels: dup=0
+note: similar-looking limits with different meanings (upload vs avatar)
+--- a/server/src/main/scala/com/acme/files/UploadLimits.scala
++++ b/server/src/main/scala/com/acme/files/UploadLimits.scala
+@@ -3,3 +3,6 @@ object UploadLimits:
++  /** Largest document a user may attach to a ticket. */
++  val MaxAttachmentBytes: Long = 10L * 1024 * 1024
++  /** Largest avatar image; smaller on purpose, it is rendered inline everywhere. */
++  val MaxAvatarBytes: Long = 1L * 1024 * 1024
+--- a/server/src/test/scala/com/acme/files/UploadLimitsSuite.scala
++++ b/server/src/test/scala/com/acme/files/UploadLimitsSuite.scala
+@@ -5,3 +5,8 @@ class UploadLimitsSuite extends FunSuite:
++  test("attachment limit is ten megabytes") {
++    assertEquals(UploadLimits.MaxAttachmentBytes, 10485760L)
++  }
++  test("avatar limit is one megabyte") {
++    assertEquals(UploadLimits.MaxAvatarBytes, 1048576L)
++  }
+=== END
+
+=== TURN
+labels: dup=0
+note: jvm and js test dirs each need their platform-specific spec
+--- a/shared/jvm/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
++++ b/shared/jvm/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
+@@ -1,3 +1,10 @@
++package com.acme.codec
++
++class PlatformCodecSuite extends FunSuite:
++  test("round-trips a payload through the platform codec") {
++    val payload = Payload("hello", 3)
++    assertEquals(PlatformCodec.decode(PlatformCodec.encode(payload)), Right(payload))
++  }
+--- a/shared/js/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
++++ b/shared/js/src/test/scala/com/acme/codec/PlatformCodecSuite.scala
+@@ -1,3 +1,10 @@
++package com.acme.codec
++
++class PlatformCodecSuite extends FunSuite:
++  test("round-trips a payload through the platform codec") {
++    val payload = Payload("hello", 3)
++    assertEquals(PlatformCodec.decode(PlatformCodec.encode(payload)), Right(payload))
++  }
+=== END

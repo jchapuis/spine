@@ -1,0 +1,302 @@
+=== EDIT server/src/main/scala/com/acme/payments/RefundService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: cnt is vowel-dropped
+@@ -20,6 +20,9 @@ final class RefundService[F[_]: Sync](refunds: RefundRepository[F]):
+   def pendingCount(account: AccountId): F[Int] =
+-    refunds.pending(account).map(_.size)
++    refunds.pending(account).map { rows =>
++      val cnt = rows.count(_.status == RefundStatus.Pending)
++      cnt
++    }
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/LegPlanner.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: usrRepo truncated
+@@ -5,6 +5,7 @@ import cats.effect.Sync
+
+-final class LegPlanner[F[_]: Sync](routes: RouteRepository[F]):
++final class LegPlanner[F[_]: Sync](routes: RouteRepository[F], usrRepo: UserRepository[F]):
+   def plan(user: UserId, from: Waypoint, to: Waypoint): F[Leg] =
+     routes.shortest(from, to)
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/MetricsWindow.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: calcTtl abbreviated and vague
+@@ -11,6 +11,8 @@ object MetricsWindow:
+   def total(samples: List[Sample]): Long =
+     samples.foldLeft(0L)(_ + _.value)
++
++  private def calcTtl(samples: List[Sample]): Duration =
++    samples.map(_.elapsed).foldLeft(Duration.Zero)(_ + _)
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/JobScheduler.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single letter in def params
+@@ -30,4 +30,7 @@ object JobScheduler:
++  def merge(a: Schedule, b: Schedule): Schedule =
++    Schedule(a.slots ++ b.slots, a.timezone)
++
+   def empty: Schedule = Schedule(Nil, ZoneOffset.UTC)
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: multi-line lambda with o
+@@ -14,6 +14,12 @@ object OrderSummary:
+   def of(orders: List[Order]): List[Line] =
+-    orders.map(toLine)
++    orders.map { o =>
++      val discounted = o.items.map(_.price * o.discount)
++      val shipping = if o.express then ExpressFee else StandardFee
++      val total = discounted.combineAll + shipping
++      Line(o.id, o.customer, total)
++    }
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceFormatter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: vague noun info
+@@ -8,6 +8,8 @@ object InvoiceFormatter:
+-  def render(invoice: Invoice): String =
+-    s"${invoice.number}: ${invoice.total}"
++  def render(invoice: Invoice): String =
++    val info = s"${invoice.number}: ${invoice.total}"
++    info
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RoutePlanner.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder is a metaphor for fallback order
+@@ -17,6 +17,8 @@ final class RoutePlanner[F[_]: Sync](graph: Graph[F]):
++  private val ladder: List[Strategy] =
++    List(Strategy.Fastest, Strategy.Shortest, Strategy.Scenic)
++
+   def plan(from: Node, to: Node): F[Route] =
+-    graph.search(from, to, Strategy.Fastest)
++    graph.search(from, to, ladder.head)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/CardValidator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rslt vowel dropped
+@@ -22,8 +22,10 @@ object CardValidator:
+   def validate(card: Card): ValidatedNel[CardError, Card] =
+-    (checkNumber(card.number), checkExpiry(card.expiry)).mapN(Card(_, _, card.holder))
++    val rslt = (checkNumber(card.number), checkExpiry(card.expiry))
++      .mapN(Card(_, _, card.holder))
++    rslt
+=== END
+=== EDIT server/src/main/scala/com/acme/ui/ProfileView.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: strut metaphor for spacer
+@@ -9,5 +9,6 @@ object ProfileView:
+   def render(user: Signal[User]): HtmlElement =
+     div(
+-      cls := "profile",
++      cls := "profile",
++      div(cls := "strut", height := "16px"),
+       child.text <-- user.map(_.displayName)
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/SpanExporter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: subtle: one bad name tmpRes among clean code
+@@ -18,14 +18,16 @@ final class SpanExporter[F[_]: Async](client: HttpClient[F], endpoint: Uri):
+   def export(spans: List[Span]): F[Unit] =
+     val body = spans.map(_.asJson).asJson
+     val request = Request[F](Method.POST, endpoint).withEntity(body)
+-    client.expect[Unit](request)
++    client.run(request).use { tmpRes =>
++      if tmpRes.status.isSuccess then Async[F].unit
++      else Async[F].raiseError(ExportFailed(tmpRes.status.code, spans.size))
++    }
+   end export
+=== END
+=== EDIT server/src/test/scala/com/acme/orders/OrderSummarySuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: data2 in test
+@@ -25,5 +25,9 @@ class OrderSummarySuite extends FunSuite:
+   test("summary has one line per order"):
+-    assertEquals(OrderSummary.of(orders).size, orders.size)
++    val data = OrderSummary.of(orders)
++    val data2 = OrderSummary.of(orders.reverse)
++    assertEquals(data.size, orders.size)
++    assertEquals(data2.size, orders.size)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/FeeCalculator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: subtle private def with bad name in clean diff
+@@ -9,16 +9,22 @@ object FeeCalculator:
+   def fee(payment: Payment): Money =
+     payment.method match
+-      case Method.Card => payment.amount * CardRate
++      case Method.Card => applyRate(payment.amount, CardRate)
+       case Method.Transfer => TransferFlatFee
+       case Method.Cash => Money.zero
++
++  private def applyRate(amount: Money, rate: BigDecimal): Money =
++    amount * rate
++
++  private def doIt(payments: List[Payment]): Money =
++    payments.foldMap(fee)
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/SlotAllocator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler metaphor for padding slot
+@@ -14,6 +14,8 @@ object SlotAllocator:
+   def allocate(requests: List[Request], capacity: Int): List[Slot] =
+-    requests.take(capacity).map(Slot.fromRequest)
++    val booked = requests.take(capacity).map(Slot.fromRequest)
++    val filler = List.fill(capacity - booked.size)(Slot.Empty)
++    booked ++ filler
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/CartPanel.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: prv truncation for previous
+@@ -31,6 +31,9 @@ object CartPanel:
+   def totalDelta(cart: Signal[Cart]): Signal[Money] =
+-    cart.map(_.total)
++    cart.scanLeft(_.total)((prv, next) => next.total - prv)
++
++  def view(cart: Signal[Cart]): Signal[Money] = totalDelta(cart)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DunningService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: handleStuff vague name plus swallowed error
+@@ -22,5 +22,9 @@ final class DunningService[F[_]: Sync](invoices: InvoiceRepository[F], mail: Mailer[F]):
++  def handleStuff(id: InvoiceId): F[Unit] =
++    invoices.find(id).flatMap {
++      case Some(inv) => mail.sendReminder(inv).handleError(_ => ())
++      case None => Sync[F].unit
++    }
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/ReportBuilder.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: metaphor footprint plus sequential flatMap over independent effects
+@@ -12,6 +12,8 @@ final class ReportBuilder[F[_]: Monad](cpu: CpuProbe[F], mem: MemProbe[F]):
++  def footprint: F[Report] =
++    cpu.read.flatMap(c => mem.read.map(m => Report(c, m)))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/HeadingFilter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: truncated val tmpHdg inside clean logic
+@@ -6,10 +6,14 @@ object HeadingFilter:
+   def smooth(readings: List[Heading]): List[Heading] =
+     readings
+       .sliding(3)
+-      .map(_.head)
++      .map { window =>
++        val tmpHdg = window.map(_.degrees).sum / window.size
++        Heading(tmpHdg)
++      }
+       .toList
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: id and json standard abbreviations
+@@ -14,6 +14,8 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "orders" / UUIDVar(id) =>
++      orders.find(OrderId(id)).flatMap(_.fold(NotFound())(o => Ok(o.asJson)))
+=== END
+=== EDIT server/src/main/scala/com/acme/util/Syntax.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: type params A and F[_]
+@@ -3,4 +3,6 @@ object Syntax:
++  extension [F[_]: Functor, A](fa: F[A])
++    def tupleWith[B](b: B): F[(A, B)] = fa.map(_ -> b)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/Totals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: (acc, x) fold and one-line lambdas
+@@ -7,4 +7,6 @@ object Totals:
++  def largest(payments: List[Payment]): Money =
++    payments.foldLeft(Money.zero)((acc, x) => if x.amount > acc then x.amount else acc)
++  def amounts(payments: List[Payment]): List[Money] = payments.map(p => p.amount)
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/ProbeClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: e in catch with re-raise
+@@ -20,6 +20,10 @@ final class ProbeClient[F[_]: Sync](http: HttpClient[F]):
++  def readOnce(url: Uri): F[Reading] =
++    http.expect[Reading](url).adaptError:
++      case e: IOException => ProbeUnreachable(url, e)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/Geodesy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: bearing, leg, haversine domain words
+@@ -4,4 +4,8 @@ object Geodesy:
++  def bearing(from: Waypoint, to: Waypoint): Heading =
++    Heading(math.toDegrees(math.atan2(to.lon - from.lon, to.lat - from.lat)))
++
++  def legLength(leg: Leg): Meters = haversine(leg.start, leg.end)
+=== END
+=== EDIT server/src/main/scala/com/acme/inventory/StockSync.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: good long name that looks unusual
+@@ -11,4 +11,7 @@ final class StockSync[F[_]: Sync](stock: StockRepository[F]):
++  def reconcileWarehouseCountsAgainstLatestCycleAudit(sku: Sku): F[Reconciliation] =
++    stock.counts(sku).product(stock.lastAudit(sku)).map(Reconciliation.from.tupled)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/Ftp.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: SKU and FTP domain words, ms unit suffix
+@@ -3,5 +3,7 @@ object SettlementUpload:
++  val ConnectTimeoutMs = 5000
++  def remotePath(sku: Sku, batch: BatchId): String =
++    s"/settlements/${batch.value}/${sku.value}.csv"
+=== END
+=== EDIT server/src/main/scala/com/acme/scheduling/Cron.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: short lambda params in one-liners
+@@ -9,4 +9,6 @@ object Cron:
++  def nextFires(c: CronExpr, from: Instant, n: Int): List[Instant] =
++    LazyList.iterate(from)(t => c.after(t)).tail.take(n).toList
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/Tabs.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Laminar short lambdas
+@@ -10,5 +10,7 @@ object Tabs:
++  def labels(tabs: Signal[List[Tab]]): Signal[List[String]] =
++    tabs.map(_.map(t => t.title.trim))
++  def isActive(current: Signal[TabId], id: TabId): Signal[Boolean] = current.map(_ == id)
+=== END
+=== EDIT server/src/test/scala/com/acme/payments/FeeCalculatorSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: test with clear names
+@@ -14,4 +14,7 @@ class FeeCalculatorSuite extends FunSuite:
++  test("cash payments carry no fee"):
++    val payment = Payment(Method.Cash, Money(100))
++    assertEquals(FeeCalculator.fee(payment), Money.zero)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RoutePlanner.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, ladder renamed to fallbackStrategies
+@@ -17,6 +17,6 @@ final class RoutePlanner[F[_]: Sync](graph: Graph[F]):
+-  private val ladder: List[Strategy] =
++  private val fallbackStrategies: List[Strategy] =
+     List(Strategy.Fastest, Strategy.Shortest, Strategy.Scenic)
+
+   def plan(from: Node, to: Node): F[Route] =
+-    graph.search(from, to, ladder.head)
++    graph.search(from, to, fallbackStrategies.head)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceFormatter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, cnt expanded
+@@ -20,5 +20,5 @@ object InvoiceFormatter:
+   def lineSummary(lines: List[Line]): String =
+-    val cnt = lines.size
+-    s"$cnt lines"
++    val lineCount = lines.size
++    s"$lineCount lines"
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderCodec.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: uuid and db standard
+@@ -5,5 +5,7 @@ object OrderCodec:
++  val orderId: Codec[OrderId] = uuid.imap(OrderId(_))(_.value)
++  val dbStatus: Codec[Status] = varchar.imap(Status.valueOf)(_.toString)
+=== END
+=== EDIT server/src/main/scala/com/acme/telemetry/Sampler.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: zone, node, edge domain words
+@@ -8,4 +8,6 @@ object Sampler:
++  def edgeNodes(zone: Zone): List[Node] =
++    zone.nodes.filter(node => node.neighbours.size < 2)
+=== END

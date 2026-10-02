@@ -1,0 +1,358 @@
+=== EDIT web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: decode failure turned into empty list
+@@ -18,7 +18,7 @@ final class OrderApiClient(backend: SttpBackend[Future, Any], base: Uri):
+   def list(customer: CustomerId): Future[List[OrderSummary]] =
+     basicRequest
+       .get(base.addPath("orders"))
+       .response(asJson[List[OrderSummary]])
+       .send(backend)
+-      .map(_.body.fold(err => throw ApiDecodeError(err), identity))
++      .map(_.body.toOption.getOrElse(Nil))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: recover swallows every error as an empty page
+@@ -22,8 +22,9 @@ object OrderListView:
+   def apply(api: OrderApiClient, customer: CustomerId): HtmlElement =
+     val orders: EventStream[List[OrderSummary]] =
+-      EventStream.fromFuture(api.list(customer))
++      EventStream
++        .fromFuture(api.list(customer))
++        .recover { case _ => Some(Nil) }
+     div(
+       children <-- orders.map(_.map(OrderRow(_)))
+     )
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/profile/ProfileFormController.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: analytics side effect runs even when validation failed
+@@ -14,6 +14,10 @@ final class ProfileFormController(api: ProfileApi[IO], analytics: Analytics[IO]):
+-  def submit(draft: ProfileDraft): IO[Profile] =
+-    ProfileValidation.validate(draft).liftTo[IO].flatMap(api.save)
++  def submit(draft: ProfileDraft): IO[ValidatedNec[FieldError, Profile]] =
++    for
++      checked <- IO.pure(ProfileValidation.validate(draft))
++      _       <- analytics.track("profile_submit")
++      saved   <- checked.traverse(api.save)
++    yield saved
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/routing/Pages.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unparsable id silently becomes a sentinel id
+@@ -9,9 +9,9 @@ object Pages:
+   val orderRoute = Route[OrderPage, String](
+     encode = page => page.id.value,
+-    decode = raw => OrderPage(OrderId.from(raw).fold(e => throw RouteError(e), identity)),
++    decode = raw => OrderPage(OrderId.from(raw).getOrElse(OrderId.unknown)),
+     pattern = root / "orders" / segment[String] / endOfSegments,
+     basePath = Route.fragmentBasePath
+   )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/checkout/CheckoutService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: holds the concrete PricingService class
+@@ -1,13 +1,13 @@
+ package com.acme.shop.checkout
+
+-final class CheckoutService[F[_]: Async](carts: CartRepository[F], pricing: Pricing[F]):
++final class CheckoutService[F[_]: Async](carts: CartRepository[F], pricing: PricingService[F]):
+   def total(cart: CartId): F[Money] =
+     carts.items(cart).flatMap(pricing.quote)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/notify/NotificationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: calls UserService directly
+@@ -5,8 +5,12 @@ import com.acme.shop.user.UserService
+ final class NotificationService[F[_]: Async](
+-  mailer: Mailer[F]
++  mailer: Mailer[F],
++  users: UserService[F]
+ ):
++  def welcome(id: UserId): F[Unit] =
++    users.find(id).flatMap:
++      case Some(user) => mailer.send(user.email, Templates.welcome(user.name))
++      case None       => Async[F].raiseError(UserNotFound(id))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/billing/InvoiceService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: invoice service constructed with OrderService
+@@ -3,9 +3,10 @@ package com.acme.shop.billing
+-final class InvoiceService[F[_]: Monad](invoices: InvoiceRepository[F]):
++final class InvoiceService[F[_]: Monad](invoices: InvoiceRepository[F], orderService: OrderService[F]):
+   def issue(order: OrderId): F[Invoice] =
+-    invoices.create(order)
++    orderService.get(order).flatMap(o => invoices.create(o.id, o.total))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/profile/ProfileService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step merge/validate/notify inlined in service method
+@@ -10,6 +10,17 @@ final class ProfileService[F[_]: Monad](repo: ProfileRepository[F], mailer: Mailer[F]):
++  def update(id: UserId, patch: ProfilePatch): F[Profile] =
++    for
++      current <- repo.get(id)
++      merged = current.copy(
++        displayName = patch.displayName.getOrElse(current.displayName),
++        bio = patch.bio.map(_.trim).filter(_.nonEmpty).orElse(current.bio),
++        avatar = patch.avatar.map(a => a.copy(url = a.url.stripSuffix("/"))).orElse(current.avatar)
++      )
++      saved <- repo.save(merged)
++      _     <- if merged.email != current.email then mailer.send(merged.email, Templates.emailChanged) else Monad[F].unit
++    yield saved
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/session/SessionStore.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete logic and no trait
+@@ -0,0 +1,14 @@
++package com.acme.shop.session
++
++object SessionStore:
++  private val Key = "acme.session"
++
++  def load: IO[Option[Session]] =
++    IO(Option(dom.window.localStorage.getItem(Key))).map(_.flatMap(decode[Session](_).toOption))
++
++  def save(session: Session): IO[Unit] =
++    IO(dom.window.localStorage.setItem(Key, session.asJson.noSpaces))
++
++  def clear: IO[Unit] =
++    IO(dom.window.localStorage.removeItem(Key))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/reports/ReportService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: grouping/sorting/formatting pipeline inside Service
+@@ -8,6 +8,16 @@ final class ReportService[F[_]: Monad](sales: SalesRepository[F]):
++  def monthly(year: Year): F[List[MonthlyLine]] =
++    sales.forYear(year).map: rows =>
++      rows
++        .groupBy(r => YearMonth.from(r.soldAt))
++        .map((month, group) => MonthlyLine(month, group.map(_.amount).sum, group.size))
++        .toList
++        .sortBy(_.month)
++        .filter(_.count > 0)
++        .map(l => l.copy(amount = l.amount.setScale(2, RoundingMode.HALF_UP)))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/stats/RatingBadge.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: abbreviated identifiers
+@@ -6,6 +6,8 @@ object RatingBadge:
+   def apply(ratings: Signal[List[Int]]): HtmlElement =
++    val avgRtg = ratings.map(rs => if rs.isEmpty then 0.0 else rs.sum.toDouble / rs.size)
++    val usrCnt = ratings.map(_.size)
+     span(
+-      child.text <-- ratings.map(_.size.toString)
++      child.text <-- avgRtg.combineWith(usrCnt).map((a, c) => f"$a%.1f ($c)")
+     )
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/wizard/Stepper.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung/ladder metaphor instead of step
+@@ -4,10 +4,11 @@ object Stepper:
+-  def apply(steps: List[WizardStep], current: Signal[Int]): HtmlElement =
+-    ul(steps.zipWithIndex.map((step, idx) => li(step.title, cls.toggle("active") <-- current.map(_ == idx))))
++  def apply(steps: List[WizardStep], current: Signal[Int]): HtmlElement =
++    val rungs = steps.zipWithIndex.map((step, idx) => li(step.title, cls.toggle("active") <-- current.map(_ == idx)))
++    val ladder = ul(rungs)
++    ladder
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/orders/OrderRow.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter non-idiomatic parameters
+@@ -3,6 +3,9 @@ object OrderRow:
++  def renderRow(o: OrderSummary, s: Signal[Boolean], f: Observer[OrderId]): HtmlElement =
++    tr(
++      cls.toggle("selected") <-- s,
++      td(o.id.value),
++      onClick.mapTo(o.id) --> f
++    )
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/search/SearchBox.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ask/filler jargon where query/spacer exist
+@@ -5,8 +5,10 @@ object SearchBox:
+   def apply(onSearch: Observer[SearchQuery]): HtmlElement =
+-    val text = Var("")
++    val ask = Var(SearchQuery.empty)
++    val filler = div(cls := "flex-grow")
+     div(
+-      input(onInput.mapToValue --> text.writer),
+-      button("Go", onClick.mapTo(SearchQuery(text.now())) --> onSearch)
++      input(onInput.mapToValue.map(SearchQuery(_)) --> ask.writer),
++      filler,
++      button("Go", onClick.mapTo(ask.now()) --> onSearch)
+     )
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dashboard/DashboardLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent loads sequenced with flatMap/map
+@@ -9,5 +9,5 @@ final class DashboardLoader(api: DashboardApi[IO]):
+   def load(id: UserId): IO[Dashboard] =
+-    (api.user(id), api.prefs(id)).mapN(Dashboard.apply)
++    api.user(id).flatMap(user => api.prefs(id).map(prefs => Dashboard(user, prefs)))
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/cart/CartTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft accumulator should be foldMap
+@@ -6,6 +6,6 @@ object CartTotals:
+   def total(items: List[CartItem]): Money =
+-    items.foldMap(i => i.price * i.quantity)
++    items.foldLeft(Money.zero)((acc, i) => acc + i.price * i.quantity)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/account/AccountLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: three independent calls in a for-comprehension
+@@ -11,6 +11,10 @@ final class AccountLoader(api: AccountApi[IO]):
++  def load(id: UserId): IO[AccountView] =
++    for
++      user   <- api.user(id)
++      prefs  <- api.prefs(id)
++      alerts <- api.alerts(id)
++    yield AccountView(user, prefs, alerts)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/cart/CartActions.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft with *> should be traverse_
+@@ -7,5 +7,5 @@ final class CartActions(api: CartApi[IO]):
+   def clear(ids: List[ItemId]): IO[Unit] =
+-    ids.traverse_(api.remove)
++    ids.foldLeft(IO.unit)((acc, id) => acc *> api.remove(id))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dashboard/DashboardLoader.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+note: flatMap/map over independent effects plus handleError to an empty dashboard
+@@ -9,5 +9,7 @@ final class DashboardLoader(api: DashboardApi[IO]):
+   def load(id: UserId): IO[Dashboard] =
+-    (api.user(id), api.prefs(id)).mapN(Dashboard.apply)
++    api.user(id)
++      .flatMap(user => api.prefs(id).map(prefs => Dashboard(user, prefs)))
++      .handleError(_ => Dashboard.empty)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/sync/SyncService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=1 cats=0
+note: abbreviation names and multi-step logic inlined in service
+@@ -7,6 +7,14 @@ final class SyncService[F[_]: Monad](remote: CatalogRemote[F], repo: CatalogRepository[F]):
++  def sync(since: Instant): F[Int] =
++    remote.changes(since).flatMap: chgs =>
++      val upd = chgs.filter(_.kind == Kind.Updated).map(_.item)
++      val del = chgs.filter(_.kind == Kind.Deleted).map(_.item.id)
++      for
++        _ <- repo.upsertAll(upd)
++        _ <- repo.deleteAll(del)
++      yield upd.size + del.size
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/audit/AuditService.scala
+labels: fail-loud=1 service-dep=1 logic=0 names=0 cats=0
+note: concrete UserService dependency and recover swallowing audit write errors
+@@ -4,10 +4,14 @@ final class AuditService[F[_]: Async](log: AuditLog[F], users: UserService[F]):
++  def record(actor: UserId, action: Action): F[Unit] =
++    users.find(actor).flatMap: found =>
++      log.append(AuditEntry(actor, found.map(_.email), action))
++    .recover { case _ => () }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/http/OrderRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, fold missing entity to explicit 404 at the boundary
+@@ -12,6 +12,10 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "orders" / OrderIdVar(id) =>
++      orders.find(id).flatMap:
++        case Some(order) => Ok(order.asJson)
++        case None        => NotFound(ErrorBody(s"order ${id.value} not found").asJson)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, toRight with explicit error
+@@ -30,6 +30,8 @@ final class OrderApiClient[F[_]: Async](backend: SttpBackend[F, Any], base: Uri):
++  def get(id: OrderId): F[Order] =
++    find(id).flatMap(_.toRight(OrderMissing(id)).liftTo[F])
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/api/RetryingClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, transient retry with backoff then re-raise
+@@ -11,6 +11,14 @@ object RetryingClient:
++  def withRetry[A](attempts: Int, delay: FiniteDuration)(call: IO[A]): IO[A] =
++    call.handleErrorWith:
++      case _: TimeoutException | _: ConnectException if attempts > 1 =>
++        IO.sleep(delay) *> withRetry(attempts - 1, delay * 2)(call)
++      case other =>
++        IO.raiseError(other)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/orders/OrderQuery.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, documented default page size
+@@ -5,5 +5,6 @@ object OrderQuery:
++  val DefaultPageSize: PageSize = PageSize(20)
++
+   def pageSizeOf(param: Option[PageSize]): PageSize =
+-    param.getOrElse(PageSize(25))
++    param.getOrElse(DefaultPageSize)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/checkout/CheckoutService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, service holds algebra traits and uses mapN
+@@ -1,12 +1,14 @@
+-final class CheckoutService[F[_]: Async](carts: CartRepository[F], pricing: PricingService[F]):
++final class CheckoutService[F[_]: Async](carts: CartRepository[F], pricing: Pricing[F], stock: StockAlgebra[F]):
+   def quote(cart: CartId): F[Quote] =
+-    carts.items(cart).flatMap(pricing.quote)
++    carts.items(cart).flatMap: items =>
++      (pricing.quote(items), stock.available(items)).mapN(Quote.apply)
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/stock/StockAlgebra.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, trait algebra with implementation in companion apply
+@@ -0,0 +1,13 @@
++trait StockAlgebra[F[_]]:
++  def available(items: List[CartItem]): F[Boolean]
++
++object StockAlgebra:
++  def apply[F[_]: Functor](client: StockClient[F]): StockAlgebra[F] =
++    new StockAlgebra[F]:
++      def available(items: List[CartItem]): F[Boolean] =
++        client.levels(items.map(_.sku)).map: levels =>
++          items.forall(i => levels.getOrElse(i.sku, 0) >= i.quantity)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dashboard/DashboardLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, swallowed error replaced by liftTo and mapN
+@@ -9,6 +9,5 @@ final class DashboardLoader(api: DashboardApi[IO]):
+   def load(id: UserId): IO[Dashboard] =
+-    api.user(id).map(_.getOrElse(User.anonymous)).flatMap(u => api.prefs(id).map(Dashboard(u, _)))
++    (api.user(id).flatMap(_.liftTo[IO](UserNotFound(id))), api.prefs(id)).mapN(Dashboard.apply)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/common/Format.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, idiomatic short lambda params and standard abbreviations
+@@ -4,6 +4,8 @@ object Format:
++  def ids(urls: List[String]): List[String] = urls.map(u => u.split('/').last)
++  def total(xs: List[Int]): Int = xs.foldLeft(0)((a, b) => a + b)
++  def hasJson(headers: Map[String, String]): Boolean = headers.get("Content-Type").exists(_.contains("json"))
+=== END
+

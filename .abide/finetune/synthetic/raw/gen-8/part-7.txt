@@ -1,0 +1,228 @@
+=== TURN
+labels: dup=1
+note: same JSON payload literal pasted in two test suites
+--- a/server/src/test/scala/com/acme/billing/WebhookRoutesSuite.scala
++++ b/server/src/test/scala/com/acme/billing/WebhookRoutesSuite.scala
+@@ -8,4 +8,6 @@ class WebhookRoutesSuite extends CatsEffectSuite:
++  private val payload = json"""{"type":"invoice.paid","data":{"id":"in_123","amount":999,"currency":"chf"}}"""
++  test("paid webhook marks invoice paid"): routes.run(Request().withEntity(payload)).map(r => assertEquals(r.status, Status.Ok))
+--- a/server/src/test/scala/com/acme/billing/WebhookParserSuite.scala
++++ b/server/src/test/scala/com/acme/billing/WebhookParserSuite.scala
+@@ -8,4 +8,6 @@ class WebhookParserSuite extends FunSuite:
++  private val payload = json"""{"type":"invoice.paid","data":{"id":"in_123","amount":999,"currency":"chf"}}"""
++  test("parses paid event"): assertEquals(WebhookParser.parse(payload).map(_.kind), Right(EventKind.InvoicePaid))
+=== END
+=== TURN
+labels: dup=0
+note: same payload read from one shared fixtures object
+--- a/server/src/test/scala/com/acme/billing/WebhookFixtures.scala
++++ b/server/src/test/scala/com/acme/billing/WebhookFixtures.scala
+@@ -1,3 +1,4 @@
++object WebhookFixtures:
++  val invoicePaid = json"""{"type":"invoice.paid","data":{"id":"in_123","amount":999,"currency":"chf"}}"""
+--- a/server/src/test/scala/com/acme/billing/WebhookParserSuite.scala
++++ b/server/src/test/scala/com/acme/billing/WebhookParserSuite.scala
+@@ -8,4 +8,3 @@ class WebhookParserSuite extends FunSuite:
++  test("parses paid event"): assertEquals(WebhookParser.parse(WebhookFixtures.invoicePaid).map(_.kind), Right(EventKind.InvoicePaid))
+=== END
+=== TURN
+labels: dup=1
+note: page size 50 defined in two repositories
+--- a/server/src/main/scala/com/acme/users/UserRepository.scala
++++ b/server/src/main/scala/com/acme/users/UserRepository.scala
+@@ -6,4 +6,5 @@ object UserRepository:
++  private val PageSize = 50
++  def page(n: Int): Query[Int, User] = UserSql.selectPage.contramap(i => (i * PageSize, PageSize))
+--- a/server/src/main/scala/com/acme/billing/InvoiceRepository.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceRepository.scala
+@@ -6,4 +6,5 @@ object InvoiceRepository:
++  private val PageSize = 50
++  def page(n: Int): Query[Int, Invoice] = InvoiceSql.selectPage.contramap(i => (i * PageSize, PageSize))
+=== END
+=== TURN
+labels: dup=0
+note: one-off diff across unrelated files
+--- a/server/src/main/scala/com/acme/auth/PasswordPolicy.scala
++++ b/server/src/main/scala/com/acme/auth/PasswordPolicy.scala
+@@ -4,4 +4,5 @@ object PasswordPolicy:
++  val MinLength = 12
+--- a/app/src/main/scala/com/acme/ui/LoginForm.scala
++++ b/app/src/main/scala/com/acme/ui/LoginForm.scala
+@@ -9,4 +9,5 @@ object LoginForm:
++  private val passwordInput = input(typ := "password", minLength := PasswordPolicy.MinLength)
+=== END
+=== TURN
+labels: dup=1
+note: same three-line Option.when guard repeated in two services
+--- a/server/src/main/scala/com/acme/billing/SeatService.scala
++++ b/server/src/main/scala/com/acme/billing/SeatService.scala
+@@ -14,4 +14,6 @@ final class SeatService[F[_]: MonadThrow](seats: SeatRepository[F]):
++  def add(team: TeamId, used: Int, max: Int): F[Unit] =
++    Option.when(used < max)(()).liftTo[F](SeatLimitReached(team)) *> seats.add(team)
+--- a/server/src/main/scala/com/acme/billing/StorageService.scala
++++ b/server/src/main/scala/com/acme/billing/StorageService.scala
+@@ -14,4 +14,6 @@ final class StorageService[F[_]: MonadThrow](storage: StorageRepository[F]):
++  def reserve(team: TeamId, used: Long, max: Long): F[Unit] =
++    Option.when(used < max)(()).liftTo[F](StorageLimitReached(team)) *> storage.reserve(team)
+--- a/server/src/main/scala/com/acme/billing/ApiQuotaService.scala
++++ b/server/src/main/scala/com/acme/billing/ApiQuotaService.scala
+@@ -14,4 +14,6 @@ final class ApiQuotaService[F[_]: MonadThrow](calls: ApiCallRepository[F]):
++  def record(team: TeamId, used: Long, max: Long): F[Unit] =
++    Option.when(used < max)(()).liftTo[F](ApiLimitReached(team)) *> calls.record(team)
+=== END
+=== TURN
+labels: dup=0
+note: extension introduced and applied in the same diff
+--- a/server/src/main/scala/com/acme/billing/LimitOps.scala
++++ b/server/src/main/scala/com/acme/billing/LimitOps.scala
+@@ -1,3 +1,5 @@
++extension (used: Long)
++  def checkBelow[F[_]: MonadThrow](max: Long, error: => Throwable): F[Unit] = MonadThrow[F].raiseUnless(used < max)(error)
+--- a/server/src/main/scala/com/acme/billing/SeatService.scala
++++ b/server/src/main/scala/com/acme/billing/SeatService.scala
+@@ -14,4 +14,4 @@ final class SeatService[F[_]: MonadThrow](seats: SeatRepository[F]):
++    used.checkBelow(max, SeatLimitReached(team)) *> seats.add(team)
+--- a/server/src/main/scala/com/acme/billing/StorageService.scala
++++ b/server/src/main/scala/com/acme/billing/StorageService.scala
+@@ -14,4 +14,4 @@ final class StorageService[F[_]: MonadThrow](storage: StorageRepository[F]):
++    used.checkBelow(max, StorageLimitReached(team)) *> storage.reserve(team)
+=== END
+=== TURN
+labels: dup=1
+note: expiry check duplicated across auth classes
+--- a/server/src/main/scala/com/acme/auth/TokenVerifier.scala
++++ b/server/src/main/scala/com/acme/auth/TokenVerifier.scala
+@@ -10,4 +10,6 @@ final class TokenVerifier[F[_]: Sync](clock: Clock[F]):
++  def valid(token: Token): F[Boolean] =
++    clock.realTimeInstant.map(now => token.expiresAt.isAfter(now.minusSeconds(30)))
+--- a/server/src/main/scala/com/acme/auth/ApiKeyService.scala
++++ b/server/src/main/scala/com/acme/auth/ApiKeyService.scala
+@@ -10,4 +10,6 @@ final class ApiKeyService[F[_]: Sync](clock: Clock[F]):
++  def valid(key: ApiKey): F[Boolean] =
++    clock.realTimeInstant.map(now => key.expiresAt.isAfter(now.minusSeconds(30)))
+=== END
+=== TURN
+labels: dup=0
+note: same literal different meaning, one in test one in prod
+--- a/server/src/main/scala/com/acme/auth/LoginThrottle.scala
++++ b/server/src/main/scala/com/acme/auth/LoginThrottle.scala
+@@ -4,4 +4,5 @@ object LoginThrottle:
++  val MaxAttempts = 5
+--- a/server/src/test/scala/com/acme/auth/LoginThrottleSuite.scala
++++ b/server/src/test/scala/com/acme/auth/LoginThrottleSuite.scala
+@@ -6,4 +6,5 @@ class LoginThrottleSuite extends FunSuite:
++  test("locks after max attempts"): assertEquals(Throttle.run(LoginThrottle.MaxAttempts + 1).locked, true)
+=== END
+=== TURN
+labels: dup=1
+note: renewal date computation copy-pasted
+--- a/server/src/main/scala/com/acme/billing/RenewalService.scala
++++ b/server/src/main/scala/com/acme/billing/RenewalService.scala
+@@ -20,4 +20,6 @@ final class RenewalService[F[_]: Sync](subs: SubscriptionRepository[F]):
++  private def nextPeriod(sub: Subscription): LocalDate =
++    if sub.interval == Interval.Yearly then sub.periodEnd.plusYears(1) else sub.periodEnd.plusMonths(1)
+--- a/server/src/main/scala/com/acme/billing/InvoicePreview.scala
++++ b/server/src/main/scala/com/acme/billing/InvoicePreview.scala
+@@ -8,4 +8,6 @@ object InvoicePreview:
++  private def nextPeriod(sub: Subscription): LocalDate =
++    if sub.interval == Interval.Yearly then sub.periodEnd.plusYears(1) else sub.periodEnd.plusMonths(1)
+=== END
+=== TURN
+labels: dup=0
+note: companion helper reused, call sites differ
+--- a/server/src/main/scala/com/acme/billing/Subscription.scala
++++ b/server/src/main/scala/com/acme/billing/Subscription.scala
+@@ -8,3 +8,5 @@ final case class Subscription(id: SubscriptionId, interval: Interval, periodEnd: LocalDate):
++  def nextPeriod: LocalDate =
++    if interval == Interval.Yearly then periodEnd.plusYears(1) else periodEnd.plusMonths(1)
+--- a/server/src/main/scala/com/acme/billing/InvoicePreview.scala
++++ b/server/src/main/scala/com/acme/billing/InvoicePreview.scala
+@@ -8,4 +8,4 @@ object InvoicePreview:
++  def dueOn(sub: Subscription): LocalDate = sub.nextPeriod
+=== END
+=== TURN
+labels: dup=1
+note: same stub repository duplicated in two suites
+--- a/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
+@@ -7,5 +7,7 @@ class ChargeServiceSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.pure(ChargeId("ch_1"))
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.unit
+--- a/server/src/test/scala/com/acme/billing/RefundServiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/RefundServiceSuite.scala
+@@ -7,5 +7,7 @@ class RefundServiceSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.pure(ChargeId("ch_1"))
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.unit
+=== END
+=== TURN
+labels: dup=0
+note: stubs differ in behaviour, one fails
+--- a/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
+@@ -7,5 +7,7 @@ class ChargeServiceSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.pure(ChargeId("ch_1"))
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.unit
+--- a/server/src/test/scala/com/acme/billing/DeclinedChargeSuite.scala
++++ b/server/src/test/scala/com/acme/billing/DeclinedChargeSuite.scala
+@@ -7,5 +7,7 @@ class DeclinedChargeSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.raiseError(CardDeclined)
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.raiseError(CardDeclined)
+=== END
+=== TURN
+labels: dup=1
+note: same status-label mapping in two Laminar components
+--- a/app/src/main/scala/com/acme/ui/SubscriptionBadge.scala
++++ b/app/src/main/scala/com/acme/ui/SubscriptionBadge.scala
+@@ -6,4 +6,7 @@ object SubscriptionBadge:
++  def label(status: Status): String = status match
++    case Status.Active    => "Active"
++    case Status.Paused    => "Paused"
++    case Status.Cancelled => "Cancelled"
+--- a/app/src/main/scala/com/acme/ui/SubscriptionRow.scala
++++ b/app/src/main/scala/com/acme/ui/SubscriptionRow.scala
+@@ -6,4 +6,7 @@ object SubscriptionRow:
++  private def label(status: Status): String = status match
++    case Status.Active    => "Active"
++    case Status.Paused    => "Paused"
++    case Status.Cancelled => "Cancelled"
+=== END
+=== TURN
+labels: dup=0
+note: pure refactor moving a single definition
+--- a/app/src/main/scala/com/acme/ui/SubscriptionBadge.scala
++++ b/app/src/main/scala/com/acme/ui/SubscriptionBadge.scala
+@@ -6,7 +6,2 @@ object SubscriptionBadge:
+-  def label(status: Status): String = status match
+-    case Status.Active    => "Active"
+-    case Status.Paused    => "Paused"
+-    case Status.Cancelled => "Cancelled"
+--- a/app/src/main/scala/com/acme/ui/StatusLabels.scala
++++ b/app/src/main/scala/com/acme/ui/StatusLabels.scala
+@@ -1,3 +1,7 @@
++object StatusLabels:
++  def of(status: Status): String = status match
++    case Status.Active    => "Active"
++    case Status.Paused    => "Paused"
++    case Status.Cancelled => "Cancelled"
+=== END
+=== TURN
+labels: dup=0
+note: round trips use a shared helper
+--- a/server/src/test/scala/com/acme/auth/RoundTrip.scala
++++ b/server/src/test/scala/com/acme/auth/RoundTrip.scala
+@@ -1,3 +1,6 @@
++def roundTrips[A: Codec: Show](name: String, gen: Gen[A])(using loc: munit.Location): ScalaCheckSuite ?=> Unit =
++  property(s"$name round trips")(forAll(gen)(a => assertEquals(Codec.decode(Codec.encode(a)), Right(a))))
+--- a/server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
++++ b/server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
+@@ -8,4 +8,3 @@ class TokenCodecSpec extends ScalaCheckSuite:
++  roundTrips("session token", Generators.sessionToken)
+--- a/server/src/test/scala/com/acme/auth/ApiKeyCodecSpec.scala
++++ b/server/src/test/scala/com/acme/auth/ApiKeyCodecSpec.scala
+@@ -8,4 +8,3 @@ class ApiKeyCodecSpec extends ScalaCheckSuite:
++  roundTrips("api key", Generators.apiKey)
+=== END

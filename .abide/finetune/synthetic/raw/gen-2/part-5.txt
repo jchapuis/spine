@@ -1,0 +1,310 @@
+=== EDIT server/src/main/scala/com/acme/geocoding/GeocodingService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unresolved address becomes Null Island
+@@ -16,4 +16,4 @@ final class GeocodingService[F[_]: MonadThrow](index: AddressIndex[F]):
+   def resolve(address: Address): F[GeoPoint] =
+-    index.lookup(address).flatMap(_.liftTo[F](AddressNotFound(address)))
++    index.lookup(address).map(_.getOrElse(GeoPoint.NullIsland))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteDecoder.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: decoding failure replaced by an empty route
+@@ -12,5 +12,6 @@ final class RouteDecoder[F[_]: Async](http: Client[F]):
+   def fetch(id: RouteId): F[Route] =
+-    http.expect[Route](routeUri(id))
++    http.expect[Route](routeUri(id)).recover:
++      case _: DecodeFailure => Route.empty
+=== END
+=== EDIT server/src/main/scala/com/acme/gpx/GpxImportService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: metric incremented before the parse result is checked
+@@ -20,8 +20,9 @@ final class GpxImportService[F[_]: MonadThrow](tracks: TrackRepository[F], metrics: Metrics[F]):
+   def importGpx(xml: Elem): F[Track] =
+     for
+       parsed <- MonadThrow[F].pure(GpxParser.parse(xml))
++      _      <- metrics.increment("gpx.imported")
+       track  <- parsed.liftTo[F]
+       saved  <- tracks.insert(track)
+     yield saved
+=== END
+=== EDIT server/src/main/scala/com/acme/planning/TripPlannerService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: concrete GeocodingService held by planner service
+@@ -6,7 +6,8 @@ import com.acme.geocoding.GeocodingService
+ final class TripPlannerService[F[_]: Monad](
+     planner: RoutePlanner[F],
+-    places: PlaceIndex[F]
++    places: PlaceIndex[F],
++    geocoding: GeocodingService[F]
+ ):
+   def planTo(address: Address, from: GeoPoint): F[Route] =
+-    places.resolve(address).flatMap(planner.plan(from, _))
++    geocoding.resolve(address).flatMap(planner.plan(from, _))
+=== END
+=== EDIT server/src/main/scala/com/acme/reports/ReportService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: ReportService calls RouteService directly
+@@ -7,6 +7,7 @@ import com.acme.routing.RouteService
+ final class ReportService[F[_]: Monad](
+     renderer: ReportRenderer[F],
++    routeService: RouteService[F]
+ ):
+   def routeReport(id: RouteId): F[Pdf] =
+-    renderer.render(ReportTemplate.Empty)
++    routeService.get(id).flatMap(route => renderer.render(ReportTemplate.forRoute(route)))
+=== END
+=== EDIT server/src/main/scala/com/acme/sync/OfflineSyncService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: concrete TileService as a dependency
+@@ -5,6 +5,7 @@ import com.acme.tiles.TileService
+ final class OfflineSyncService[F[_]: Monad](
+     device: DeviceStore[F],
++    tileService: TileService[F]
+ ):
+   def downloadRegion(bounds: BoundingBox, zoom: Zoom): F[Unit] =
+-    device.reserve(bounds)
++    tileService.stitched(bounds, zoom).flatMap(device.store(bounds, _))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackRepository.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: repository algebra as object with concrete skunk logic and no trait
+@@ -1,6 +1,12 @@
++package com.acme.tracks
++
++object TrackRepository:
++  private val byId: Query[TrackId, Track] =
++    sql"SELECT id, owner, name, distance FROM tracks WHERE id = $trackId".query(trackCodec)
++
++  def find(session: Session[IO], id: TrackId): IO[Option[Track]] =
++    session.prepare(byId).flatMap(_.option(id))
+=== END
+=== EDIT server/src/main/scala/com/acme/elevation/ElevationProfileService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: smoothing and gain computation inlined in service method
+@@ -24,6 +24,14 @@ final class ElevationProfileService[F[_]: Sync](samples: ElevationSamples[F]):
++  def smoothedGain(path: List[GeoPoint], window: Int): F[Elevation] =
++    path.traverse(samples.lookup).map: raw =>
++      val values = raw.flatten.map(_.meters)
++      val smoothed = values.sliding(window).map(w => w.sum / w.size).toList
++      val gain = smoothed.sliding(2).collect { case List(a, b) if b > a => b - a }.sum
++      Elevation.meters(gain)
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TileService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: pyramid generation orchestration inlined in service
+@@ -30,6 +30,13 @@ final class TileService[F[_]: Async](source: TileSource[F], store: TileStore[F]):
++  def buildPyramid(base: Zoom, bounds: BoundingBox): F[Int] =
++    (base.value to 0 by -1).toList.flatTraverse: level =>
++      val zoom = Zoom.unsafe(level)
++      TileGrid.covering(bounds, zoom).traverse: coord =>
++        source.get(coord).flatMap(tile => store.put(tile.downscaled(base, zoom))).as(1)
++    .map(_.sum)
+=== END
+=== EDIT server/src/main/scala/com/acme/api/UploadHandler.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: reqBody and rspJson abbreviations
+@@ -9,5 +9,7 @@ final class UploadHandler[F[_]: Concurrent](service: TrackUploadService[F]):
++  def handle(reqBody: Stream[F, Byte]): F[Json] =
++    service.upload(reqBody).map: saved =>
++      val rspJson = saved.asJson
++      rspJson
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/Distances.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: calcDst abbreviation
+@@ -4,4 +4,5 @@ object Distances:
++  def calcDst(from: GeoPoint, to: GeoPoint): Distance =
++    Geodesy.haversine(from, to)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteJoiner.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: glue is a metaphor for the connecting leg
+@@ -6,4 +6,5 @@ object RouteJoiner:
++  def join(first: Route, second: Route): Route =
++    val glue = Leg(first.end, second.start)
++    Route.fromLegs(first.legs ++ List(glue) ++ second.legs)
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/GeoPointParser.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent Options chained with flatMap, should be mapN
+@@ -7,4 +7,6 @@ object GeoPointParser:
+   def parse(rawLat: String, rawLon: String): Option[GeoPoint] =
+-    (rawLat.toDoubleOption.flatMap(Latitude.option), rawLon.toDoubleOption.flatMap(Longitude.option)).mapN(GeoPoint.apply)
++    rawLat.toDoubleOption.flatMap(Latitude.option).flatMap: lat =>
++      rawLon.toDoubleOption.flatMap(Longitude.option).map: lon =>
++        GeoPoint(lat, lon)
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/PointCounter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft count should be foldMap
+@@ -4,4 +4,6 @@ object PointCounter:
++  def total(tracks: List[Track]): Int =
++    tracks.foldLeft(0): (count, track) =>
++      count + track.points.size
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteNamer.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: flatMap(pure) should be map
+@@ -9,4 +9,4 @@ final class RouteNamer[F[_]: Sync](places: PlaceIndex[F]):
+   def nameFor(route: Route): F[RouteName] =
+-    places.nearest(route.start).map(place => RouteName(s"${place.name} loop"))
++    places.nearest(route.start).flatMap(place => Sync[F].pure(RouteName(s"${place.name} loop")))
+=== END
+=== EDIT server/src/main/scala/com/acme/stats/DistanceSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: avgDist abbreviation and foldLeft sum
+@@ -5,4 +5,6 @@ object DistanceSummary:
++  def average(legs: List[Leg]): Distance =
++    val avgDist = legs.foldLeft(Distance.Zero)((sum, leg) => sum + leg.length) / legs.size
++    avgDist
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteDetailService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: for-comprehension over dependent steps
+@@ -13,5 +13,9 @@ final class RouteDetailService[F[_]: Monad](routes: RouteRepository[F], weather: WeatherAlgebra[F], tiles: TileAlgebra[F]):
++  def detail(id: RouteId): F[RouteDetail] =
++    for
++      route    <- routes.get(id)
++      forecast <- weather.forecast(route.start)
++      image    <- tiles.render(route.bounds)
++    yield RouteDetail(route, forecast, image)
+=== END
+=== EDIT server/src/main/scala/com/acme/gpx/GpxImportService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: metric moved after the parse result is checked
+@@ -20,9 +20,8 @@ final class GpxImportService[F[_]: MonadThrow](tracks: TrackRepository[F], metrics: Metrics[F]):
+   def importGpx(xml: Elem): F[Track] =
+     for
+       parsed <- MonadThrow[F].pure(GpxParser.parse(xml))
+-      _      <- metrics.increment("gpx.imported")
+       track  <- parsed.liftTo[F]
++      _      <- metrics.increment("gpx.imported")
+       saved  <- tracks.insert(track)
+     yield saved
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/Distances.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: abbreviation replaced by plain name
+@@ -4,5 +4,5 @@ object Distances:
+-  def calcDst(from: GeoPoint, to: GeoPoint): Distance =
++  def between(from: GeoPoint, to: GeoPoint): Distance =
+     Geodesy.haversine(from, to)
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/WaypointEditor.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: clean Laminar controlled input
+@@ -8,5 +8,10 @@ object WaypointEditor:
++  def nameInput(name: Var[String]): Input =
++    input(
++      typ := "text",
++      controlled(value <-- name.signal, onInput.mapToValue --> name.writer)
++    )
+=== END
+=== EDIT server/src/test/scala/com/acme/routing/RouteNamerSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: clean test with static expectation
+@@ -9,4 +9,8 @@ class RouteNamerSuite extends CatsEffectSuite:
++  test("names a route after the nearest place"):
++    val namer = RouteNamer[IO](PlaceIndex.fixed(Place("Zermatt")))
++    namer.nameFor(Route.fromLegs(List(Leg(start, end)))).map: name =>
++      assertEquals(name, RouteName("Zermatt loop"))
+=== END
+=== TURN
+labels: dup=1
+note: same URL-building idiom twice
+--- a/server/src/main/scala/com/acme/tiles/OsmTileSource.scala
++++ b/server/src/main/scala/com/acme/tiles/OsmTileSource.scala
+@@ -8,3 +8,5 @@ final class OsmTileSource[F[_]: Async](http: Client[F]):
++  private def tileUri(c: TileCoord): Uri =
++    base / c.zoom.value.toString / c.column.toString / s"${c.row}.png"
+--- a/server/src/main/scala/com/acme/tiles/ElevationTileSource.scala
++++ b/server/src/main/scala/com/acme/tiles/ElevationTileSource.scala
+@@ -8,3 +8,5 @@ final class ElevationTileSource[F[_]: Async](http: Client[F]):
++  private def tileUri(c: TileCoord): Uri =
++    base / c.zoom.value.toString / c.column.toString / s"${c.row}.png"
+=== END
+=== TURN
+labels: dup=1
+note: duplicated waypoint fixture across test files
+--- a/server/src/test/scala/com/acme/routing/RouteJoinerSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RouteJoinerSuite.scala
+@@ -6,3 +6,5 @@ class RouteJoinerSuite extends FunSuite:
++  val matterhorn = Waypoint(GeoPoint(Latitude(45.9766), Longitude(7.6586)), "Matterhorn")
++  val zermatt = Waypoint(GeoPoint(Latitude(46.0207), Longitude(7.7491)), "Zermatt")
+--- a/server/src/test/scala/com/acme/routing/RouteNamerSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RouteNamerSuite.scala
+@@ -6,3 +6,5 @@ class RouteNamerSuite extends FunSuite:
++  val matterhorn = Waypoint(GeoPoint(Latitude(45.9766), Longitude(7.6586)), "Matterhorn")
++  val zermatt = Waypoint(GeoPoint(Latitude(46.0207), Longitude(7.7491)), "Zermatt")
+=== END
+=== TURN
+labels: dup=1
+note: same page-size clamp three-line idiom in two routes
+--- a/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
+@@ -20,3 +20,5 @@ final class TrackRoutes[F[_]: Concurrent]:
++  private def clamp(size: Option[Int]): Int =
++    val requested = size.getOrElse(25)
++    math.min(requested, 100)
+--- a/server/src/main/scala/com/acme/routing/RouteRoutes.scala
++++ b/server/src/main/scala/com/acme/routing/RouteRoutes.scala
+@@ -20,3 +20,5 @@ final class RouteRoutes[F[_]: Concurrent]:
++  private def clamp(size: Option[Int]): Int =
++    val requested = size.getOrElse(25)
++    math.min(requested, 100)
+=== END
+=== TURN
+labels: dup=1
+note: same Circe encoder for GeoPoint defined in two modules
+--- a/shared/src/main/scala/com/acme/geo/GeoPointCodecs.scala
++++ b/shared/src/main/scala/com/acme/geo/GeoPointCodecs.scala
+@@ -4,3 +4,4 @@ object GeoPointCodecs:
++  given Encoder[GeoPoint] = Encoder.forProduct2("lat", "lon")(p => (p.lat.value, p.lon.value))
+--- a/server/src/main/scala/com/acme/api/ApiCodecs.scala
++++ b/server/src/main/scala/com/acme/api/ApiCodecs.scala
+@@ -4,3 +4,4 @@ object ApiCodecs:
++  given Encoder[GeoPoint] = Encoder.forProduct2("lat", "lon")(p => (p.lat.value, p.lon.value))
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: same shape, different meaning
+--- a/server/src/main/scala/com/acme/routing/RoutingLimits.scala
++++ b/server/src/main/scala/com/acme/routing/RoutingLimits.scala
+@@ -3,3 +3,4 @@ object RoutingLimits:
++  val DefaultPageSize = PageSize(25)
+--- a/server/src/main/scala/com/acme/tiles/TileCacheLimits.scala
++++ b/server/src/main/scala/com/acme/tiles/TileCacheLimits.scala
+@@ -3,3 +3,4 @@ object TileCacheLimits:
++  val MaxEntries = 25
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: one extension method defined once and called in two files
+--- a/server/src/main/scala/com/acme/common/TileUriOps.scala
++++ b/server/src/main/scala/com/acme/common/TileUriOps.scala
+@@ -1,3 +1,5 @@
++extension (base: Uri)
++  def tile(c: TileCoord): Uri = base / c.zoom.value.toString / c.column.toString / s"${c.row}.png"
+--- a/server/src/main/scala/com/acme/tiles/OsmTileSource.scala
++++ b/server/src/main/scala/com/acme/tiles/OsmTileSource.scala
+@@ -8,3 +8,3 @@ final class OsmTileSource[F[_]: Async](http: Client[F]):
+-  private def tileUri(c: TileCoord): Uri = base / c.zoom.value.toString / c.column.toString / s"${c.row}.png"
++  private def tileUri(c: TileCoord): Uri = base.tile(c)
+--- a/server/src/main/scala/com/acme/tiles/ElevationTileSource.scala
++++ b/server/src/main/scala/com/acme/tiles/ElevationTileSource.scala
+@@ -8,3 +8,3 @@ final class ElevationTileSource[F[_]: Async](http: Client[F]):
+-  private def tileUri(c: TileCoord): Uri = base / c.zoom.value.toString / c.column.toString / s"${c.row}.png"
++  private def tileUri(c: TileCoord): Uri = base.tile(c)
+=== END
+=== TURN
+labels: dup=0
+note: two small additions in unrelated files
+--- a/server/src/main/scala/com/acme/geo/Heading.scala
++++ b/server/src/main/scala/com/acme/geo/Heading.scala
+@@ -5,3 +5,4 @@ object Heading:
++  def toCompass(h: Heading): CompassPoint = CompassPoint.fromDegrees(h.degrees)
+--- a/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
+@@ -30,3 +30,4 @@ final class TrackRoutes[F[_]: Concurrent](service: TrackService[F]):
++    case DELETE -> Root / "tracks" / TrackIdVar(id) => service.delete(id) *> NoContent()
+=== END

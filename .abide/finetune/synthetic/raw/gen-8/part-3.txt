@@ -1,0 +1,255 @@
+=== EDIT server/src/main/scala/com/acme/auth/PasswordService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: bcrypt failure swallowed as false, hides bug
+@@ -14,5 +14,5 @@ final class PasswordService[F[_]: Sync](hasher: PasswordHasher[F]):
+   def matches(raw: Password, stored: Hash): F[Boolean] =
+-    hasher.verify(raw, stored)
++    hasher.verify(raw, stored).handleError(_ => false)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/LoginService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: LoginService holds concrete PasswordService
+@@ -6,9 +6,10 @@ import cats.effect.Sync
+-final class LoginService[F[_]: Sync](users: UserRepository[F], sessions: SessionRepository[F]):
++final class LoginService[F[_]: Sync](users: UserRepository[F], passwords: PasswordService[F]):
+   def login(email: Email, password: Password): F[Session] =
+-    users.byEmail(email).flatMap(u => sessions.create(u.id))
++    users.byEmail(email).flatMap: user =>
++      passwords.matches(password, user.hash).ifM(Session.start(user.id).pure[F], InvalidCredentials.raiseError)
+=== END
+=== EDIT server/src/test/scala/com/acme/auth/LoginServiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: pwd, usrRepo abbreviations in test
+@@ -9,6 +9,8 @@ class LoginServiceSuite extends CatsEffectSuite:
++  private val pwd = Password.unsafe("correct horse battery")
++  private val usrRepo = InMemoryUserRepository.empty[IO].unsafeRunSync()
++
++  test("login succeeds with matching password"):
++    usrRepo.save(user.copy(hash = Hash.of(pwd))) *> service.login(user.email, pwd).map(s => assertEquals(s.user, user.id))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceNumbering.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: object algebra with concrete DB logic, no trait
+@@ -1,2 +1,11 @@
++package com.acme.billing
++
++object InvoiceNumbering:
++  def next(pool: Resource[IO, Session[IO]], year: Year): IO[InvoiceNumber] =
++    pool.use: s =>
++      for
++        last <- s.unique(NumberingSql.lastOf)(year)
++        n     = InvoiceNumber(year, last.sequence + 1)
++        _    <- s.execute(NumberingSql.record)(n)
++      yield n
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/UsageReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: traverse followed by flatten of independent effects, should be parTraverse/mapN
+@@ -15,6 +15,8 @@ final class UsageReport[F[_]: Monad](seats: SeatRepository[F], storage: StorageRepository[F], api: ApiCallRepository[F]):
++  def collect(team: TeamId): F[UsageRow] =
++    seats.count(team).flatMap: s =>
++      storage.bytes(team).flatMap: b =>
++        api.calls(team).map: c =>
++          UsageRow(s, b, c)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/ChargeService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: all charge failures logged and dropped
+@@ -20,6 +20,8 @@ final class ChargeService[F[_]: Sync](gateway: PaymentGateway[F], logger: Logger[F]):
+   def charge(invoice: Invoice): F[Unit] =
+-    gateway.charge(invoice.customer, invoice.total)
++    gateway.charge(invoice.customer, invoice.total).handleErrorWith: err =>
++      logger.warn(err)("charge failed")
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/ChargeService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient retry with backoff, re-raises after max attempts
+@@ -26,6 +26,12 @@ final class ChargeService[F[_]: Temporal](gateway: PaymentGateway[F]):
++  private def withRetry[A](fa: F[A], attempt: Int = 1): F[A] =
++    fa.recoverWith:
++      case _: TimeoutException if attempt < MaxAttempts =>
++        Temporal[F].sleep((attempt * 2).seconds) *> withRetry(fa, attempt + 1)
++      case e: TimeoutException => ChargeTimedOut(attempt, e).raiseError[F, A]
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserSignupService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: calls BillingService and inlines multi-step signup
+@@ -14,6 +14,12 @@ final class UserSignupService[F[_]: Sync](users: UserRepository[F], billing: BillingService[F]):
++  def signup(email: Email, plan: Plan): F[User] =
++    for
++      exists <- users.byEmail(email)
++      _      <- Sync[F].raiseWhen(exists.nonEmpty)(EmailTaken(email))
++      user   <- users.create(User.fresh(email))
++      _      <- billing.startTrial(user.id, plan)
++    yield user
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/InvoiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: property with shared generator, static expectation
+@@ -11,6 +11,9 @@ class InvoiceSuite extends ScalaCheckSuite:
++  property("total of empty invoice is zero"):
++    assertEquals(Invoice.of(Nil).total, Money.zero)
++
++  property("total equals sum of lines"):
++    forAll(InvoiceGenerators.invoice)(inv => assertEquals(inv.total, inv.lines.foldMap(_.amount)))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/RoleChecker.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung metaphor for privilege level
+@@ -4,4 +4,6 @@ object RoleChecker:
++  def rung(role: Role): Int = role match
++    case Role.Guest  => 0
++    case Role.Member => 1
++    case Role.Admin  => 2
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PlanQuery.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft over effects should be traverse_/foldM; independent
+@@ -9,5 +9,7 @@ final class PlanQuery[F[_]: Monad](plans: PlanRepository[F]):
+   def totalPrice(ids: List[PlanId]): F[Money] =
+-    ids.foldMapM(plans.price)
++    ids.foldLeft(Monad[F].pure(Money.zero)): (acc, id) =>
++      acc.flatMap(sum => plans.price(id).map(sum + _))
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserDirectory.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, getOrElse default replaced with raise
+@@ -12,4 +12,4 @@ final class UserDirectory[F[_]: MonadThrow](users: UserRepository[F]):
+   def email(id: UserId): F[Email] =
+-    users.find(id).map(_.map(_.email).getOrElse(Email.empty))
++    users.find(id).flatMap(_.map(_.email).liftTo[F](UserNotFound(id)))
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/SubscriptionPanel.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed fetch rendered as empty plan list
+@@ -17,5 +17,5 @@ object SubscriptionPanel:
+   def plansSignal(api: BillingApi): Signal[List[Plan]] =
+-    EventStream.fromFuture(api.plans()).toSignal(Nil)
++    EventStream.fromFuture(api.plans()).recover { case _ => Some(Nil) }.toSignal(Nil)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CancellationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: holds concrete RefundService
+@@ -8,7 +8,8 @@ final class CancellationService[F[_]: Sync](
+   subs: SubscriptionRepository[F],
+-  clock: Clock[F]
++  clock: Clock[F],
++  refunds: RefundService[F]
+ ):
+   def cancel(id: SubscriptionId): F[Unit] =
+-    subs.markCancelled(id)
++    subs.markCancelled(id) *> refunds.refundLast(id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/RefundLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: dedicated Logic trait using algebra
+@@ -1,2 +1,10 @@
++trait RefundLogic[F[_]: Monad]:
++  def invoices: InvoiceRepository[F]
++  def payments: PaymentAlgebra[F]
++
++  def refundLast(id: SubscriptionId): F[Unit] =
++    invoices.lastFor(id).flatMap: invoice =>
++      payments.refund(invoice.chargeId, invoice.total)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/RefundService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step refund rules inlined
+@@ -15,6 +15,12 @@ final class RefundService[F[_]: Sync](invoices: InvoiceRepository[F], payments: PaymentAlgebra[F]):
++  def refundLast(id: SubscriptionId, now: Instant): F[Unit] =
++    invoices.lastFor(id).flatMap: invoice =>
++      val ageDays = Duration.between(invoice.paidAt, now).toDays
++      val amount  = if ageDays <= 14 then invoice.total else invoice.total / 2
++      val capped  = amount.min(invoice.total - invoice.refunded)
++      payments.refund(invoice.chargeId, capped) *> invoices.recordRefund(invoice.id, capped)
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/RefundServiceSuite.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: test helper swallows lookup failure with getOrElse default
+@@ -9,5 +9,5 @@ class RefundServiceSuite extends CatsEffectSuite:
+   private def lastInvoice(id: SubscriptionId): IO[Invoice] =
+-    repo.lastFor(id).flatMap(_.liftTo[IO](new NoSuchElementException))
++    repo.lastFor(id).map(_.getOrElse(Invoice.empty))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/OAuthCallback.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: tok/cb abbreviations
+@@ -7,4 +7,6 @@ object OAuthCallback:
++  def parse(uri: Uri): Option[(String, String)] =
++    for
++      tok <- uri.params.get("token")
++      cb  <- uri.params.get("cb")
++    yield (tok, cb)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/OAuthCallback.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: standard abbreviations id/url/uuid allowed
+@@ -7,4 +7,6 @@ object OAuthCallback:
++  def parse(uri: Uri): Option[(UserId, Uri)] =
++    for
++      id  <- uri.params.get("id").flatMap(UserId.parse)
++      url <- uri.params.get("url").flatMap(Uri.fromString(_).toOption)
++    yield (id, url)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/SeatService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: sequential flatMap where mapN fits; two independent counts
+@@ -16,5 +16,6 @@ final class SeatService[F[_]: Monad](seats: SeatRepository[F], limits: LimitRepository[F]):
+   def remaining(team: TeamId): F[Int] =
+-    (limits.max(team), seats.used(team)).mapN(_ - _)
++    limits.max(team).flatMap: max =>
++      seats.used(team).map(max - _)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/TeamPlanService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+note: independent lookups, missing team masked with empty
+@@ -13,6 +13,8 @@ final class TeamPlanService[F[_]: Monad](teams: TeamRepository[F], plans: PlanRepository[F]):
++  def planFor(team: TeamId): F[TeamPlan] =
++    teams.find(team).flatMap: found =>
++      plans.default.map: default =>
++        TeamPlan(found.getOrElse(Team.empty), default)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/MfaService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=1 cats=0
+note: depends on SmsService concrete and uses abbreviation
+@@ -6,9 +6,10 @@ final class MfaService[F[_]: Sync](codes: CodeRepository[F], sms: SmsService[F]):
+   def challenge(user: User): F[Unit] =
+-    codes.issue(user.id).flatMap(c => sms.send(user.phone, c.text))
++    codes.issue(user.id).flatMap: c =>
++      val otpMsg = s"Your code is ${c.text}"
++      sms.deliver(user.phone, otpMsg)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/MfaService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service holds http client trait, fine
+@@ -6,6 +6,8 @@ final class MfaService[F[_]: Sync](codes: CodeRepository[F], sms: SmsClient[F]):
+   def challenge(user: User): F[Unit] =
+-    codes.issue(user.id).flatMap(c => sms.send(user.phone, c.text))
++    codes.issue(user.id).flatMap: code =>
++      sms.send(user.phone, s"Your code is ${code.text}")
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BillingCycle.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+note: algebra object with logic, accumulator fold
+@@ -1,2 +1,10 @@
++object BillingCycle:
++  def charge(db: Session[IO], subs: List[Subscription]): IO[Money] =
++    subs.foldLeft(IO.pure(Money.zero)): (acc, sub) =>
++      acc.flatMap: total =>
++        db.execute(CycleSql.bill)(sub.id).as(total + sub.plan.price)
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/LoginForm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler jargon name for spacing element
+@@ -11,4 +11,5 @@ object LoginForm:
++  private val filler = span(cls := "form-spacer")
++  def render(): HtmlElement = form(emailInput, passwordInput, filler, submitButton)
+=== END
+=== EDIT server/src/main/scala/com/acme/users/AvatarService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: documented default avatar for optional data, Option type documents it
+@@ -9,4 +9,5 @@ final class AvatarService[F[_]: Functor](avatars: AvatarRepository[F]):
++  /** Users without an uploaded avatar show the default image. */
++  def urlOf(id: UserId): F[Uri] =
++    avatars.find(id).map(_.fold(AvatarService.DefaultAvatar)(_.uri))
+=== END

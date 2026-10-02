@@ -1,0 +1,381 @@
+=== EDIT server/src/main/scala/com/acme/audit/InventoryAuditService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: audit service holds concrete SupplierService
+@@ -7,8 +7,10 @@ final class InventoryAuditService[F[_]: Sync](
+     audits: AuditRepository[F],
+-    stock: StockLevels[F]
++    stock: StockLevels[F],
++    supplierService: SupplierService[F]
+ ):
+   def supplierExposure(id: SupplierId): F[Quantity] =
+-    stock.onHandFor(id)
++    supplierService.backlog(id).map(Quantity.unsafe)
+=== END
+=== EDIT server/src/main/scala/com/acme/suppliers/PricingService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing quote defaults to zero price
+@@ -14,5 +14,5 @@ final class PricingService[F[_]: Sync](catalog: SupplierCatalog[F]) extends Pricing[F]:
+   def unitPrice(sku: Sku, supplier: SupplierId): F[Money] =
+-    catalog.quote(sku, supplier).flatMap(_.liftTo[F](NoQuote(sku, supplier)))
++    catalog.quote(sku, supplier).map(_.getOrElse(Money.zero))
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/ReservationService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step hold workflow inline in service
+@@ -30,6 +30,13 @@ final class ReservationService[F[_]: Sync](
+     reservations: ReservationRepository[F],
+     stock: StockLevels[F]
+ ):
++  def hold(sku: Sku, quantity: Quantity, until: Instant): F[Reservation] =
++    for
++      have <- stock.onHand(sku)
++      held <- reservations.heldFor(sku)
++      _ <- Sync[F].raiseWhen(have - held < quantity)(InsufficientStock(sku))
++      reservation <- reservations.create(sku, quantity, until)
++      _ <- stock.markHeld(sku, quantity)
++    yield reservation
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/ReservationPolicy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: resvTtl abbreviation
+@@ -5,5 +5,6 @@ object ReservationPolicy:
+   def expiry(createdAt: Instant): Instant =
+-    createdAt.plus(48.hours.toJava)
++    val resvTtl = 48.hours
++    createdAt.plus(resvTtl.toJava)
+=== END
+=== EDIT server/src/test/scala/com/acme/warehouse/StockServiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent setup chained by flatMap
+@@ -16,6 +16,8 @@ class StockServiceSuite extends CatsEffectSuite:
+   test("two bins report separately"):
+-    (repo.insert(binA), repo.insert(binB)) .tupled *>
+-      service.onHand(sku, BinId("A")).map(assertEquals(_, Quantity.unsafe(4)))
++    repo.insert(binA).flatMap: _ =>
++      repo.insert(binB).flatMap: _ =>
++        service.onHand(sku, BinId("A")).map(assertEquals(_, Quantity.unsafe(4)))
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/BinAssignment.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: liftTo with typed error
+@@ -9,5 +9,5 @@ final class BinAssignment[F[_]: MonadThrow](bins: BinRepository[F]):
+   def forSku(sku: Sku): F[BinId] =
+-    bins.preferred(sku).map(_.getOrElse(BinId.overflow))
++    bins.preferred(sku).flatMap(_.liftTo[F](NoBinForSku(sku)))
+=== END
+=== EDIT server/src/main/scala/com/acme/suppliers/Suppliers.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: trait algebra with companion apply impl
+@@ -1,3 +1,14 @@
++package com.acme.suppliers
++
++trait Suppliers[F[_]]:
++  def find(id: SupplierId): F[Option[Supplier]]
++
++object Suppliers:
++  def apply[F[_]: MonadCancelThrow](db: Resource[F, Session[F]]): Suppliers[F] =
++    new Suppliers[F]:
++      def find(id: SupplierId): F[Option[Supplier]] =
++        db.use(_.prepare(selectSupplier).flatMap(_.option(id)))
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/LandedCostService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: landed cost service takes concrete PricingService
+@@ -6,7 +6,9 @@ final class LandedCostService[F[_]: Sync](
+     freight: FreightRates[F],
++    pricing: PricingService[F]
+ ):
+   def total(sku: Sku, quantity: Quantity): F[Money] =
+-    freight.perUnit(sku).map(_ * quantity.value)
++    (pricing.unitPrice(sku, SupplierId.default), freight.perUnit(sku)).mapN: (price, ship) =>
++      (price + ship) * quantity.value
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/StockEvents.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra object with concrete publish logic, no trait
+@@ -1,3 +1,12 @@
++package com.acme.warehouse
++
++object StockEvents:
++  def publishLow[F[_]: Sync](stock: StockRepository[F], bus: EventBus[F], threshold: Quantity): F[Unit] =
++    stock.all.flatMap: lines =>
++      lines.filter(_.onHand < threshold).traverse_: line =>
++        bus.publish(LowStock(line.sku, line.onHand)) *>
++          stock.markNotified(line.sku)
+=== END
+=== EDIT server/src/main/scala/com/acme/suppliers/QuoteDesk.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ask is jargon for the quoted price
+@@ -8,5 +8,6 @@ final class QuoteDesk[F[_]: Sync](catalog: SupplierCatalog[F]):
+   def best(sku: Sku, suppliers: List[SupplierId]): F[Money] =
+-    suppliers.traverse(catalog.price(sku, _)).map(_.min)
++    suppliers.traverse(catalog.price(sku, _)).map: prices =>
++      val ask = prices.min
++      ask
+=== END
+=== EDIT server/src/main/scala/com/acme/audit/AuditSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft with counters should be foldMap
+@@ -8,6 +8,8 @@ object AuditSummary:
+   def tally(counts: List[CycleCount]): Tally =
+-    counts.foldMap(Tally.of)
++    counts.foldLeft(Tally.empty): (tally, count) =>
++      tally.copy(counted = tally.counted + 1, variance = tally.variance + count.variance)
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/MovementStream.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: stream error swallowed into empty stream
+@@ -12,5 +12,7 @@ final class MovementStream[F[_]: Async](log: MovementLog[F]):
+   def live(from: Instant): Stream[F, Movement] =
+-    log.subscribe(from)
++    log.subscribe(from)
++      .handleErrorWith(_ => Stream.empty)
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/MovementStream.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: groupWithin batching for persistence
+@@ -16,5 +16,8 @@ final class MovementStream[F[_]: Async](log: MovementLog[F]):
+   def persist(moves: Stream[F, Movement]): Stream[F, Unit] =
+-    moves.evalMap(log.append)
++    moves
++      .groupWithin(100, 2.seconds)
++      .evalMap(chunk => log.appendAll(chunk.toList))
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/ShipmentService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: concrete service dependency swapped for algebra
+@@ -9,8 +9,8 @@ final class ShipmentService[F[_]: Sync](
+     shipments: ShipmentRepository[F],
+-    putaway: PutawayService[F]
++    putaway: Putaway[F]
+ ) extends Shipping[F]:
+   def returnLine(line: PickLine): F[Unit] =
+     putaway.target(line.sku).flatMap(shipments.restock(line, _))
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/CountVarianceService.scala
+labels: fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+note: double: inline logic with silent default for missing expected
+@@ -12,6 +12,10 @@ final class CountVarianceService[F[_]: Sync](counts: CycleCounts[F], stock: StockRepository[F]):
++  def reconcile(id: CountId): F[Adjustment] =
++    for
++      count <- counts.get(id)
++      expected <- stock.find(count.sku, count.bin).map(_.map(_.onHand).getOrElse(Quantity.zero))
++      adjustment = Adjustment(count.sku, count.bin, count.counted.value - expected.value)
++      _ <- counts.close(id, adjustment)
++    yield adjustment
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/InventoryService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=1 cats=0
+note: double: holds concrete ReceivingService under an abbreviated name
+@@ -6,8 +6,10 @@ final class InventoryService[F[_]: Sync](
+     stock: StockRepository[F],
++    rcvSvc: ReceivingService[F]
+ ):
+   def acceptDelivery(delivery: Delivery): F[Unit] =
+-    stock.addAll(delivery.lines)
++    rcvSvc.receive(delivery)
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/BinReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff: abbreviations replaced by plain names
+@@ -6,6 +6,6 @@ object BinReport:
+-  def fill(cap: Quantity, cur: Quantity): Double =
+-    cur.value.toDouble / cap.value
++  def fillRatio(capacity: Quantity, occupied: Quantity): Double =
++    occupied.value.toDouble / capacity.value
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/PickWaveService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: fs2 pipeline with batching rules inlined in the service
+@@ -14,6 +14,12 @@ final class PickWaveService[F[_]: Async](orders: OrderRepository[F], picks: PickLists[F]):
++  def release: F[Int] =
++    orders.unreleased
++      .filter(_.lines.nonEmpty)
++      .groupWithin(25, 1.second)
++      .evalMap(chunk => picks.assign(chunk.toList.sortBy(_.dueDate)).as(chunk.size))
++      .compile
++      .foldMonoid
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/WarehouseState.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: nested monocle prism and focus
+@@ -9,5 +9,6 @@ object WarehouseState:
+   def markCounted(state: AppState, bin: BinId): AppState =
+-    state.copy(audit = state.audit.copy(counted = state.audit.counted + bin))
++    state.focus(_.audit.counted).modify(_ + bin)
+=== END
+=== EDIT app/src/main/scala/com/acme/warehouse/ui/AuditPanel.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: mgr and whse abbreviations in view state
+@@ -9,6 +9,8 @@ object AuditPanel:
+   def apply(state: Var[AuditState]): HtmlElement =
++    val mgrName = state.signal.map(_.manager.name)
++    val whseName = state.signal.map(_.warehouse.name)
+     div(
+-      h2("Audit")
++      h2(child.text <-- whseName.combineWith(mgrName).map((w, m) => s"Audit of $w by $m"))
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/ReplenishmentService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent for-comprehension steps should be mapN
+@@ -18,6 +18,7 @@ final class ReplenishmentService[F[_]: Sync](
+   def overview: F[Overview] =
+-    (orders.openCount, stock.lowCount).mapN(Overview.apply)
++    for
++      open <- orders.openCount
++      low <- stock.lowCount
++    yield Overview(open, low)
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/StockService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: parMapN of independent effects
+@@ -34,5 +34,5 @@ final class StockService[F[_]: Async](stock: StockRepository[F], bins: BinRepository[F]):
+   def dashboard: F[Dashboard] =
+-    stock.totals.flatMap(t => bins.utilisation.map(Dashboard(t, _)))
++    (stock.totals, bins.utilisation).parMapN(Dashboard.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/warehouse/CarrierBookingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: service holding HTTP client trait and algebra
+@@ -6,6 +6,7 @@ final class CarrierBookingService[F[_]: Sync](
+     shipments: ShipmentRepository[F],
++    carrier: CarrierClient[F]
+ ):
+   def book(id: ShipmentId): F[Booking] =
+-    shipments.get(id).map(Booking.pending)
++    shipments.get(id).flatMap(carrier.book)
+=== END
+=== EDIT server/src/test/scala/com/acme/warehouse/CountVarianceServiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: ScalaCheck property with short idiomatic lambdas
+@@ -10,5 +10,6 @@ class CountVarianceServiceSuite extends CatsEffectSuite with ScalaCheckEffectSuite:
++  property("variance is counted minus expected"):
++    forAll(Generators.count): count =>
++      assertEquals(count.variance, count.counted.value - count.expected.value)
+=== END
+=== TURN
+labels: dup=1
+note: bin capacity literal repeated in two modules
+--- a/server/src/main/scala/com/acme/warehouse/BinReport.scala
++++ b/server/src/main/scala/com/acme/warehouse/BinReport.scala
+@@ -4,3 +4,3 @@ object BinReport:
++  private val StandardBinCapacity = Quantity.unsafe(120)
+--- a/server/src/main/scala/com/acme/warehouse/PutawayService.scala
++++ b/server/src/main/scala/com/acme/warehouse/PutawayService.scala
+@@ -4,3 +4,3 @@ final class PutawayService[F[_]: Sync](bins: BinRepository[F]) extends Putaway[F]:
++  private val StandardBinCapacity = Quantity.unsafe(120)
+=== END
+=== TURN
+labels: dup=1
+note: same transaction wrapper idiom in three repositories
+--- a/server/src/main/scala/com/acme/warehouse/StockRepository.scala
++++ b/server/src/main/scala/com/acme/warehouse/StockRepository.scala
+@@ -20,3 +20,5 @@ object StockRepository:
++      db.use: session =>
++        session.transaction.use: _ =>
++          session.prepare(command).flatMap(_.execute(args)).void
+--- a/server/src/main/scala/com/acme/warehouse/ReservationRepository.scala
++++ b/server/src/main/scala/com/acme/warehouse/ReservationRepository.scala
+@@ -20,3 +20,5 @@ object ReservationRepository:
++      db.use: session =>
++        session.transaction.use: _ =>
++          session.prepare(command).flatMap(_.execute(args)).void
+=== END
+=== TURN
+labels: dup=1
+note: copy-pasted encoder for Movement in server and client
+--- a/server/src/main/scala/com/acme/warehouse/MovementCodecs.scala
++++ b/server/src/main/scala/com/acme/warehouse/MovementCodecs.scala
+@@ -3,3 +3,5 @@ object MovementCodecs:
++  given Encoder[Movement] = m =>
++    Json.obj("sku" -> m.sku.asJson, "from" -> m.from.asJson, "to" -> m.to.asJson, "qty" -> m.quantity.asJson)
+--- a/app/src/main/scala/com/acme/warehouse/api/MovementJson.scala
++++ b/app/src/main/scala/com/acme/warehouse/api/MovementJson.scala
+@@ -3,3 +3,5 @@ object MovementJson:
++  given Encoder[Movement] = m =>
++    Json.obj("sku" -> m.sku.asJson, "from" -> m.from.asJson, "to" -> m.to.asJson, "qty" -> m.quantity.asJson)
+=== END
+=== TURN
+labels: dup=1
+note: same pick line test data repeated in three tests
+--- a/server/src/test/scala/com/acme/warehouse/PickWaveServiceSuite.scala
++++ b/server/src/test/scala/com/acme/warehouse/PickWaveServiceSuite.scala
+@@ -10,3 +10,5 @@ class PickWaveServiceSuite extends CatsEffectSuite:
++  test("releases pending orders"):
++    val order = Order(OrderId("O-1"), List(PickLine(Sku("WDG-001"), BinId("A-01-02"), Quantity.unsafe(2))))
++    repo.insert(order) *> service.release.map(assertEquals(_, 1))
+--- a/server/src/test/scala/com/acme/warehouse/PickListsSuite.scala
++++ b/server/src/test/scala/com/acme/warehouse/PickListsSuite.scala
+@@ -10,3 +10,5 @@ class PickListsSuite extends CatsEffectSuite:
++  test("assigns lines"):
++    val order = Order(OrderId("O-1"), List(PickLine(Sku("WDG-001"), BinId("A-01-02"), Quantity.unsafe(2))))
++    picks.assign(List(order)).map(assertEquals(_, 1))
+=== END
+=== TURN
+labels: dup=0
+note: same named fixture reused
+--- a/server/src/test/scala/com/acme/warehouse/Fixtures.scala
++++ b/server/src/test/scala/com/acme/warehouse/Fixtures.scala
+@@ -3,3 +3,4 @@ object Fixtures:
++  val pendingOrder = Order(OrderId("O-1"), List(PickLine(Sku("WDG-001"), BinId("A-01-02"), Quantity.unsafe(2))))
+--- a/server/src/test/scala/com/acme/warehouse/PickWaveServiceSuite.scala
++++ b/server/src/test/scala/com/acme/warehouse/PickWaveServiceSuite.scala
+@@ -10,3 +10,3 @@ class PickWaveServiceSuite extends CatsEffectSuite:
++    repo.insert(Fixtures.pendingOrder) *> service.release.map(assertEquals(_, 1))
+--- a/server/src/test/scala/com/acme/warehouse/PickListsSuite.scala
++++ b/server/src/test/scala/com/acme/warehouse/PickListsSuite.scala
+@@ -10,3 +10,3 @@ class PickListsSuite extends CatsEffectSuite:
++    picks.assign(List(Fixtures.pendingOrder)).map(assertEquals(_, 1))
+=== END
+=== TURN
+labels: dup=0
+note: transaction helper extracted and called twice
+--- a/server/src/main/scala/com/acme/warehouse/SessionOps.scala
++++ b/server/src/main/scala/com/acme/warehouse/SessionOps.scala
+@@ -1,3 +1,5 @@
++extension [F[_]: MonadCancelThrow](db: Resource[F, Session[F]])
++  def inTransaction[A](f: Session[F] => F[A]): F[A] = db.use(s => s.transaction.use(_ => f(s)))
+--- a/server/src/main/scala/com/acme/warehouse/StockRepository.scala
++++ b/server/src/main/scala/com/acme/warehouse/StockRepository.scala
+@@ -20,3 +20,3 @@ object StockRepository:
++      db.inTransaction(_.prepare(command).flatMap(_.execute(args)).void)
+--- a/server/src/main/scala/com/acme/warehouse/ReservationRepository.scala
++++ b/server/src/main/scala/com/acme/warehouse/ReservationRepository.scala
+@@ -20,3 +20,3 @@ object ReservationRepository:
++      db.inTransaction(_.prepare(command).flatMap(_.execute(args)).void)
+=== END
+=== TURN
+labels: dup=0
+note: look-alike codec lines for different types
+--- a/server/src/main/scala/com/acme/warehouse/Codecs.scala
++++ b/server/src/main/scala/com/acme/warehouse/Codecs.scala
+@@ -4,3 +4,5 @@ object Codecs:
++  val sku: Codec[Sku] = text.imap(Sku.unsafe)(_.value)
++  val binId: Codec[BinId] = text.imap(BinId.unsafe)(_.value)
++  val supplierId: Codec[SupplierId] = uuid.imap(SupplierId.apply)(_.value)
+=== END
+=== TURN
+labels: dup=0
+note: two different retention periods, same literal
+--- a/server/src/main/scala/com/acme/audit/RetentionPolicy.scala
++++ b/server/src/main/scala/com/acme/audit/RetentionPolicy.scala
+@@ -3,3 +3,3 @@ object RetentionPolicy:
++  val MovementLogRetention = 90.days
+--- a/server/src/main/scala/com/acme/suppliers/QuotePolicy.scala
++++ b/server/src/main/scala/com/acme/suppliers/QuotePolicy.scala
+@@ -3,3 +3,3 @@ object QuotePolicy:
++  val QuoteValidity = 90.days
+=== END
+=== TURN
+labels: dup=0
+note: reuses existing constant from shared policy
+--- a/server/src/main/scala/com/acme/warehouse/PutawayService.scala
++++ b/server/src/main/scala/com/acme/warehouse/PutawayService.scala
+@@ -4,3 +4,3 @@ final class PutawayService[F[_]: Sync](bins: BinRepository[F]) extends Putaway[F]:
++  def room(bin: Bin): Quantity = BinPolicy.StandardBinCapacity - bin.occupied
+--- a/server/src/main/scala/com/acme/warehouse/BinReport.scala
++++ b/server/src/main/scala/com/acme/warehouse/BinReport.scala
+@@ -4,3 +4,3 @@ object BinReport:
++  def fillRatio(bin: Bin): Double = bin.occupied.value.toDouble / BinPolicy.StandardBinCapacity.value
+=== END

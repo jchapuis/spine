@@ -1,0 +1,280 @@
+=== EDIT server/src/main/scala/com/acme/billing/SubscriptionService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(Plan.Free) masks a missing plan row
+@@ -21,6 +21,6 @@ final class SubscriptionService[F[_]: Sync](plans: PlanRepository[F], subs: SubscriptionRepository[F]):
+   def currentPlan(id: SubscriptionId): F[Plan] =
+-    subs.find(id).flatMap(_.liftTo[F](SubscriptionNotFound(id))).flatMap(s => plans.get(s.planId))
++    subs.find(id).flatMap(_.traverse(s => plans.find(s.planId))).map(_.flatten.getOrElse(Plan.Free))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/SessionService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: toRight to explicit error, not hidden
+@@ -30,5 +30,6 @@ final class SessionService[F[_]: MonadThrow](sessions: SessionRepository[F], clock: Clock[F]):
+   def resume(token: SessionToken): F[Session] =
+-    sessions.find(token).map(_.get)
++    sessions.find(token).flatMap(_.toRight(SessionExpired(token)).liftTo[F])
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BillingService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: BillingService holds concrete AuthService
+@@ -8,8 +8,9 @@ import cats.effect.Async
+ final class BillingService[F[_]: Async](
+-  invoices: InvoiceRepository[F]
++  invoices: InvoiceRepository[F],
++  auth: AuthService[F]
+ ):
+   def chargeFor(token: AccessToken, amount: Money): F[Invoice] =
+-    invoices.create(amount)
++    auth.userOf(token).flatMap(user => invoices.create(user.id, amount))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/RevenueReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: avgRev and reqTok are abbreviations
+@@ -14,6 +14,8 @@ object RevenueReport:
++  def avgRev(invoices: List[Invoice]): Money =
++    Money.sum(invoices.map(_.total)) / invoices.size
++
++  def renderFor(reqTok: AccessToken, invoices: List[Invoice]): String =
++    s"${reqTok.subject}: ${avgRev(invoices)}"
+=== END
+=== EDIT server/src/main/scala/com/acme/users/ProfileService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent lookups chained with flatMap, should be mapN
+@@ -17,7 +17,8 @@ final class ProfileService[F[_]: Monad](users: UserRepository[F], plans: PlanRepository[F]):
+   def profile(id: UserId): F[Profile] =
+-    (users.get(id), plans.forUser(id)).mapN(Profile.apply)
++    users.get(id).flatMap: user =>
++      plans.forUser(id).map: plan =>
++        Profile(user, plan)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceAlgebra.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra shipped as object with concrete logic and no trait
+@@ -1,3 +1,14 @@
++package com.acme.billing
++
++object InvoiceAlgebra:
++  def totalWithTax(lines: List[InvoiceLine], rate: TaxRate): Money =
++    val net = lines.map(_.amount).reduceOption(_ + _).getOrElse(Money.zero)
++    net + net * rate.value
++
++  def issue(db: Session[IO], customer: UserId, lines: List[InvoiceLine]): IO[Invoice] =
++    db.unique(InvoiceSql.insert)(customer, totalWithTax(lines, TaxRate.standard))
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: routes depend on a service, fine; 404 at boundary
+@@ -9,9 +9,12 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
+   val routes: HttpRoutes[F] = HttpRoutes.of[F]:
+     case GET -> Root / "users" / UUIDVar(id) =>
+-      users.find(UserId(id)).flatMap(Ok(_))
++      users.find(UserId(id)).flatMap:
++        case Some(user) => Ok(user)
++        case None       => NotFound(ErrorBody("user not found"))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PaymentGateway.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: handleError swallows card decline into unit
+@@ -26,5 +26,6 @@ final class PaymentGateway[F[_]: Sync](client: StripeClient[F], logger: Logger[F]):
+   def capture(charge: ChargeId): F[Unit] =
+-    client.capture(charge)
++    client.capture(charge).handleError(_ => ())
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/SubscriptionServiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: shared generator sampled once, clean
+@@ -10,7 +10,10 @@ class SubscriptionServiceSuite extends CatsEffectSuite:
++  private val subscription = Generators.subscription.sampleSome
++
++  test("cancel marks subscription as cancelled"):
++    service.cancel(subscription.id).map: result =>
++      assertEquals(result.status, Status.Cancelled)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/TierPath.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder/rung are metaphors for plan tiers
+@@ -5,6 +5,8 @@ object TierPath:
++  val ladder: List[Plan] = List(Plan.Free, Plan.Pro, Plan.Team)
++
++  def nextRung(current: Plan): Option[Plan] =
++    ladder.dropWhile(_ != current).drop(1).headOption
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft accumulator should be foldMap
+@@ -11,5 +11,8 @@ object InvoiceTotals:
+   def total(lines: List[InvoiceLine]): Money =
+-    lines.foldMap(_.amount)
++    lines.foldLeft(Money.zero): (acc, line) =>
++      acc + line.amount
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, default removed in favour of typed error
+@@ -18,4 +18,4 @@ final class UserService[F[_]: MonadThrow](users: UserRepository[F]):
+   def displayName(id: UserId): F[String] =
+-    users.find(id).map(_.map(_.name).getOrElse("unknown"))
++    users.find(id).flatMap(_.map(_.name).liftTo[F](UserNotFound(id)))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/SessionService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: calls UserService directly
+@@ -22,5 +22,7 @@ final class SessionService[F[_]: Monad](sessions: SessionRepository[F], users: UserService[F]):
+   def open(email: Email): F[Session] =
+-    sessions.create(email)
++    users.findByEmail(email).flatMap: user =>
++      sessions.create(user.id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/SubscriptionService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step proration inlined in Service method
+@@ -40,6 +40,14 @@ final class SubscriptionService[F[_]: Sync](subs: SubscriptionRepository[F], clock: Clock[F]):
++  def changePlan(id: SubscriptionId, target: Plan): F[Subscription] =
++    for
++      sub   <- subs.get(id)
++      now   <- clock.realTimeInstant
++      days  = Duration.between(sub.periodStart, now).toDays
++      unused = sub.plan.price * (1 - days.toDouble / sub.plan.periodDays)
++      credit = unused.max(Money.zero)
++      owed   = (target.price - credit).max(Money.zero)
++      updated <- subs.update(sub.copy(plan = target, balance = owed))
++    yield updated
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/ProrationLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Logic trait depends on an algebra, fine
+@@ -3,8 +3,11 @@ import cats.Monad
++trait ProrationLogic[F[_]: Monad]:
++  def subscriptions: SubscriptionRepository[F]
++
++  def prorate(id: SubscriptionId, target: Plan, now: Instant): F[Money] =
++    subscriptions.get(id).map: sub =>
++      Proration.credit(sub, now).fold(target.price)(target.price - _)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CheckoutService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: charge runs even though validation failed
+@@ -29,6 +29,7 @@ final class CheckoutService[F[_]: Sync](cards: CardAlgebra[F], payments: PaymentAlgebra[F]):
+   def checkout(card: CardInput, amount: Money): F[Receipt] =
+-    cards.validate(card).flatMap(valid => payments.charge(valid, amount))
++    for
++      _       <- cards.validate(card).attempt
++      receipt <- payments.charge(card.number, amount)
++    yield receipt
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserPolicy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter non-idiomatic params
+@@ -6,4 +6,5 @@ object UserPolicy:
++  def canRenew(s: Subscription, u: User, p: Plan): Boolean =
++    s.owner == u.id && p.renewable && s.status == Status.Active
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/TokenCodec.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: idiomatic short lambdas and standard abbreviations
+@@ -12,4 +12,6 @@ object TokenCodec:
++  def ids(tokens: List[Token]): List[Uuid] =
++    tokens.map(_.uuid)
++
++  def urls(links: List[Link]): List[String] = links.map(l => l.url)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BillingDashboard.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: avgInv abbreviation and independent effects chained with flatMap
+@@ -19,6 +19,9 @@ final class BillingDashboard[F[_]: Monad](invoices: InvoiceRepository[F], subs: SubscriptionRepository[F]):
++  def summary(owner: UserId): F[Summary] =
++    invoices.countFor(owner).flatMap: count =>
++      subs.activeFor(owner).map: active =>
++        Summary(count, active, avgInv = count.toDouble / active.size)
+=== END
+=== EDIT server/src/test/scala/com/acme/users/UserGenerators.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, abbreviation renamed to plain name
+@@ -8,4 +8,4 @@ object UserGenerators:
+-  val avgAge: Double = 34.5
++  val averageAge: Double = 34.5
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/TokenVerifier.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed decode becomes anonymous claims
+@@ -15,5 +15,5 @@ final class TokenVerifier[F[_]: Sync](keys: KeyStore[F]):
+   def claims(raw: RawToken): F[Claims] =
+-    keys.current.flatMap(key => decode(raw, key).liftTo[F])
++    keys.current.map(key => decode(raw, key).getOrElse(Claims.anonymous))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/ChargeClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: retry transient error with backoff and re-raise after attempts
+@@ -22,6 +22,9 @@ final class ChargeClient[F[_]: Temporal](http: Client[F]):
++  def charge(req: ChargeRequest): F[ChargeResult] =
++    http.expect[ChargeResult](req.toHttp).recoverWith:
++      case _: ConnectException => Temporal[F].sleep(1.second) *> charge(req.retried).adaptError:
++        case e if req.attempt >= 3 => ChargeFailed(req.id, e)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DunningService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: retry-schedule orchestration inlined in Service
+@@ -17,6 +17,12 @@ final class DunningService[F[_]: Sync](subs: SubscriptionRepository[F], mailer: Mailer[F]):
++  def runDunning(id: SubscriptionId): F[Unit] =
++    subs.get(id).flatMap: sub =>
++      val attempt = sub.failedPayments + 1
++      val delay   = if attempt <= 3 then 3.days else 7.days
++      val action  = if attempt >= 5 then mailer.send(Mail.finalNotice(sub)) else mailer.send(Mail.retry(sub, delay))
++      action *> subs.update(sub.copy(failedPayments = attempt, nextTry = sub.nextTry.plusDays(delay.toDays)))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DunningService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: depends on concrete SubscriptionService and MailService
+@@ -9,4 +9,5 @@ import cats.effect.Sync
+-final class DunningService[F[_]: Sync](subs: SubscriptionRepository[F], mailer: Mailer[F]):
++final class DunningService[F[_]: Sync](subs: SubscriptionService[F], mailer: MailService[F]):
+   def notify(id: SubscriptionId): F[Unit] =
+-    subs.get(id).flatMap(sub => mailer.send(Mail.retry(sub)))
++    subs.find(id).flatMap(sub => mailer.deliver(Mail.retry(sub)))
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/PlanPicker.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler/strut jargon names in Laminar view
+@@ -12,5 +12,7 @@ object PlanPicker:
++  private val strut = div(cls := "plan-gap", height := "16px")
++
++  def render(plans: Signal[List[Plan]]): HtmlElement =
++    div(children <-- plans.map(_.map(planCard)), strut)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/QuotaService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: for over independent counts should be mapN
+@@ -14,6 +14,8 @@ final class QuotaService[F[_]: Monad](seats: SeatRepository[F], storage: StorageRepository[F]):
++  def usage(team: TeamId): F[Usage] =
++    for
++      used  <- seats.countUsed(team)
++      bytes <- storage.bytesUsed(team)
++    yield Usage(used, bytes)
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/InvoiceGenerators.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: reusable generators, no violation
+@@ -6,6 +6,9 @@ object InvoiceGenerators:
++  val invoiceLine: Gen[InvoiceLine] =
++    (Gen.alphaStr, Gen.choose(1, 500)).mapN: (label, cents) =>
++      InvoiceLine(label, Money.cents(cents))
++
++  val invoice: Gen[Invoice] = Gen.nonEmptyListOf(invoiceLine).map(Invoice.of)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PlanCatalog.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: Service calls another Service and inlines multi-step logic
+@@ -11,6 +11,11 @@ final class PlanCatalog[F[_]: Monad](subs: SubscriptionService[F], plans: PlanRepository[F]):
++  def upgradeOptions(owner: UserId): F[List[Plan]] =
++    subs.activeFor(owner).flatMap: current =>
++      plans.pricedAbove(current.plan.price).map: higher =>
++        val sorted = higher.sortBy(_.price)
++        sorted.filterNot(p => current.addOns.exists(_.excludes(p)))
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Option query param defaulting to documented page size
+@@ -14,4 +14,5 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "users" :? PageSizeParam(size) =>
++      users.list(size.getOrElse(PageSize.Default)).flatMap(Ok(_))
+=== END

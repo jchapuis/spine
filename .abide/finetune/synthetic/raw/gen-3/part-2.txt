@@ -1,0 +1,356 @@
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/RemoteFirmwareClient.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: catch-all recover turns any failure into empty list
+@@ -19,6 +19,7 @@ final class RemoteFirmwareClient[F[_]: Async](http: Client[F], baseUrl: Uri):
+   def versionsFor(model: DeviceModel): F[List[FirmwareVersion]] =
+-    http.expect[List[FirmwareVersion]](baseUrl / "firmware" / model.value)
++    http.expect[List[FirmwareVersion]](baseUrl / "firmware" / model.value).recover:
++      case _ => Nil
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ValidatedIngest.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: audit side effect runs even when validation failed
+@@ -14,9 +14,10 @@ final class ValidatedIngest[F[_]: Monad](parser: ReadingParser[F], audit: AuditLog[F], writer: ReadingWriter[F]):
+   def accept(raw: RawBatch): F[ValidatedNec[ParseError, Int]] =
+     for
+       parsed <- parser.parse(raw)
++      _ <- audit.record(raw.deviceId, s"accepted batch ${raw.id}")
+       count <- parsed.traverse(writer.write)
+     yield count
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/ProvisioningService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: ProvisioningService takes the concrete AlertService
+@@ -6,10 +6,12 @@ import com.acme.telemetry.alerts.AlertService
+ final class ProvisioningService[F[_]: Async](
+     devices: DeviceRepository[F],
++    alertService: AlertService[F]
+ ):
+
+   def provision(spec: NewDevice): F[Device] =
+-    devices.insert(spec)
++    devices.insert(spec).flatTap: device =>
++      alertService.raise(device.id, AlertKind.Provisioned)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingQueryService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: query service reaches into RetentionService
+@@ -5,12 +5,14 @@ import com.acme.telemetry.retention.RetentionService
+-final class ReadingQueryService[F[_]: Monad](readings: ReadingRepository[F]):
++final class ReadingQueryService[F[_]: Monad](readings: ReadingRepository[F], retention: RetentionService[F]):
+
+   def window(id: DeviceId, from: Instant, to: Instant): F[List[Reading]] =
+-    readings.between(id, from, to)
++    retention.effectiveFloor(id).flatMap: floor =>
++      readings.between(id, from.max(floor), to)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/Main.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: service instantiates another service inside its body
+@@ -11,6 +11,8 @@ final class BackfillService[F[_]: Async](readings: ReadingRepository[F], devices: DeviceRepository[F]):
++  private val ingest = new ReadingIngestService[F](readings, devices)
++
+   def backfill(id: DeviceId, history: List[RawReading]): F[Int] =
+-    readings.insertMany(Chunk.from(history.map(Reading.fromRaw)))
++    ingest.ingest(history)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertDigestService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step digest assembly inlined in service
+@@ -11,6 +11,15 @@ final class AlertDigestService[F[_]: Sync](alerts: AlertRepository[F], mailer: Mailer[F]):
+   def sendDigest(owner: OwnerId, since: Instant): F[Unit] =
+-    logic.digest(owner, since)
++    for
++      open <- alerts.openForOwner(owner, since)
++      byDevice = open.groupBy(_.deviceId)
++      ranked = byDevice.toList.sortBy((_, as) => -as.size).take(10)
++      body = ranked.map((id, as) => s"${id.value}: ${as.size} alerts").mkString("\n")
++      _ <- if ranked.isEmpty then Sync[F].unit
++           else mailer.send(owner, "Alert digest", body)
++    yield ()
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/FirmwareCatalog.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as an object with stateful concrete logic and no trait
+@@ -1,6 +1,14 @@
+ package com.acme.telemetry.devices
+
+-trait FirmwareCatalog[F[_]]:
+-  def latest(model: DeviceModel): F[Option[FirmwareVersion]]
++object FirmwareCatalog:
++  private val cache = Ref.unsafe[IO, Map[DeviceModel, FirmwareVersion]](Map.empty)
++
++  def latest(model: DeviceModel, http: Client[IO]): IO[Option[FirmwareVersion]] =
++    cache.get.flatMap:
++      case hit if hit.contains(model) => IO.pure(hit.get(model))
++      case _ =>
++        http.expect[List[FirmwareVersion]](uri"https://fw.example/" / model.value).flatMap: all =>
++          val best = all.maxByOption(_.semver)
++          best.traverse_(v => cache.update(_ + (model -> v))).as(best)
+=== END
+
+=== EDIT app/src/main/scala/com/acme/telemetry/ui/DeviceTable.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: avgRdg abbreviation in Laminar view
+@@ -22,6 +22,8 @@ object DeviceTable:
+   def row(device: Signal[Device], readings: Signal[List[Reading]]): HtmlElement =
++    val avgRdg = readings.map(rs => if rs.isEmpty then 0.0 else rs.map(_.value).sum / rs.size)
+     tr(
+       td(child.text <-- device.map(_.name.value)),
++      td(child.text <-- avgRdg.map(v => f"$v%.1f")),
+     )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingGapFiller.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler / ask jargon names
+@@ -7,8 +7,10 @@ object ReadingGapFiller:
+-  def interpolate(prev: Reading, next: Reading, at: Instant): Reading =
+-    prev.copy(measuredAt = at, value = (prev.value + next.value) / 2)
++  def ask(prev: Reading, next: Reading, at: Instant): Reading =
++    val filler = prev.copy(measuredAt = at, value = (prev.value + next.value) / 2)
++    filler
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/DeviceDashboard.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent queries sequenced in a for instead of parMapN
+@@ -13,7 +13,9 @@ final class DeviceDashboard[F[_]: Concurrent](readings: ReadingRepository[F], alerts: AlertRepository[F], devices: DeviceRepository[F]):
+   def snapshot(id: DeviceId): F[Snapshot] =
+-    (readings.latest(id), alerts.openFor(id), devices.find(id)).parMapN(Snapshot.apply)
++    for
++      latest <- readings.latest(id)
++      open <- alerts.openFor(id)
++      device <- devices.find(id)
++    yield Snapshot(latest, open, device)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertEscalationService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: concrete DeviceService call plus inlined escalation rules
+@@ -9,10 +9,18 @@ final class AlertEscalationService[F[_]: Monad](
+-    alerts: AlertRepository[F]
++    alerts: AlertRepository[F],
++    deviceService: DeviceService[F]
+ ):
+
+-  def escalate(id: AlertId): F[Unit] = logic.escalate(id)
++  def escalate(id: AlertId): F[Unit] =
++    for
++      alert <- alerts.get(id)
++      device <- deviceService.get(alert.deviceId)
++      level = if alert.age > 30.minutes && device.critical then Level.Page
++              else if alert.age > 2.hours then Level.Email
++              else Level.None
++      _ <- alerts.setLevel(id, level)
++    yield ()
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/ThresholdDefaults.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=1
+note: independent lookups chained, plus getOrElse(0) hides missing limit
+@@ -10,6 +10,8 @@ final class ThresholdDefaults[F[_]: Monad](limits: LimitRepository[F], devices: DeviceRepository[F]):
+   def effective(id: DeviceId): F[Limit] =
+-    (limits.find(id), limits.findGlobal).mapN(_.orElse(_).liftTo[F](NoLimit(id))).flatten
++    limits.find(id).flatMap: own =>
++      limits.findGlobal.map: global =>
++        own.orElse(global).getOrElse(Limit(0.0))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: routes depend on a service, missing entity mapped to explicit 404
+@@ -12,6 +12,9 @@ final class ReadingRoutes(service: ReadingQueryService[IO]) extends Http4sDsl[IO]:
+   val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
++    case GET -> Root / "devices" / DeviceIdVar(id) / "latest" =>
++      service.latest(id).flatMap:
++        case Some(reading) => Ok(reading.asJson)
++        case None => NotFound(s"no readings for ${id.value}")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/http/ReadingEndpoints.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Option query param defaulting to documented page size
+@@ -9,5 +9,6 @@ object ReadingEndpoints:
++  private val pageSizeParam = query[Option[PageSize]]("limit").description("Defaults to 100")
++
+   val list = base.get.in("readings").in(pageSizeParam).out(jsonBody[List[Reading]])
+   def pageSizeOrDefault(limit: Option[PageSize]): PageSize = limit.getOrElse(PageSize.Default)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/OtaNotifier.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service holding an HTTP client trait
+@@ -4,9 +4,11 @@ import org.http4s.client.Client
+-final class OtaNotifier[F[_]: Async](devices: DeviceRepository[F]):
++final class OtaNotifier[F[_]: Async](devices: DeviceRepository[F], http: Client[F], gateway: Uri):
+
+   def push(id: DeviceId, version: FirmwareVersion): F[Unit] =
+-    Async[F].unit
++    devices.find(id).flatMap(_.liftTo[F](DeviceNotFound(id))).flatMap: device =>
++      http.expect[Unit](Request[F](Method.POST, gateway / device.endpoint).withEntity(version.asJson))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/util/Units.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: pure helper object, not an algebra
+@@ -1,3 +1,8 @@
++object Units:
++  def celsiusToFahrenheit(c: Double): Double = c * 9 / 5 + 32
++
++  def fahrenheitToCelsius(f: Double): Double = (f - 32) * 5 / 9
++
++  def kpaToPsi(kpa: Double): Double = kpa * 0.145038
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/RetentionReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: foldMap and parTraverse used correctly
+@@ -9,5 +9,6 @@ final class RetentionReport[F[_]: Parallel: Monad](readings: ReadingRepository[F]):
+   def totals(ids: List[DeviceId]): F[Totals] =
+-    ids.foldLeft(Totals.empty.pure[F])((acc, id) => acc.flatMap(t => readings.count(id).map(t.add)))
++    ids.parTraverse(readings.count).map(_.foldMap(Totals.single))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/WindowReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, abbreviation replaced by plain name
+@@ -8,5 +8,5 @@ object WindowReport:
+-  def render(avgVal: Double, reqCnt: Int): String =
+-    s"$reqCnt requests, average $avgVal"
++  def render(averageValue: Double, readingCount: Int): String =
++    s"$readingCount readings, average $averageValue"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, service now depends on algebra instead of DeviceService
+@@ -3,10 +3,10 @@ package com.acme.telemetry.alerts
+-import com.acme.telemetry.devices.DeviceService
++import com.acme.telemetry.devices.DeviceDirectory
+
+-final class AlertService[F[_]: Async](alerts: AlertRepository[F], deviceService: DeviceService[F]):
++final class AlertService[F[_]: Async](alerts: AlertRepository[F], directory: DeviceDirectory[F]):
+
+   def raise(deviceId: DeviceId, kind: AlertKind): F[Alert] =
+-    deviceService.get(deviceId).flatMap: device =>
++    directory.get(deviceId).flatMap: device =>
+       alerts.insert(NewAlert(device.id, kind))
+=== END
+
+=== TURN
+labels: dup=1
+note: same alert-severity mapping idiom copied in two files
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertMailer.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertMailer.scala
+@@ -10,3 +10,5 @@ object AlertMailer:
++  private def subjectFor(alert: Alert): String =
++    s"[${alert.severity.toString.toUpperCase}] ${alert.deviceId.value}: ${alert.kind}"
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertWebhook.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertWebhook.scala
+@@ -10,3 +10,5 @@ object AlertWebhook:
++  private def titleFor(alert: Alert): String =
++    s"[${alert.severity.toString.toUpperCase}] ${alert.deviceId.value}: ${alert.kind}"
+=== END
+
+=== TURN
+labels: dup=1
+note: identical device generator defined in two test suites
+--- a/app/src/test/scala/com/acme/telemetry/devices/DeviceRepositorySuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/devices/DeviceRepositorySuite.scala
+@@ -7,3 +7,6 @@ class DeviceRepositorySuite extends ScalaCheckSuite:
++  val deviceGen: Gen[Device] =
++    for id <- Gen.uuid.map(u => DeviceId(u.toString)); name <- Gen.alphaStr.suchThat(_.nonEmpty)
++    yield Device(id, DeviceName(name), critical = false)
+--- a/app/src/test/scala/com/acme/telemetry/alerts/AlertRepositorySuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/alerts/AlertRepositorySuite.scala
+@@ -7,3 +7,6 @@ class AlertRepositorySuite extends ScalaCheckSuite:
++  val deviceGen: Gen[Device] =
++    for id <- Gen.uuid.map(u => DeviceId(u.toString)); name <- Gen.alphaStr.suchThat(_.nonEmpty)
++    yield Device(id, DeviceName(name), critical = false)
+=== END
+
+=== TURN
+labels: dup=1
+note: Resource-wrapped pool setup repeated verbatim in two modules
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestModule.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestModule.scala
+@@ -9,3 +9,6 @@ object IngestModule:
++  val pool: Resource[IO, Resource[IO, Session[IO]]] =
++    Session.pooled[IO](host = cfg.host, port = cfg.port, user = cfg.user, database = cfg.db, max = 8)
++      .evalTap(_ => IO.println("pool ready"))
+--- a/server/src/main/scala/com/acme/telemetry/retention/RetentionModule.scala
++++ b/server/src/main/scala/com/acme/telemetry/retention/RetentionModule.scala
+@@ -9,3 +9,6 @@ object RetentionModule:
++  val pool: Resource[IO, Resource[IO, Session[IO]]] =
++    Session.pooled[IO](host = cfg.host, port = cfg.port, user = cfg.user, database = cfg.db, max = 8)
++      .evalTap(_ => IO.println("pool ready"))
+=== END
+
+=== TURN
+labels: dup=0
+note: similar looking durations meaning different things
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
+@@ -3,3 +3,5 @@ object IngestConfig:
++  val BatchWindow = 2.seconds
++  val HeartbeatInterval = 2.seconds
+--- a/server/src/main/scala/com/acme/telemetry/devices/OtaConfig.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/OtaConfig.scala
+@@ -3,3 +3,4 @@ object OtaConfig:
++  val AckTimeout = 2.seconds
+=== END
+
+=== TURN
+labels: dup=0
+note: existing constant reused rather than redefined
+--- a/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
++++ b/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
+@@ -6,3 +6,3 @@ final class RetentionJob[F[_]: Temporal](service: RetentionService[F]):
+-  def interval: FiniteDuration = 1.hour
++  def interval: FiniteDuration = RetentionPolicy.SweepInterval
+--- a/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
++++ b/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
+@@ -6,3 +6,3 @@ final class ArchiveExporter[F[_]: Temporal](readings: ReadingRepository[F]):
+-  def interval: FiniteDuration = 1.hour
++  def interval: FiniteDuration = RetentionPolicy.SweepInterval
+=== END
+
+=== TURN
+labels: dup=0
+note: two different tests, each with its own distinct small fixture
+--- a/app/src/test/scala/com/acme/telemetry/alerts/ThresholdSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/alerts/ThresholdSuite.scala
+@@ -5,3 +5,5 @@ class ThresholdSuite extends FunSuite:
++  test("above max raises"):
++    assertEquals(Threshold(max = 30.0).check(31.0), Some(AlertKind.TooHot))
+--- a/app/src/test/scala/com/acme/telemetry/alerts/SilenceSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/alerts/SilenceSuite.scala
+@@ -5,3 +5,5 @@ class SilenceSuite extends FunSuite:
++  test("no reading for 10 minutes raises"):
++    assertEquals(Silence(10.minutes).check(lastSeen = t0, now = t0.plusSeconds(601)), Some(AlertKind.Silent))
+=== END
+
+=== TURN
+labels: dup=0
+note: extension called from two places, defined once
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ChunkSyntax.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ChunkSyntax.scala
+@@ -1,3 +1,5 @@
++extension (batch: Chunk[Reading])
++  def deviceIds: Set[DeviceId] = batch.iterator.map(_.deviceId).toSet
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
+@@ -20,3 +20,3 @@ final class ReadingWriter[F[_]: Async](readings: ReadingRepository[F]):
++    lastSeen.touchAll(batch.deviceIds)
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertWriter.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertWriter.scala
+@@ -20,3 +20,3 @@ final class AlertWriter[F[_]: Async](alerts: AlertRepository[F]):
++    devices.verifyAll(batch.deviceIds)
+=== END

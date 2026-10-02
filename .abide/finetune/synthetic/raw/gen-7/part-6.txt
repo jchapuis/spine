@@ -1,0 +1,300 @@
+=== TURN
+labels: dup=1
+note: currency formatting idiom repeated in three views
+--- a/web/src/main/scala/com/acme/shop/ui/cart/CartTotalView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/cart/CartTotalView.scala
+@@ -6,3 +6,3 @@ object CartTotalView:
+-    child.text <-- total.map(_.toString)
++    child.text <-- total.map(m => f"${m.cents / 100.0}%.2f CHF")
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderRow.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderRow.scala
+@@ -7,3 +7,3 @@ object OrderRow:
+-      td(order.total.toString)
++      td(f"${order.total.cents / 100.0}%.2f CHF")
+--- a/web/src/main/scala/com/acme/shop/ui/invoices/InvoiceLine.scala
++++ b/web/src/main/scala/com/acme/shop/ui/invoices/InvoiceLine.scala
+@@ -7,3 +7,3 @@ object InvoiceLine:
+-      td(line.amount.toString)
++      td(f"${line.amount.cents / 100.0}%.2f CHF")
+=== END
+
+=== TURN
+labels: dup=1
+note: date formatter built twice
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderDates.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderDates.scala
+@@ -4,4 +4,5 @@ object OrderDates:
++  private val Formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy")
++  def label(at: LocalDate): String = Formatter.format(at)
+--- a/web/src/main/scala/com/acme/shop/ui/invoices/InvoiceDates.scala
++++ b/web/src/main/scala/com/acme/shop/ui/invoices/InvoiceDates.scala
+@@ -4,4 +4,5 @@ object InvoiceDates:
++  private val Formatter = DateTimeFormatter.ofPattern("dd.MM.yyyy")
++  def label(at: LocalDate): String = Formatter.format(at)
+=== END
+
+=== TURN
+labels: dup=1
+note: decode-or-throw idiom repeated in two clients
+--- a/web/src/main/scala/com/acme/shop/api/CustomerApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/CustomerApiClient.scala
+@@ -12,4 +12,6 @@ final class CustomerApiClient(backend: SttpBackend[Future, Any]):
++  private def decoded[A](response: Response[Either[ResponseException[String, Error], A]]): A =
++    response.body.fold(error => throw ApiDecodeError(error.getMessage), identity)
+--- a/web/src/main/scala/com/acme/shop/api/ProductApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/ProductApiClient.scala
+@@ -12,4 +12,6 @@ final class ProductApiClient(backend: SttpBackend[Future, Any]):
++  private def decoded[A](response: Response[Either[ResponseException[String, Error], A]]): A =
++    response.body.fold(error => throw ApiDecodeError(error.getMessage), identity)
+=== END
+
+=== TURN
+labels: dup=1
+note: same mount-and-query test setup in two specs
+--- a/web/src/test/scala/com/acme/shop/ui/common/BadgeSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/common/BadgeSpec.scala
+@@ -8,4 +8,7 @@ class BadgeSpec extends FunSuite:
++  test("badge renders count"):
++    val root = dom.document.createElement("div")
++    render(root, Badge(Val(3)))
++    assertEquals(root.querySelector("span").textContent, "3")
+--- a/web/src/test/scala/com/acme/shop/ui/common/PillSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/common/PillSpec.scala
+@@ -8,4 +8,7 @@ class PillSpec extends FunSuite:
++  test("pill renders label"):
++    val root = dom.document.createElement("div")
++    render(root, Pill(Val("new")))
++    assertEquals(root.querySelector("span").textContent, "new")
+=== END
+
+=== TURN
+labels: dup=1
+note: navigate-and-scroll idiom copied into three handlers
+--- a/web/src/main/scala/com/acme/shop/ui/nav/HomeLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/HomeLinks.scala
+@@ -6,3 +6,4 @@ object HomeLinks:
++      onClick --> (_ => { router.pushState(Page.Orders); dom.window.scrollTo(0, 0) }),
+--- a/web/src/main/scala/com/acme/shop/ui/nav/OrderLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/OrderLinks.scala
+@@ -6,3 +6,4 @@ object OrderLinks:
++      onClick --> (_ => { router.pushState(Page.Order(id)); dom.window.scrollTo(0, 0) }),
+--- a/web/src/main/scala/com/acme/shop/ui/nav/SettingsLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/SettingsLinks.scala
+@@ -6,3 +6,4 @@ object SettingsLinks:
++      onClick --> (_ => { router.pushState(Page.Settings); dom.window.scrollTo(0, 0) }),
+=== END
+
+=== TURN
+labels: dup=1
+note: same max length limit declared in two forms
+--- a/shared/src/main/scala/com/acme/shop/forms/ProductForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/ProductForm.scala
+@@ -4,4 +4,6 @@ object ProductForm:
++  val MaxTitleLength = 120
++  def checkTitle(raw: String): Boolean = raw.nonEmpty && raw.length <= MaxTitleLength
+--- a/shared/src/main/scala/com/acme/shop/forms/CategoryForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/CategoryForm.scala
+@@ -4,4 +4,6 @@ object CategoryForm:
++  val MaxTitleLength = 120
++  def checkTitle(raw: String): Boolean = raw.nonEmpty && raw.length <= MaxTitleLength
+=== END
+
+=== TURN
+labels: dup=1
+note: retry policy literal repeated in two algebras
+--- a/server/src/main/scala/com/acme/shop/stock/StockClient.scala
++++ b/server/src/main/scala/com/acme/shop/stock/StockClient.scala
+@@ -5,4 +5,5 @@ object StockClient:
++  private val Retry = RetryPolicy(maxAttempts = 3, baseDelay = 200.millis, factor = 2.0)
+--- a/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
++++ b/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
+@@ -5,4 +5,5 @@ object CarrierClient:
++  private val Retry = RetryPolicy(maxAttempts = 3, baseDelay = 200.millis, factor = 2.0)
+=== END
+
+=== TURN
+labels: dup=1
+note: disabled-when-invalid modifier repeated on three buttons
+--- a/web/src/main/scala/com/acme/shop/ui/forms/SignupForm.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/SignupForm.scala
+@@ -14,3 +14,4 @@ object SignupForm:
++    button("Sign up", disabled <-- form.signal.map(draft => !draft.isValid || draft.isSubmitting))
+--- a/web/src/main/scala/com/acme/shop/ui/forms/ContactForm.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/ContactForm.scala
+@@ -14,3 +14,4 @@ object ContactForm:
++    button("Send", disabled <-- form.signal.map(draft => !draft.isValid || draft.isSubmitting))
+--- a/web/src/main/scala/com/acme/shop/ui/forms/FeedbackForm.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/FeedbackForm.scala
+@@ -14,3 +14,4 @@ object FeedbackForm:
++    button("Submit", disabled <-- form.signal.map(draft => !draft.isValid || draft.isSubmitting))
+=== END
+
+=== TURN
+labels: dup=1
+note: same sample customer fixture inlined in test and generator spec
+--- a/shared/src/test/scala/com/acme/shop/CustomerCodecSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/CustomerCodecSpec.scala
+@@ -7,3 +7,4 @@ class CustomerCodecSpec extends FunSuite:
++  private val customer = Customer(CustomerId("c-7"), "Ada Meier", Email("ada@example.org"), Tier.Gold)
+--- a/shared/src/test/scala/com/acme/shop/CustomerViewSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/CustomerViewSpec.scala
+@@ -7,3 +7,4 @@ class CustomerViewSpec extends FunSuite:
++  private val customer = Customer(CustomerId("c-7"), "Ada Meier", Email("ada@example.org"), Tier.Gold)
+=== END
+
+=== TURN
+labels: dup=0
+note: fix diff, duplicate constant lifted to one definition
+--- a/shared/src/main/scala/com/acme/shop/forms/Limits.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/Limits.scala
+@@ -0,0 +1,3 @@
++package com.acme.shop.forms
++
++val MaxTitleLength = 120
+--- a/shared/src/main/scala/com/acme/shop/forms/ProductForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/ProductForm.scala
+@@ -4,5 +4,4 @@ object ProductForm:
+-  val MaxTitleLength = 120
+   def checkTitle(raw: String): Boolean = raw.nonEmpty && raw.length <= MaxTitleLength
+--- a/shared/src/main/scala/com/acme/shop/forms/CategoryForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/CategoryForm.scala
+@@ -4,5 +4,4 @@ object CategoryForm:
+-  val MaxTitleLength = 120
+   def checkTitle(raw: String): Boolean = raw.nonEmpty && raw.length <= MaxTitleLength
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, same number but different meaning
+--- a/web/src/main/scala/com/acme/shop/ui/common/Avatar.scala
++++ b/web/src/main/scala/com/acme/shop/ui/common/Avatar.scala
+@@ -3,4 +3,5 @@ object Avatar:
++  val SizePx = 64
+--- a/shared/src/main/scala/com/acme/shop/forms/NameForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/NameForm.scala
+@@ -3,4 +3,5 @@ object NameForm:
++  val MaxNameLength = 64
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, existing currency formatter reused in two views
+--- a/web/src/main/scala/com/acme/shop/ui/cart/CartTotalView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/cart/CartTotalView.scala
+@@ -6,3 +6,3 @@ object CartTotalView:
+-    child.text <-- total.map(_.toString)
++    child.text <-- total.map(Format.currency)
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderRow.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderRow.scala
+@@ -7,3 +7,3 @@ object OrderRow:
+-      td(order.total.toString)
++      td(Format.currency(order.total))
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, shared generator in one place imported by two specs
+--- a/shared/src/test/scala/com/acme/shop/Generators.scala
++++ b/shared/src/test/scala/com/acme/shop/Generators.scala
+@@ -0,0 +1,6 @@
++package com.acme.shop
++
++object Generators:
++  val genOrderId: Gen[OrderId] = Gen.choose(1, 99999).map(n => OrderId(s"o-$n"))
+--- a/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
+@@ -3,4 +3,4 @@ class OrderCodecSpec extends ScalaCheckSuite:
++  import Generators.genOrderId
+--- a/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
+@@ -3,4 +3,4 @@ class OrderRoutingSpec extends ScalaCheckSuite:
++  import Generators.genOrderId
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, retry policy defined once and reused
+--- a/server/src/main/scala/com/acme/shop/http/RetryPolicies.scala
++++ b/server/src/main/scala/com/acme/shop/http/RetryPolicies.scala
+@@ -0,0 +1,4 @@
++package com.acme.shop.http
++
++object RetryPolicies:
++  val Standard = RetryPolicy(maxAttempts = 3, baseDelay = 200.millis, factor = 2.0)
+--- a/server/src/main/scala/com/acme/shop/stock/StockClient.scala
++++ b/server/src/main/scala/com/acme/shop/stock/StockClient.scala
+@@ -5,4 +5,4 @@ object StockClient:
++  private val Retry = RetryPolicies.Standard
+--- a/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
++++ b/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
+@@ -5,4 +5,4 @@ object CarrierClient:
++  private val Retry = RetryPolicies.Standard
+=== END
+
+=== TURN
+labels: dup=0
+note: new algebra with companion implementation and a test
+--- /dev/null
++++ b/shared/src/main/scala/com/acme/shop/coupons/CouponLookup.scala
+@@ -0,0 +1,11 @@
++package com.acme.shop.coupons
++
++trait CouponLookup[F[_]]:
++  def find(code: CouponCode): F[Option[Coupon]]
++
++object CouponLookup:
++  def apply[F[_]](repo: CouponRepository[F]): CouponLookup[F] =
++    new CouponLookup[F]:
++      def find(code: CouponCode): F[Option[Coupon]] = repo.byCode(code)
+--- /dev/null
++++ b/shared/src/test/scala/com/acme/shop/coupons/CouponLookupSpec.scala
+@@ -0,0 +1,7 @@
++package com.acme.shop.coupons
++
++class CouponLookupSpec extends CatsEffectSuite:
++  test("unknown code yields None"):
++    CouponLookup(StubCouponRepository.empty[IO]).find(CouponCode("NOPE")).assertEquals(None)
+=== END
+
+=== TURN
+labels: dup=0
+note: new waypoint page with view dispatch
+--- a/web/src/main/scala/com/acme/shop/routing/Pages.scala
++++ b/web/src/main/scala/com/acme/shop/routing/Pages.scala
+@@ -9,3 +9,4 @@ object Pages:
++  val wishlistRoute = Route.static(Page.Wishlist, root / "wishlist" / endOfSegments, Route.fragmentBasePath)
+--- a/web/src/main/scala/com/acme/shop/ui/App.scala
++++ b/web/src/main/scala/com/acme/shop/ui/App.scala
+@@ -12,3 +12,4 @@ object App:
++    case Page.Wishlist => WishlistView(wishlistApi)
+=== END
+
+=== TURN
+labels: dup=0
+note: monocle lens refactor of a nested update
+--- a/web/src/main/scala/com/acme/shop/ui/state/AppState.scala
++++ b/web/src/main/scala/com/acme/shop/ui/state/AppState.scala
+@@ -8,5 +8,5 @@ object AppState:
+-  def setLocale(state: AppState, locale: Locale): AppState =
+-    state.copy(session = state.session.copy(prefs = state.session.prefs.copy(locale = locale)))
++  def setLocale(state: AppState, locale: Locale): AppState =
++    state.focus(_.session.prefs.locale).replace(locale)
+=== END
+
+=== TURN
+labels: dup=0
+note: new signal-driven component, nothing repeated
+--- /dev/null
++++ b/web/src/main/scala/com/acme/shop/ui/cart/CartBadge.scala
+@@ -0,0 +1,9 @@
++package com.acme.shop.ui.cart
++
++object CartBadge:
++  def apply(items: Signal[List[CartItem]]): HtmlElement =
++    span(
++      cls := "cart-badge",
++      child.text <-- items.map(_.map(_.quantity).sum.toString),
++      display <-- items.map(list => if list.isEmpty then "none" else "inline")
++    )
+=== END
+

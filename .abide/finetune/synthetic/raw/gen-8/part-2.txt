@@ -1,0 +1,267 @@
+=== EDIT server/src/main/scala/com/acme/users/UserRepository.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unknown role string silently becomes Guest
+@@ -31,5 +31,5 @@ object UserRepository:
+-  private val roleCodec: Codec[Role] = text.eimap(Role.parse)(_.name)
++  private val roleCodec: Codec[Role] = text.imap(s => Role.parse(s).getOrElse(Role.Guest))(_.name)
+   private val row: Codec[User] = (uuid.imap(UserId(_))(_.value) *: text *: roleCodec).to[User]
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/ApiKeyService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(throw ...) is loud
+@@ -19,4 +19,5 @@ final class ApiKeyService[F[_]: Sync](keys: ApiKeyRepository[F], secret: Secret):
+   def hash(raw: String): F[HashedKey] =
+-    Sync[F].delay(Hasher.sha256(raw))
++    Sync[F].delay:
++      Hasher.sha256(raw).getOrElse(throw IllegalStateException(s"sha256 unavailable"))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: InvoiceService calls concrete PaymentService
+@@ -7,9 +7,10 @@ import cats.effect.Async
+-final class InvoiceService[F[_]: Async](invoices: InvoiceRepository[F]):
++final class InvoiceService[F[_]: Async](invoices: InvoiceRepository[F], payments: PaymentService[F]):
+   def settle(id: InvoiceId): F[Invoice] =
+-    invoices.markPaid(id)
++    invoices.get(id).flatMap(inv => payments.charge(inv.customer, inv.total)) *> invoices.markPaid(id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/SubscriptionStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: subCnt and invTot are abbreviations
+@@ -10,5 +10,7 @@ object SubscriptionStats:
++  def describe(subs: List[Subscription], invoices: List[Invoice]): String =
++    val subCnt = subs.size
++    val invTot = invoices.map(_.total).sum
++    s"$subCnt subscriptions, $invTot billed"
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/EventCounts.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: manual fold of Map accumulators should be foldMap
+@@ -8,6 +8,8 @@ object EventCounts:
+   def perKind(events: List[BillingEvent]): Map[Kind, Int] =
+-    events.foldMap(e => Map(e.kind -> 1))
++    events.foldLeft(Map.empty[Kind, Int]): (acc, e) =>
++      acc.updated(e.kind, acc.getOrElse(e.kind, 0) + 1)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/TokenStore.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete logic and no trait
+@@ -1,2 +1,12 @@
++package com.acme.auth
++
++object TokenStore:
++  private val tokens = Ref.unsafe[IO, Map[TokenId, Token]](Map.empty)
++
++  def issue(user: UserId, ttl: FiniteDuration): IO[Token] =
++    for
++      now   <- IO.realTimeInstant
++      token  = Token(TokenId.random(), user, now.plusSeconds(ttl.toSeconds))
++      _     <- tokens.update(_ + (token.id -> token))
++    yield token
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/TokenStore.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: trait with implementation in companion apply
+@@ -1,6 +1,10 @@
++trait TokenStore[F[_]]:
++  def issue(user: UserId, ttl: FiniteDuration): F[Token]
++  def revoke(id: TokenId): F[Unit]
++
++object TokenStore:
++  def apply[F[_]: Sync](tokens: Ref[F, Map[TokenId, Token]]): TokenStore[F] = new TokenStore[F]:
++    def issue(user: UserId, ttl: FiniteDuration): F[Token] = ???
++    def revoke(id: TokenId): F[Unit] = tokens.update(_ - id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/WebhookRoutes.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: recover turns any handler failure into 200 OK
+@@ -17,6 +17,6 @@ final class WebhookRoutes[F[_]: Concurrent](billing: BillingService[F]) extends Http4sDsl[F]:
+     case req @ POST -> Root / "webhooks" / "stripe" =>
+-      req.as[StripeEvent].flatMap(billing.handle).flatMap(_ => Ok())
++      req.as[StripeEvent].flatMap(billing.handle).flatMap(_ => Ok()).recoverWith:
++        case _ => Ok()
+=== END
+=== EDIT server/src/test/scala/com/acme/auth/SessionServiceSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: shared fixture reused by two tests
+@@ -12,8 +12,12 @@ class SessionServiceSuite extends CatsEffectSuite:
++  private val session = Generators.session.sampleSome
++
++  test("resume returns stored session"):
++    store.put(session) *> service.resume(session.token).assertEquals(session)
++
++  test("resume fails after logout"):
++    store.put(session) *> service.logout(session.token) *> service.resume(session.token).attempt.map(r => assert(r.isLeft))
+=== END
+=== EDIT server/src/test/scala/com/acme/users/UserFixtures.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: usrCnt and tstUsr abbreviations
+@@ -4,4 +4,6 @@ object UserFixtures:
++  val usrCnt = 25
++  val tstUsr: User = User(UserId.random(), Email.unsafe("tester@acme.test"), Role.Member)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/TrialService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: holds concrete NotificationService field
+@@ -6,8 +6,9 @@ final class TrialService[F[_]: Sync](
+   trials: TrialRepository[F],
+-  clock: Clock[F]
++  clock: Clock[F],
++  notifications: NotificationService[F]
+ ):
+   def expireStale: F[Unit] =
+-    clock.realTimeInstant.flatMap(trials.expireBefore)
++    clock.realTimeInstant.flatMap(trials.expireBefore).flatMap(_.traverse_(notifications.trialEnded))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CouponService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: coupon stacking rules inlined in service method
+@@ -22,6 +22,13 @@ final class CouponService[F[_]: Sync](coupons: CouponRepository[F]):
++  def applyAll(codes: List[CouponCode], base: Money): F[Money] =
++    codes.traverse(coupons.get).map: found =>
++      val (percent, fixed) = found.partition(_.isPercent)
++      val bestPercent = percent.map(_.value).maxOption.getOrElse(0)
++      val afterPercent = base * (100 - bestPercent) / 100
++      val afterFixed = afterPercent - fixed.foldMap(c => Money.cents(c.value))
++      if afterFixed < Money.zero then Money.zero else afterFixed
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/Proration.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: plain object of pure helpers, not an algebra
+@@ -1,3 +1,9 @@
++package com.acme.billing
++
++object Proration:
++  def daysLeft(periodEnd: LocalDate, today: LocalDate): Long =
++    ChronoUnit.DAYS.between(today, periodEnd).max(0)
++
++  def credit(price: Money, daysLeft: Long, periodDays: Long): Money =
++    price * daysLeft / periodDays
+=== END
+=== EDIT server/src/main/scala/com/acme/users/AccountSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, flatMap chain over independent lookups replaced with mapN
+@@ -13,6 +13,4 @@ final class AccountSummary[F[_]: Monad](users: UserRepository[F], invoices: InvoiceRepository[F]):
+   def of(id: UserId): F[Summary] =
+-    users.get(id).flatMap: user =>
+-      invoices.latest(id).map: latest =>
+-        Summary(user, latest)
++    (users.get(id), invoices.latest(id)).mapN(Summary.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DiscountService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unknown coupon code treated as 0 percent
+@@ -17,5 +17,5 @@ final class DiscountService[F[_]: Functor](coupons: CouponRepository[F]):
+   def percentOff(code: CouponCode): F[Int] =
+-    coupons.find(code).map(_.map(_.percent).toRight(UnknownCoupon(code))).rethrow
++    coupons.find(code).map(_.map(_.percent).getOrElse(0))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/AccessRequest.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ask is a metaphor for a request/check
+@@ -5,4 +5,5 @@ object AccessRequest:
++  def ask(user: User, resource: Resource): Boolean =
++    user.roles.exists(_.grants(resource))
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserLookup.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: map then sequence should be traverse
+@@ -12,4 +12,4 @@ final class UserLookup[F[_]: Applicative](users: UserRepository[F]):
+   def findAll(ids: List[UserId]): F[List[Option[User]]] =
+-    ids.traverse(users.find)
++    ids.map(users.find).sequence
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/BillingTable.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: idiomatic lambda params in Laminar view
+@@ -9,6 +9,8 @@ object BillingTable:
++  def rows(invoices: Signal[List[Invoice]]): Modifier[HtmlElement] =
++    children <-- invoices.map(_.map(inv => tr(td(inv.number), td(inv.total.show))))
++
++  val totals: Signal[Money] = invoicesVar.signal.map(_.map(_.total).combineAll)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/RenewalService.scala
+labels: fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+note: inlined renewal logic with silent default price
+@@ -26,6 +26,11 @@ final class RenewalService[F[_]: Sync](subs: SubscriptionRepository[F], prices: PriceRepository[F]):
++  def renew(id: SubscriptionId): F[Subscription] =
++    subs.get(id).flatMap: sub =>
++      prices.find(sub.plan).flatMap: price =>
++        val next = sub.periodEnd.plusMonths(1)
++        val amount = price.getOrElse(Money.zero)
++        subs.update(sub.copy(periodEnd = next, balance = sub.balance + amount))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PlanService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: fix-ish but still holds concrete service; PlanService depends on BillingService
+@@ -5,6 +5,8 @@ import cats.effect.Sync
+-final class PlanService[F[_]: Sync](plans: PlanRepository[F]):
++final class PlanService[F[_]: Sync](plans: PlanRepository[F], billing: BillingService[F]):
+   def archive(id: PlanId): F[Unit] =
+-    plans.setActive(id, false)
++    billing.cancelAll(id) *> plans.setActive(id, false)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CheckoutService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: receipt mail sent after failed coupon validation was discarded
+@@ -33,6 +33,8 @@ final class CheckoutService[F[_]: Sync](coupons: CouponAlgebra[F], mailer: Mailer[F]):
+   def checkout(user: User, code: CouponCode): F[Receipt] =
+-    coupons.validate(code).flatMap(c => mailer.sendReceipt(user, c))
++    for
++      _       <- coupons.validate(code).attempt
++      receipt <- mailer.sendReceipt(user, code)
++    yield receipt
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/SessionStore.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra object with concrete expiry logic
+@@ -1,2 +1,10 @@
++object SessionStore:
++  def purgeExpired(db: Resource[IO, Session[IO]], now: Instant): IO[Int] =
++    db.use: s =>
++      for
++        stale <- s.execute(SessionSql.selectBefore)(now)
++        _     <- stale.traverse_(x => s.execute(SessionSql.delete)(x.id))
++        _     <- IO.println(s"purged ${stale.size}")
++      yield stale.size
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceMailer.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter non-idiomatic params
+@@ -9,4 +9,5 @@ object InvoiceMailer:
++  def render(i: Invoice, c: Customer, t: Template): String =
++    t.fill(c.name, i.number, i.total.show)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/ReportService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=1
+note: calls concrete UserService; chains independent effects with flatMap
+@@ -12,6 +12,8 @@ final class ReportService[F[_]: Monad](users: UserService[F], invoices: InvoiceRepository[F]):
++  def monthly(owner: UserId): F[Report] =
++    users.find(owner).flatMap: user =>
++      invoices.thisMonth.flatMap: month =>
++        Monad[F].pure(Report(user, month))
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/PricingSpec.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: reuses existing named constant
+@@ -8,4 +8,5 @@ class PricingSpec extends ScalaCheckSuite:
++  property("trial price is always the default trial price"):
++    forAll(Generators.trialPlan): plan =>
++      assertEquals(plan.price, Pricing.DefaultTrialPrice)
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fold maps missing user to explicit 404
+@@ -20,4 +20,6 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "users" / UUIDVar(id) / "plan" =>
++      users.planOf(UserId(id)).flatMap:
++        _.fold(NotFound(ErrorBody("no plan")))(Ok(_))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/SkuCatalog.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: domain words invoice and sku are fine
+@@ -7,4 +7,5 @@ object SkuCatalog:
++  def skuFor(plan: Plan, interval: Interval): Sku = Sku(s"${plan.code}-${interval.code}")
++
++  def invoiceLabel(invoice: Invoice): String = s"${invoice.number} (${invoice.sku})"
+=== END

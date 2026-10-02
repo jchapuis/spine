@@ -1,0 +1,266 @@
+=== EDIT server/src/main/scala/com/acme/storage/S3Settings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required bucket defaults to a dev bucket in prod
+@@ -5,6 +5,6 @@ final case class S3Settings(bucket: String, region: String)
+ object S3Settings:
+   def fromEnv: S3Settings =
+-    S3Settings(sys.env("S3_BUCKET"), sys.env("AWS_REGION"))
++    S3Settings(sys.env.getOrElse("S3_BUCKET", "acme-dev-bucket"), sys.env("AWS_REGION"))
+=== END
+=== EDIT server/src/main/scala/com/acme/storage/S3Settings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: ciris load requires the bucket, failing the app start
+@@ -5,8 +5,10 @@ final case class S3Settings(bucket: Bucket, region: Region)
+ object S3Settings:
+-  def fromEnv: S3Settings =
+-    S3Settings(sys.env.getOrElse("S3_BUCKET", "acme-dev-bucket"), sys.env("AWS_REGION"))
++  val config: ConfigValue[IO, S3Settings] =
++    (env("S3_BUCKET").as[Bucket], env("AWS_REGION").as[Region]).parMapN(S3Settings.apply)
++
++  def load: IO[S3Settings] = config.load[IO]
+=== END
+=== EDIT server/src/main/scala/com/acme/sync/CatalogSync.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unbounded retry on any error including non-transient ones
+@@ -22,6 +22,8 @@ final class CatalogSync(remote: CatalogApi[IO], store: CatalogStore[IO]):
+-  def pull: IO[Unit] = remote.fetchAll.flatMap(store.replaceAll)
++  def pull: IO[Unit] =
++    remote.fetchAll.flatMap(store.replaceAll).recoverWith:
++      case _ => IO.sleep(10.seconds) *> pull
+=== END
+=== EDIT server/src/main/scala/com/acme/sync/CatalogSync.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fs2 retry with explicit maxAttempts, error propagates after
+@@ -22,6 +22,10 @@ final class CatalogSync(remote: CatalogApi[IO], store: CatalogStore[IO]):
+   def pull: IO[Unit] =
+-    remote.fetchAll.flatMap(store.replaceAll).recoverWith { case _ => pull }
++    Stream
++      .eval(remote.fetchAll.flatMap(store.replaceAll))
++      .retry(1.second, _ * 2, CatalogSync.MaxAttempts, _.isInstanceOf[IOException])
++      .compile
++      .drain
+=== END
+=== EDIT server/src/main/scala/com/acme/streaming/KafkaSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing brokers key falls back to localhost
+@@ -7,6 +7,6 @@ final case class KafkaSettings(brokers: String, groupId: String)
+ object KafkaSettings:
+   def from(config: Config): KafkaSettings =
+     KafkaSettings(
+-      brokers = config.getString("kafka.brokers"),
++      brokers = Try(config.getString("kafka.brokers")).getOrElse("localhost:9092"),
+       groupId = config.getString("kafka.group-id")
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/streaming/KafkaSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: pureconfig loadOrThrow on the kafka section
+@@ -5,8 +5,6 @@ final case class KafkaSettings(brokers: String, groupId: String)
+ object KafkaSettings:
+-  def from(config: Config): KafkaSettings =
+-    KafkaSettings(Try(config.getString("kafka.brokers")).getOrElse("localhost:9092"), config.getString("kafka.group-id"))
++  def load: KafkaSettings =
++    ConfigSource.default.at("kafka").loadOrThrow[KafkaSettings]
+=== END
+=== EDIT server/src/main/scala/com/acme/authz/PermissionService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed permission lookup treated as no permissions
+@@ -17,6 +17,6 @@ final class PermissionService(grants: GrantRepository[IO]):
+   def permissionsOf(user: UserId): IO[Set[Permission]] =
+-    grants.forUser(user)
++    grants.forUser(user).attempt.map(_.getOrElse(Set.empty))
+=== END
+=== EDIT server/src/main/scala/com/acme/reports/SalesReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: empty order list totals to zero
+@@ -11,6 +11,6 @@ object SalesReport:
+   def revenue(orders: List[Order]): Money =
+-    orders.map(_.total).reduce(_ + _)
++    orders.map(_.total).reduceOption(_ + _).getOrElse(Money.zero)
+=== END
+=== EDIT server/src/main/scala/com/acme/Main.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unparsable PORT silently becomes 8080
+@@ -12,6 +12,6 @@ object Main extends IOApp.Simple:
+   val run: IO[Unit] =
+-    val port = sys.env("PORT").toInt
++    val port = sys.env.get("PORT").flatMap(_.toIntOption).getOrElse(8080)
+     Server.start(port).useForever
+=== END
+=== EDIT server/src/main/scala/com/acme/Main.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: PORT optional, documented constant, invalid value fails
+@@ -9,9 +9,12 @@ object Main extends IOApp.Simple:
++  /** PORT is optional; when it is unset the server listens on this port. */
++  val DefaultPort = 8080
++
+   val run: IO[Unit] =
+-    val port = sys.env.get("PORT").flatMap(_.toIntOption).getOrElse(8080)
+-    Server.start(port).useForever
++    sys.env.get("PORT").traverse(raw => raw.toIntOption.liftTo[IO](InvalidSetting("PORT", raw)))
++      .flatMap(port => Server.start(port.getOrElse(DefaultPort)).useForever)
+=== END
+=== EDIT server/src/main/scala/com/acme/net/Reconnect.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: recursive reconnect with no attempt count or cap
+@@ -8,5 +8,6 @@ object Reconnect:
+-  def connect(broker: Broker[IO]): IO[Connection] = broker.open
++  def connect(broker: Broker[IO]): IO[Connection] =
++    broker.open.handleErrorWith(_ => IO.sleep(1.second) *> connect(broker))
+=== END
+=== EDIT server/src/main/scala/com/acme/net/Reconnect.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: same loop with attempts counter and final raise
+@@ -8,8 +8,11 @@ object Reconnect:
+-  def connect(broker: Broker[IO]): IO[Connection] =
+-    broker.open.handleErrorWith(_ => IO.sleep(1.second) *> connect(broker))
++  def connect(broker: Broker[IO], attempts: Int = MaxAttempts): IO[Connection] =
++    broker.open.handleErrorWith: e =>
++      if attempts > 1 then IO.sleep(1.second) *> connect(broker, attempts - 1)
++      else IO.raiseError(e)
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/Cli.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed scopt parse yields default Config
+@@ -9,6 +9,6 @@ object Cli:
+   def parse(args: List[String]): Config =
+-    OParser.parse(parser, args, Config()).getOrElse(sys.exit(2))
++    OParser.parse(parser, args, Config()).getOrElse(Config())
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/Cli.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: failed parse raises a usage error
+@@ -9,6 +9,6 @@ object Cli:
+-  def parse(args: List[String]): Config =
+-    OParser.parse(parser, args, Config()).getOrElse(Config())
++  def parse(args: List[String]): IO[Config] =
++    OParser.parse(parser, args, Config()).liftTo[IO](UsageError(OParser.usage(parser)))
+=== END
+=== EDIT server/src/main/scala/com/acme/mail/SmtpSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required SMTP host/port default to a public example host
+@@ -6,6 +6,6 @@ final case class SmtpSettings(host: String, port: Int)
+ object SmtpSettings:
+   def fromEnv: SmtpSettings =
+-    SmtpSettings(sys.env("SMTP_HOST"), sys.env("SMTP_PORT").toInt)
++    SmtpSettings(sys.env.getOrElse("SMTP_HOST", "smtp.example.com"), sys.env.getOrElse("SMTP_PORT", "25").toInt)
+=== END
+=== EDIT server/src/main/scala/com/acme/mail/SmtpSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: required env reads fail loudly, but independent reads are chained with flatMap instead of mapN
+@@ -6,6 +6,7 @@ final case class SmtpSettings(host: String, port: Int)
+ object SmtpSettings:
+-  def fromEnv: SmtpSettings = SmtpSettings(sys.env("SMTP_HOST"), sys.env("SMTP_PORT").toInt)
++  def fromEnv: IO[SmtpSettings] =
++    IO(sys.env("SMTP_HOST")).flatMap: host =>
++      IO(sys.env("SMTP_PORT").toInt).map(port => SmtpSettings(host, port))
+=== END
+=== EDIT server/src/main/scala/com/acme/secrets/VaultConfig.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: vault read failure replaced with empty config; tmpCfg is vowel-dropped
+@@ -14,6 +14,8 @@ final class VaultConfig(vault: VaultClient[IO]):
+   def secrets: IO[SecretBundle] =
+-    vault.readAll
++    vault.readAll.handleErrorWith: _ =>
++      val tmpCfg = SecretBundle.empty
++      IO.pure(tmpCfg)
+=== END
+=== EDIT server/src/main/scala/com/acme/secrets/VaultConfig.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient errors retried with backoff, re-raised after maxAttempts
+@@ -14,8 +14,12 @@ final class VaultConfig(vault: VaultClient[IO], maxAttempts: Int):
+   def secrets: IO[SecretBundle] =
+-    vault.readAll.handleErrorWith(_ => IO.pure(SecretBundle.empty))
++    read(1)
++
++  private def read(attempt: Int): IO[SecretBundle] =
++    vault.readAll.recoverWith:
++      case _: ConnectException if attempt < maxAttempts => IO.sleep((attempt * 2).seconds) *> read(attempt + 1)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/SettingsFile.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: circe decode failure falls back to default settings
+@@ -10,6 +10,6 @@ object SettingsFile:
+   def parse(raw: String): Settings =
+-    parser.decode[Settings](raw).fold(e => throw e, identity)
++    parser.decode[Settings](raw).getOrElse(Settings.default)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/SettingsFile.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: decode error lifted into IO
+@@ -10,6 +10,6 @@ object SettingsFile:
+-  def parse(raw: String): Settings =
+-    parser.decode[Settings](raw).getOrElse(Settings.default)
++  def parse(raw: String): IO[Settings] =
++    parser.decode[Settings](raw).liftTo[IO]
+=== END
+=== EDIT server/src/main/scala/com/acme/tenants/TenantDirectory.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: attempt.map hides repository outages behind a default tenant
+@@ -13,6 +13,6 @@ final class TenantDirectory(tenants: TenantRepository[IO]):
+   def all: IO[List[Tenant]] =
+-    tenants.all
++    tenants.all.attempt.map(_.getOrElse(List(Tenant.Default)))
+=== END
+=== EDIT server/src/main/scala/com/acme/invoices/PdfClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient network error retried with backoff, re-raised after N
+@@ -19,6 +19,12 @@ final class PdfClient(http: Client[IO]):
+-  def render(invoice: Invoice): IO[Pdf] = http.expect[Pdf](request(invoice))
++  def render(invoice: Invoice): IO[Pdf] = renderWith(invoice, 0)
++
++  private def renderWith(invoice: Invoice, tries: Int): IO[Pdf] =
++    http.expect[Pdf](request(invoice)).recoverWith:
++      case e: IOException if tries < 3 => IO.sleep((100 * (tries + 1)).millis) *> renderWith(invoice, tries + 1)
++      case e: IOException => IO.raiseError(RenderUnavailable(invoice.id, e))
+=== END
+=== EDIT server/src/main/scala/com/acme/jobs/RetryingJob.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: cats-retry constantDelay has no limit and errors are silently dropped
+@@ -9,6 +9,8 @@ import retry.*
+ final class RetryingJob(job: IO[Unit]):
+-  val run: IO[Unit] = job
++  private val policy = RetryPolicies.constantDelay[IO](5.seconds)
++  val run: IO[Unit] =
++    retryingOnAllErrors(job, policy, (_: Throwable, _: RetryDetails) => IO.unit)
+=== END
+=== EDIT server/src/main/scala/com/acme/jobs/RetryingJob.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: limitRetries bound, each failure logged, error re-raised on exhaustion
+@@ -9,9 +9,13 @@ import retry.*
+ final class RetryingJob(job: IO[Unit], logger: Logger[IO]):
+-  private val policy = RetryPolicies.constantDelay[IO](5.seconds)
++  private val policy = RetryPolicies.limitRetries[IO](5).join(RetryPolicies.exponentialBackoff[IO](1.second))
+   val run: IO[Unit] =
+-    retryingOnAllErrors(job, policy, (_: Throwable, _: RetryDetails) => IO.unit)
++    retryingOnAllErrors(job, policy, (e: Throwable, d: RetryDetails) => logger.warn(e)(s"job failed: $d"))
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/RegionResolver.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required region request input defaults to us-east-1
+@@ -9,6 +9,6 @@ object RegionResolver:
+   def resolve(params: Map[String, String]): Region =
+-    Region.parseOrThrow(params("region"))
++    Region.parseOrThrow(params.getOrElse("region", "us-east-1"))
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/RegionResolver.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional region typed as Option with documented default
+@@ -9,6 +9,9 @@ object RegionResolver:
+-  def resolve(params: Map[String, String]): Region =
+-    Region.parseOrThrow(params.getOrElse("region", "us-east-1"))
++  /** The region is optional on search requests; Region.Default applies when omitted. */
++  def resolve(region: Option[Region]): Region =
++    region.getOrElse(Region.Default)
+=== END
+=== EDIT server/src/main/scala/com/acme/limits/QuotaService.scala
+labels: fail-loud=1 service-dep=1 logic=0 names=0 cats=0
+note: Service holds a concrete ConfigService and defaults a missing rate limit
+@@ -8,9 +8,9 @@ import com.acme.config.ConfigService
+-final class QuotaService(counters: CounterRepository[IO]):
++final class QuotaService(counters: CounterRepository[IO], configService: ConfigService):
+   def allow(client: ClientId): IO[Boolean] =
+-    counters.current(client).map(_ < Quota.PerMinute)
++    configService.get("rate.limit").map(_.getOrElse("100").toInt).flatMap: limit =>
++      counters.current(client).map(_ < limit)
+=== END

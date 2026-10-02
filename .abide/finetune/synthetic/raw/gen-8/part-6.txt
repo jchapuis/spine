@@ -1,0 +1,354 @@
+=== TURN
+labels: dup=1
+note: same user fixture literal in two suites
+--- a/server/src/test/scala/com/acme/auth/LoginServiceSuite.scala
++++ b/server/src/test/scala/com/acme/auth/LoginServiceSuite.scala
+@@ -8,4 +8,6 @@ class LoginServiceSuite extends CatsEffectSuite:
++  private val user = User(UserId.random(), Email.unsafe("jane@acme.test"), Role.Member)
++
++  test("login succeeds"): service.login(user.email, password).map(s => assertEquals(s.user, user.id))
+--- a/server/src/test/scala/com/acme/auth/SessionServiceSuite.scala
++++ b/server/src/test/scala/com/acme/auth/SessionServiceSuite.scala
+@@ -8,4 +8,6 @@ class SessionServiceSuite extends CatsEffectSuite:
++  private val user = User(UserId.random(), Email.unsafe("jane@acme.test"), Role.Member)
++
++  test("open creates a session"): service.open(user.email).map(s => assertEquals(s.user, user.id))
+=== END
+=== TURN
+labels: dup=1
+note: same timeout constant defined in two clients
+--- a/server/src/main/scala/com/acme/billing/StripeClient.scala
++++ b/server/src/main/scala/com/acme/billing/StripeClient.scala
+@@ -5,4 +5,5 @@ object StripeClient:
++  private val RequestTimeout = 30.seconds
++  def build[F[_]: Async](builder: EmberClientBuilder[F]) = builder.withTimeout(RequestTimeout).build
+--- a/server/src/main/scala/com/acme/auth/OidcClient.scala
++++ b/server/src/main/scala/com/acme/auth/OidcClient.scala
+@@ -5,4 +5,5 @@ object OidcClient:
++  private val RequestTimeout = 30.seconds
++  def build[F[_]: Async](builder: EmberClientBuilder[F]) = builder.withTimeout(RequestTimeout).build
+=== END
+=== TURN
+labels: dup=0
+note: one shared fixture used by two tests
+--- a/server/src/test/scala/com/acme/billing/SubscriptionServiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/SubscriptionServiceSuite.scala
+@@ -10,6 +10,12 @@ class SubscriptionServiceSuite extends CatsEffectSuite:
++  private val subscription = Generators.subscription.sampleSome
++
++  test("cancel marks cancelled"):
++    service.cancel(subscription.id).map(s => assertEquals(s.status, Status.Cancelled))
++
++  test("pause marks paused"):
++    service.pause(subscription.id).map(s => assertEquals(s.status, Status.Paused))
+=== END
+=== TURN
+labels: dup=1
+note: generator copy-pasted across two test files
+--- a/server/src/test/scala/com/acme/billing/InvoiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/InvoiceSuite.scala
+@@ -6,4 +6,6 @@ class InvoiceSuite extends ScalaCheckSuite:
++  private val money: Gen[Money] = Gen.choose(1, 100000).map(Money.cents)
++  private val line: Gen[InvoiceLine] = (Gen.alphaStr, money).mapN(InvoiceLine.apply)
+--- a/server/src/test/scala/com/acme/billing/RefundSuite.scala
++++ b/server/src/test/scala/com/acme/billing/RefundSuite.scala
+@@ -6,4 +6,6 @@ class RefundSuite extends ScalaCheckSuite:
++  private val money: Gen[Money] = Gen.choose(1, 100000).map(Money.cents)
++  private val line: Gen[InvoiceLine] = (Gen.alphaStr, money).mapN(InvoiceLine.apply)
+=== END
+=== TURN
+labels: dup=0
+note: look-alike constants with different meaning
+--- a/server/src/main/scala/com/acme/billing/TrialPolicy.scala
++++ b/server/src/main/scala/com/acme/billing/TrialPolicy.scala
+@@ -3,4 +3,5 @@ object TrialPolicy:
++  val TrialDays = 14
+--- a/server/src/main/scala/com/acme/billing/RefundPolicy.scala
++++ b/server/src/main/scala/com/acme/billing/RefundPolicy.scala
+@@ -3,4 +3,5 @@ object RefundPolicy:
++  val RefundWindowDays = 14
+=== END
+=== TURN
+labels: dup=1
+note: error-mapping idiom repeated in three route methods
+--- a/server/src/main/scala/com/acme/users/UserRoutes.scala
++++ b/server/src/main/scala/com/acme/users/UserRoutes.scala
+@@ -12,4 +12,7 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++      users.find(id).attempt.flatMap:
++        case Right(user) => Ok(user)
++        case Left(e)     => InternalServerError(ErrorBody(e.getMessage))
+--- a/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
+@@ -12,4 +12,7 @@ final class InvoiceRoutes[F[_]: Concurrent](invoices: InvoiceService[F]) extends Http4sDsl[F]:
++      invoices.find(id).attempt.flatMap:
++        case Right(invoice) => Ok(invoice)
++        case Left(e)        => InternalServerError(ErrorBody(e.getMessage))
+=== END
+=== TURN
+labels: dup=0
+note: extension introduced and used twice
+--- a/server/src/main/scala/com/acme/http/ResponseOps.scala
++++ b/server/src/main/scala/com/acme/http/ResponseOps.scala
+@@ -1,3 +1,8 @@
++extension [F[_]: Monad](fa: F[Either[Throwable, Json]])
++  def toResponse(using dsl: Http4sDsl[F]): F[Response[F]] =
++    fa.flatMap(_.fold(e => dsl.InternalServerError(ErrorBody(e.getMessage)), dsl.Ok(_)))
+--- a/server/src/main/scala/com/acme/users/UserRoutes.scala
++++ b/server/src/main/scala/com/acme/users/UserRoutes.scala
+@@ -12,4 +12,3 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++      users.find(id).attempt.map(_.map(_.asJson)).toResponse
+--- a/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
+@@ -12,4 +12,3 @@ final class InvoiceRoutes[F[_]: Concurrent](invoices: InvoiceService[F]) extends Http4sDsl[F]:
++      invoices.find(id).attempt.map(_.map(_.asJson)).toResponse
+=== END
+=== TURN
+labels: dup=1
+note: session TTL defined in two services
+--- a/server/src/main/scala/com/acme/auth/TokenService.scala
++++ b/server/src/main/scala/com/acme/auth/TokenService.scala
+@@ -6,4 +6,5 @@ final class TokenService[F[_]: Sync](clock: Clock[F]):
++  private val Ttl = 30.minutes
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(Ttl.toSeconds))
+--- a/server/src/main/scala/com/acme/auth/SessionService.scala
++++ b/server/src/main/scala/com/acme/auth/SessionService.scala
+@@ -6,4 +6,5 @@ final class SessionService[F[_]: Sync](clock: Clock[F]):
++  private val Ttl = 30.minutes
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(Ttl.toSeconds))
+=== END
+=== TURN
+labels: dup=0
+note: reuses existing named constant
+--- a/server/src/main/scala/com/acme/auth/TokenService.scala
++++ b/server/src/main/scala/com/acme/auth/TokenService.scala
+@@ -6,4 +6,4 @@ final class TokenService[F[_]: Sync](clock: Clock[F]):
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(AuthConfig.SessionTtl.toSeconds))
+--- a/server/src/main/scala/com/acme/auth/SessionService.scala
++++ b/server/src/main/scala/com/acme/auth/SessionService.scala
+@@ -6,4 +6,4 @@ final class SessionService[F[_]: Sync](clock: Clock[F]):
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(AuthConfig.SessionTtl.toSeconds))
+=== END
+=== TURN
+labels: dup=1
+note: same price literal in three test sites
+--- a/server/src/test/scala/com/acme/billing/PricingSuite.scala
++++ b/server/src/test/scala/com/acme/billing/PricingSuite.scala
+@@ -7,4 +7,6 @@ class PricingSuite extends FunSuite:
++  test("pro plan costs 9.99"): assertEquals(Plan.Pro.price, Money.cents(999))
++  test("pro plan with tax"): assertEquals(Pricing.withTax(Plan.Pro), Money.cents(999) + Money.cents(80))
+--- a/server/src/test/scala/com/acme/billing/CheckoutSuite.scala
++++ b/server/src/test/scala/com/acme/billing/CheckoutSuite.scala
+@@ -7,4 +7,5 @@ class CheckoutSuite extends CatsEffectSuite:
++  test("checkout charges pro price"): checkout(Plan.Pro).map(r => assertEquals(r.amount, Money.cents(999)))
+=== END
+=== TURN
+labels: dup=0
+note: two tests with different values, no shared concept
+--- a/server/src/test/scala/com/acme/billing/ProrationSuite.scala
++++ b/server/src/test/scala/com/acme/billing/ProrationSuite.scala
+@@ -7,4 +7,7 @@ class ProrationSuite extends FunSuite:
++  test("full period credits full price"):
++    assertEquals(Proration.credit(Money.cents(3000), 30, 30), Money.cents(3000))
++  test("half period credits half price"):
++    assertEquals(Proration.credit(Money.cents(3000), 15, 30), Money.cents(1500))
+=== END
+=== TURN
+labels: dup=1
+note: bearer header parsing idiom repeated
+--- a/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
++++ b/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
+@@ -9,4 +9,5 @@ object AuthMiddleware:
++  private def bearer(req: Request[IO]): Option[String] =
++    req.headers.get[Authorization].map(_.credentials.renderString).filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+--- a/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
++++ b/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
+@@ -9,4 +9,5 @@ object WebsocketAuth:
++  private def bearer(req: Request[IO]): Option[String] =
++    req.headers.get[Authorization].map(_.credentials.renderString).filter(_.startsWith("Bearer ")).map(_.stripPrefix("Bearer "))
+=== END
+=== TURN
+labels: dup=0
+note: single shared helper called from both places
+--- a/server/src/main/scala/com/acme/auth/BearerToken.scala
++++ b/server/src/main/scala/com/acme/auth/BearerToken.scala
+@@ -1,3 +1,6 @@
++object BearerToken:
++  def from(req: Request[IO]): Option[String] =
++    req.headers.get[Authorization].map(_.credentials.renderString).collect { case s if s.startsWith("Bearer ") => s.drop(7) }
+--- a/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
++++ b/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
+@@ -9,4 +9,3 @@ object AuthMiddleware:
++  private def token(req: Request[IO]) = BearerToken.from(req)
+--- a/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
++++ b/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
+@@ -9,4 +9,3 @@ object WebsocketAuth:
++  private def token(req: Request[IO]) = BearerToken.from(req)
+=== END
+=== TURN
+labels: dup=1
+note: identical setup block in two suites
+--- a/server/src/test/scala/com/acme/billing/DunningSuite.scala
++++ b/server/src/test/scala/com/acme/billing/DunningSuite.scala
+@@ -9,5 +9,8 @@ class DunningSuite extends CatsEffectSuite:
++  private val env = ResourceFunFixture(
++    (Ref.of[IO, List[Mail]](Nil), Ref.of[IO, Map[SubscriptionId, Subscription]](Map.empty)).mapN(Env.apply)
++  )
+--- a/server/src/test/scala/com/acme/billing/TrialSuite.scala
++++ b/server/src/test/scala/com/acme/billing/TrialSuite.scala
+@@ -9,5 +9,8 @@ class TrialSuite extends CatsEffectSuite:
++  private val env = ResourceFunFixture(
++    (Ref.of[IO, List[Mail]](Nil), Ref.of[IO, Map[SubscriptionId, Subscription]](Map.empty)).mapN(Env.apply)
++  )
+=== END
+=== TURN
+labels: dup=0
+note: setup lifted to a shared trait and mixed in
+--- a/server/src/test/scala/com/acme/billing/BillingEnv.scala
++++ b/server/src/test/scala/com/acme/billing/BillingEnv.scala
+@@ -1,3 +1,8 @@
++trait BillingEnv:
++  self: CatsEffectSuite =>
++  val env = ResourceFunFixture(
++    (Ref.of[IO, List[Mail]](Nil), Ref.of[IO, Map[SubscriptionId, Subscription]](Map.empty)).mapN(Env.apply)
++  )
+--- a/server/src/test/scala/com/acme/billing/DunningSuite.scala
++++ b/server/src/test/scala/com/acme/billing/DunningSuite.scala
+@@ -5,3 +5,3 @@
++class DunningSuite extends CatsEffectSuite with BillingEnv:
+--- a/server/src/test/scala/com/acme/billing/TrialSuite.scala
++++ b/server/src/test/scala/com/acme/billing/TrialSuite.scala
+@@ -5,3 +5,3 @@
++class TrialSuite extends CatsEffectSuite with BillingEnv:
+=== END
+=== TURN
+labels: dup=1
+note: same SQL fragment string in two repositories
+--- a/server/src/main/scala/com/acme/billing/InvoiceSql.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceSql.scala
+@@ -6,4 +6,5 @@ object InvoiceSql:
++  val selectOpen: Query[UserId, Invoice] =
++    sql"SELECT id, owner, total, due_date FROM invoices WHERE owner = $userId AND paid_at IS NULL".query(invoice)
+--- a/server/src/main/scala/com/acme/billing/CreditSql.scala
++++ b/server/src/main/scala/com/acme/billing/CreditSql.scala
+@@ -6,4 +6,5 @@ object CreditSql:
++  val selectOpenInvoices: Query[UserId, Invoice] =
++    sql"SELECT id, owner, total, due_date FROM invoices WHERE owner = $userId AND paid_at IS NULL".query(invoice)
+=== END
+=== TURN
+labels: dup=0
+note: similar queries over different tables
+--- a/server/src/main/scala/com/acme/users/UserSql.scala
++++ b/server/src/main/scala/com/acme/users/UserSql.scala
+@@ -6,4 +6,5 @@ object UserSql:
++  val selectById: Query[UserId, User] = sql"SELECT id, email, role FROM users WHERE id = $userId".query(user)
+--- a/server/src/main/scala/com/acme/billing/PlanSql.scala
++++ b/server/src/main/scala/com/acme/billing/PlanSql.scala
+@@ -6,4 +6,5 @@ object PlanSql:
++  val selectById: Query[PlanId, Plan] = sql"SELECT id, name, price FROM plans WHERE id = $planId".query(plan)
+=== END
+=== TURN
+labels: dup=1
+note: same Laminar class string and styling repeated
+--- a/app/src/main/scala/com/acme/ui/PlanCard.scala
++++ b/app/src/main/scala/com/acme/ui/PlanCard.scala
+@@ -8,4 +8,5 @@ object PlanCard:
++  def render(plan: Plan): HtmlElement =
++    div(cls := "rounded border border-gray-300 p-4 shadow-sm bg-white", plan.name)
+--- a/app/src/main/scala/com/acme/ui/InvoiceCard.scala
++++ b/app/src/main/scala/com/acme/ui/InvoiceCard.scala
+@@ -8,4 +8,5 @@ object InvoiceCard:
++  def render(invoice: Invoice): HtmlElement =
++    div(cls := "rounded border border-gray-300 p-4 shadow-sm bg-white", invoice.number)
+=== END
+=== TURN
+labels: dup=0
+note: new method placed once, referenced once
+--- a/app/src/main/scala/com/acme/ui/CardStyle.scala
++++ b/app/src/main/scala/com/acme/ui/CardStyle.scala
+@@ -1,3 +1,4 @@
++object CardStyle:
++  val classes = "rounded border border-gray-300 p-4 shadow-sm bg-white"
+--- a/app/src/main/scala/com/acme/ui/PlanCard.scala
++++ b/app/src/main/scala/com/acme/ui/PlanCard.scala
+@@ -8,4 +8,4 @@ object PlanCard:
++    div(cls := CardStyle.classes, plan.name)
+=== END
+=== TURN
+labels: dup=1
+note: same option-to-error idiom repeated and same header constant
+--- a/server/src/main/scala/com/acme/users/UserService.scala
++++ b/server/src/main/scala/com/acme/users/UserService.scala
+@@ -14,4 +14,5 @@ final class UserService[F[_]: MonadThrow](users: UserRepository[F]):
++  def get(id: UserId): F[User] =
++    users.find(id).flatMap(_.fold(UserNotFound(id).raiseError[F, User])(_.pure[F]))
+--- a/server/src/main/scala/com/acme/billing/PlanService.scala
++++ b/server/src/main/scala/com/acme/billing/PlanService.scala
+@@ -14,4 +14,5 @@ final class PlanService[F[_]: MonadThrow](plans: PlanRepository[F]):
++  def get(id: PlanId): F[Plan] =
++    plans.find(id).flatMap(_.fold(PlanNotFound(id).raiseError[F, Plan])(_.pure[F]))
+--- a/server/src/main/scala/com/acme/billing/InvoiceService.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceService.scala
+@@ -14,4 +14,5 @@ final class InvoiceService[F[_]: MonadThrow](invoices: InvoiceRepository[F]):
++  def get(id: InvoiceId): F[Invoice] =
++    invoices.find(id).flatMap(_.fold(InvoiceNotFound(id).raiseError[F, Invoice])(_.pure[F]))
+=== END
+=== TURN
+labels: dup=0
+note: same shape but only two uses with different error types, single-site idiom
+--- a/server/src/main/scala/com/acme/billing/CouponService.scala
++++ b/server/src/main/scala/com/acme/billing/CouponService.scala
+@@ -14,4 +14,5 @@ final class CouponService[F[_]: MonadThrow](coupons: CouponRepository[F]):
++  def get(code: CouponCode): F[Coupon] =
++    coupons.find(code).flatMap(_.liftTo[F](UnknownCoupon(code)))
+=== END
+=== TURN
+labels: dup=1
+note: request-id header name literal repeated
+--- a/server/src/main/scala/com/acme/http/RequestIdMiddleware.scala
++++ b/server/src/main/scala/com/acme/http/RequestIdMiddleware.scala
+@@ -5,4 +5,5 @@ object RequestIdMiddleware:
++  def read(req: Request[IO]): Option[String] = req.headers.get(CIString("X-Request-Id")).map(_.head.value)
+--- a/server/src/main/scala/com/acme/billing/StripeClient.scala
++++ b/server/src/main/scala/com/acme/billing/StripeClient.scala
+@@ -9,4 +9,5 @@ object StripeClient:
++  def tag(req: Request[IO], id: String): Request[IO] = req.putHeaders(Header.Raw(CIString("X-Request-Id"), id))
+--- a/server/src/main/scala/com/acme/auth/OidcClient.scala
++++ b/server/src/main/scala/com/acme/auth/OidcClient.scala
+@@ -9,4 +9,5 @@ object OidcClient:
++  def tag(req: Request[IO], id: String): Request[IO] = req.putHeaders(Header.Raw(CIString("X-Request-Id"), id))
+=== END
+=== TURN
+labels: dup=0
+note: different headers, no shared concept
+--- a/server/src/main/scala/com/acme/billing/StripeClient.scala
++++ b/server/src/main/scala/com/acme/billing/StripeClient.scala
+@@ -9,4 +9,5 @@ object StripeClient:
++  def signed(req: Request[IO], key: ApiKey): Request[IO] = req.putHeaders(Header.Raw(CIString("Stripe-Signature"), key.value))
+--- a/server/src/main/scala/com/acme/auth/OidcClient.scala
++++ b/server/src/main/scala/com/acme/auth/OidcClient.scala
+@@ -9,4 +9,5 @@ object OidcClient:
++  def bearer(req: Request[IO], token: Token): Request[IO] = req.putHeaders(Authorization(Credentials.Token(AuthScheme.Bearer, token.value)))
+=== END
+=== TURN
+labels: dup=1
+note: same retry-policy lines in two repositories
+--- a/server/src/main/scala/com/acme/billing/PaymentGateway.scala
++++ b/server/src/main/scala/com/acme/billing/PaymentGateway.scala
+@@ -12,4 +12,6 @@ final class PaymentGateway[F[_]: Temporal](client: StripeClient[F]):
++  private val retryPolicy = RetryPolicies.limitRetries[F](3).join(RetryPolicies.exponentialBackoff[F](200.millis))
++  def capture(id: ChargeId): F[Unit] = retryingOnAllErrors(retryPolicy, logRetry)(client.capture(id))
+--- a/server/src/main/scala/com/acme/auth/OidcGateway.scala
++++ b/server/src/main/scala/com/acme/auth/OidcGateway.scala
+@@ -12,4 +12,6 @@ final class OidcGateway[F[_]: Temporal](client: OidcClient[F]):
++  private val retryPolicy = RetryPolicies.limitRetries[F](3).join(RetryPolicies.exponentialBackoff[F](200.millis))
++  def userInfo(token: Token): F[Claims] = retryingOnAllErrors(retryPolicy, logRetry)(client.userInfo(token))
+=== END
+=== TURN
+labels: dup=0
+note: only one place, no repetition
+--- a/server/src/main/scala/com/acme/billing/PaymentGateway.scala
++++ b/server/src/main/scala/com/acme/billing/PaymentGateway.scala
+@@ -12,4 +12,6 @@ final class PaymentGateway[F[_]: Temporal](client: StripeClient[F]):
++  private val retryPolicy = RetryPolicies.limitRetries[F](3).join(RetryPolicies.exponentialBackoff[F](200.millis))
++  def capture(id: ChargeId): F[Unit] = retryingOnAllErrors(retryPolicy, logRetry)(client.capture(id))
+=== END

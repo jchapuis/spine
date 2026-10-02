@@ -1,0 +1,445 @@
+=== EDIT server/src/main/scala/com/acme/booking/AvailabilityService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(UTC) hides a missing practitioner time zone
+@@ -21,7 +21,7 @@ final class AvailabilityService[F[_]: Sync](
+   practitioners: PractitionerRepository[F],
+   slots: SlotRepository[F]
+ ):
+   def openSlots(id: PractitionerId, day: LocalDate): F[List[Slot]] =
+-    practitioners.find(id).flatMap(_.liftTo[F](PractitionerNotFound(id))).flatMap(p => slots.freeOn(p.zone, day))
++    practitioners.find(id).map(_.map(_.zone).getOrElse(ZoneOffset.UTC)).flatMap(zone => slots.freeOn(zone, day))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/ReminderDispatcher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: handleError swallows every failure from the sender, including bugs
+@@ -30,5 +30,6 @@ final class ReminderDispatcher[F[_]: Sync](sender: ReminderSender[F]):
+   def dispatch(reminder: Reminder): F[Unit] =
+-    sender.send(reminder)
++    sender.send(reminder).handleError(_ => ())
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: BookingService holds the concrete ReminderService
+@@ -8,8 +8,8 @@ import com.acme.reminders.ReminderService
+ final class BookingService[F[_]: Monad](
+   appointments: AppointmentRepository[F],
+-  reminders: ReminderScheduler[F]
++  reminders: ReminderService[F]
+ ):
+   def confirm(id: AppointmentId): F[Appointment] =
+-    appointments.confirm(id).flatTap(a => reminders.schedule(a.id, a.startsAt))
++    appointments.confirm(id).flatTap(a => reminders.scheduleFor(a))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/AvailabilityService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: availability calls CalendarService directly
+@@ -14,6 +14,7 @@ final class AvailabilityService[F[_]: Monad](
+   calendars: CalendarService[F],
+   slots: SlotRepository[F]
+ ):
+   def isFree(id: PractitionerId, window: TimeWindow): F[Boolean] =
+-    slots.overlapping(id, window).map(_.isEmpty)
++    calendars.busyBlocks(id, window).flatMap: busy =>
++      slots.overlapping(id, window).map(taken => taken.isEmpty && busy.isEmpty)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/notifications/ReminderService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: new service constructor takes concrete NotificationService
+@@ -0,0 +1,10 @@
++package com.acme.notifications
++
++import cats.Monad
++
++final class ReminderService[F[_]: Monad](
++  notifications: NotificationService[F],
++  reminders: ReminderRepository[F]
++):
++  def remind(id: ReminderId): F[Unit] =
++    reminders.get(id).flatMap(r => notifications.push(r.recipient, r.message))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step conflict resolution inlined in service method
+@@ -18,5 +18,16 @@ final class BookingService[F[_]: Monad](
+   def book(req: BookingRequest): F[Appointment] =
+-    appointments.insert(req.toAppointment)
++    for
++      existing <- appointments.forPractitioner(req.practitioner, req.window.day)
++      sorted = existing.sortBy(_.startsAt)
++      gaps = sorted.zip(sorted.drop(1)).map((a, b) => TimeWindow(a.endsAt, b.startsAt))
++      fitting = gaps.filter(_.length >= req.duration)
++      chosen <- fitting.headOption.liftTo[F](NoRoomForAppointment(req.practitioner))
++      saved <- appointments.insert(req.toAppointment.copy(window = chosen.take(req.duration)))
++    yield saved
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/SlotAllocator.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra shipped as object with concrete logic and no trait
+@@ -0,0 +1,11 @@
++package com.acme.booking
++
++import scala.concurrent.duration.FiniteDuration
++
++object SlotAllocator:
++  def allocate[F[_]: Monad](slots: SlotRepository[F], duration: FiniteDuration, day: LocalDate): F[Option[Slot]] =
++    slots.freeOn(day).map: free =>
++      free
++        .filter(_.length >= duration)
++        .sortBy(_.startsAt)
++        .headOption
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: abbreviated locals avgDur and reqSlot
+@@ -40,4 +40,6 @@ final class BookingService[F[_]: Monad](
+   def suggestDuration(history: List[Appointment]): FiniteDuration =
+-    history.map(_.length).foldLeft(Duration.Zero)(_ + _) / history.size.max(1)
++    val avgDur = history.map(_.length).foldLeft(Duration.Zero)(_ + _) / history.size.max(1)
++    val reqSlot = avgDur.max(MinimumSlot)
++    reqSlot
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/SlotGrid.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder is a metaphor where "candidate times" exists
+@@ -9,4 +9,5 @@ object SlotGrid:
+-  def candidates(start: Instant, step: FiniteDuration, count: Int): List[Instant] =
+-    List.tabulate(count)(i => start.plusMillis(step.toMillis * i))
++  def ladder(start: Instant, step: FiniteDuration, count: Int): List[Instant] =
++    List.tabulate(count)(i => start.plusMillis(step.toMillis * i))
++
++  def topRung(start: Instant, step: FiniteDuration, count: Int): Instant = ladder(start, step, count).last
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/booking/TimeMath.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: single-letter non-idiomatic params d, t, c
+@@ -5,3 +5,4 @@ import java.time.Instant
+ object TimeMath:
++  def repeatEvery(d: FiniteDuration, t: Instant, c: Int): List[Instant] =
++    List.iterate(t, c)(_.plusMillis(d.toMillis))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/AppointmentSummaryService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent loads chained with flatMap instead of mapN
+@@ -16,6 +16,7 @@ final class AppointmentSummaryService[F[_]: Monad](
+   def summary(id: AppointmentId): F[Summary] =
+-    appointments.get(id).map(Summary(_, Nil, None))
++    appointments.get(id).flatMap: appointment =>
++      reminders.forAppointment(id).flatMap: scheduled =>
++        practitioners.nextFree(appointment.practitioner).map: next =>
++          Summary(appointment, scheduled, next)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/WorkloadReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft accumulator should be foldMap
+@@ -12,4 +12,5 @@ object WorkloadReport:
+   def totalBooked(appointments: List[Appointment]): FiniteDuration =
+-    appointments.map(_.length).sum
++    appointments.foldLeft(Duration.Zero): (acc, appointment) =>
++      acc + appointment.length
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/ReminderDispatcher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: swallows errors with recover and abbreviates rmndr
+@@ -22,6 +22,7 @@ final class ReminderDispatcher[F[_]: Sync](sender: ReminderSender[F]):
+   def dispatchAll(due: List[Reminder]): F[Unit] =
+-    due.traverse_(sender.send)
++    due.traverse_: rmndr =>
++      sender.send(rmndr).recover { case _ => () }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/RescheduleService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: holds concrete BookingService and inlines multi-step logic
+@@ -7,9 +7,16 @@ final class RescheduleService[F[_]: Monad](
+-  bookings: BookingAlgebra[F]
++  bookings: BookingService[F],
++  appointments: AppointmentRepository[F]
+ ):
+   def reschedule(id: AppointmentId, to: Instant): F[Appointment] =
+-    bookings.move(id, to)
++    for
++      current <- appointments.get(id)
++      shifted = current.copy(startsAt = to, endsAt = to.plusMillis(current.length.toMillis))
++      _ <- bookings.cancel(id)
++      fresh <- bookings.book(shifted.toRequest)
++      _ <- appointments.markMoved(id, fresh.id)
++    yield fresh
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/DaySummaryService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+note: inlined multi-step logic plus independent loads chained
+@@ -10,5 +10,14 @@ final class DaySummaryService[F[_]: Monad](
+   def summarise(id: PractitionerId, day: LocalDate): F[DaySummary] =
+-    slots.forDay(id, day).map(DaySummary.fromSlots)
++    slots.forDay(id, day).flatMap: free =>
++      appointments.forDay(id, day).flatMap: booked =>
++        val busyMinutes = booked.map(_.length.toMinutes).sum
++        val freeMinutes = free.map(_.length.toMinutes).sum
++        val utilisation = busyMinutes.toDouble / (busyMinutes + freeMinutes).max(1)
++        Monad[F].pure(DaySummary(free.size, booked.size, utilisation))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/PractitionerRepository.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: toRight surfaces the missing practitioner to the caller
+@@ -15,4 +15,4 @@ final class PractitionerLookup(repo: PractitionerRepository[IO]):
+   def require(id: PractitionerId): IO[Either[BookingError, Practitioner]] =
+-    repo.find(id).map(_.fold[Either[BookingError, Practitioner]](Left(PractitionerNotFound(id)))(Right(_)))
++    repo.find(id).map(_.toRight(PractitionerNotFound(id)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/SmsGateway.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient failure retried with backoff then re-raised
+@@ -18,6 +18,12 @@ final class SmsGateway(client: SmsClient[IO])(using Temporal[IO]):
+   def send(sms: Sms): IO[Unit] =
+-    client.post(sms)
++    def attempt(remaining: Int, delay: FiniteDuration): IO[Unit] =
++      client.post(sms).recoverWith:
++        case _: ConnectException if remaining > 0 =>
++          IO.sleep(delay) *> attempt(remaining - 1, delay * 2)
++
++    attempt(MaxAttempts, 200.millis)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/AppointmentRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing appointment mapped to explicit 404 at the HTTP boundary
+@@ -25,5 +25,7 @@ final class AppointmentRoutes(service: BookingService[IO]) extends Http4sDsl[IO]
+     case GET -> Root / "appointments" / UUIDVar(id) =>
+-      service.find(AppointmentId(id)).flatMap(Ok(_))
++      service.find(AppointmentId(id)).flatMap:
++        case Some(appointment) => Ok(appointment)
++        case None => NotFound(ErrorBody(s"appointment $id not found"))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service holds algebra traits only
+@@ -6,7 +6,9 @@ import com.acme.reminders.ReminderScheduler
+ final class BookingService[F[_]: Monad](
+   appointments: AppointmentRepository[F],
+-  reminders: ReminderScheduler[F]
++  reminders: ReminderScheduler[F],
++  availability: AvailabilityCheck[F]
+ ):
+   def hold(req: BookingRequest): F[Appointment] =
+-    appointments.insert(req.toAppointment)
++    availability.ensureFree(req.practitioner, req.window) *> appointments.insert(req.toAppointment)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/AvailabilityService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, getOrElse(UTC) replaced by raising error
+@@ -21,5 +21,5 @@ final class AvailabilityService[F[_]: Sync](
+   def openSlots(id: PractitionerId, day: LocalDate): F[List[Slot]] =
+-    practitioners.find(id).map(_.map(_.zone).getOrElse(ZoneOffset.UTC)).flatMap(zone => slots.freeOn(zone, day))
++    practitioners.find(id).flatMap(_.liftTo[F](PractitionerNotFound(id))).flatMap(p => slots.freeOn(p.zone, day))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, abbreviations renamed
+@@ -40,6 +40,5 @@ final class BookingService[F[_]: Monad](
+   def suggestDuration(history: List[Appointment]): FiniteDuration =
+-    val avgDur = history.map(_.length).foldLeft(Duration.Zero)(_ + _) / history.size.max(1)
+-    val reqSlot = avgDur.max(MinimumSlot)
+-    reqSlot
++    val averageDuration = history.foldMap(_.length) / history.size.max(1)
++    averageDuration.max(MinimumSlot)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/api/AppointmentEndpoints.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: plain tapir endpoint with a documented default page size
+@@ -0,0 +1,12 @@
++package com.acme.booking.api
++
++import sttp.tapir.*
++import sttp.tapir.json.circe.*
++
++object AppointmentEndpoints:
++  val list: PublicEndpoint[(Option[PageSize], LocalDate), ApiError, List[AppointmentView], Any] =
++    endpoint.get
++      .in("appointments")
++      .in(query[Option[PageSize]]("limit").map(_.getOrElse(DefaultPageSize))(Some(_)))
++      .in(query[LocalDate]("day"))
++      .errorOut(jsonBody[ApiError])
++      .out(jsonBody[List[AppointmentView]])
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/db/SlotCodecs.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: plain skunk codec and query
+@@ -0,0 +1,10 @@
++package com.acme.booking.db
++
++import skunk.*
++import skunk.codec.all.*
++import skunk.implicits.*
++
++object SlotCodecs:
++  val slot: Codec[Slot] = (timestamptz *: timestamptz).imap(Slot.apply)(s => (s.startsAt, s.endsAt))
++  val freeSlotsOn: Query[LocalDate, Slot] =
++    sql"SELECT starts_at, ends_at FROM slots WHERE day = $date AND booked = false".query(slot)
+=== END
+
+=== TURN
+labels: dup=1
+note: same reminder lead time defined in two files
+--- a/server/src/main/scala/com/acme/reminders/ReminderPlanner.scala
++++ b/server/src/main/scala/com/acme/reminders/ReminderPlanner.scala
+@@ -4,4 +4,6 @@ object ReminderPlanner:
++  private val LeadTime: FiniteDuration = 15.minutes
++
++  def dueAt(start: Instant): Instant = start.minusMillis(LeadTime.toMillis)
+--- a/server/src/main/scala/com/acme/reminders/ReminderReconciler.scala
++++ b/server/src/main/scala/com/acme/reminders/ReminderReconciler.scala
+@@ -5,4 +5,6 @@ object ReminderReconciler:
++  private val LeadTime: FiniteDuration = 15.minutes
++
++  def isOverdue(start: Instant, now: Instant): Boolean = now.isAfter(start.minusMillis(LeadTime.toMillis))
+=== END
+
+=== TURN
+labels: dup=1
+note: identical appointment fixture built in two tests
+--- a/server/src/test/scala/com/acme/booking/BookingServiceSuite.scala
++++ b/server/src/test/scala/com/acme/booking/BookingServiceSuite.scala
+@@ -10,3 +10,7 @@ class BookingServiceSuite extends CatsEffectSuite:
++  test("confirm marks appointment confirmed"):
++    val appointment = Appointment(AppointmentId(UUID.fromString("0f8c0000-0000-0000-0000-000000000001")), PractitionerId("dr-lee"), Instant.parse("2026-03-02T09:00:00Z"), 30.minutes)
++    service.confirm(appointment).map(a => assertEquals(a.status, Status.Confirmed))
+--- a/server/src/test/scala/com/acme/booking/ReminderServiceSuite.scala
++++ b/server/src/test/scala/com/acme/booking/ReminderServiceSuite.scala
+@@ -8,3 +8,7 @@ class ReminderServiceSuite extends CatsEffectSuite:
++  test("schedule creates one reminder"):
++    val appointment = Appointment(AppointmentId(UUID.fromString("0f8c0000-0000-0000-0000-000000000001")), PractitionerId("dr-lee"), Instant.parse("2026-03-02T09:00:00Z"), 30.minutes)
++    reminders.schedule(appointment).map(r => assertEquals(r.size, 1))
+=== END
+
+=== TURN
+labels: dup=1
+note: same zone-to-local-date idiom repeated in three places
+--- a/server/src/main/scala/com/acme/booking/DaySummaryService.scala
++++ b/server/src/main/scala/com/acme/booking/DaySummaryService.scala
+@@ -12,3 +12,4 @@ final class DaySummaryService[F[_]: Monad]:
++  private def dayOf(a: Appointment, zone: ZoneId): LocalDate =
++    a.startsAt.atZone(zone).toLocalDate
+--- a/server/src/main/scala/com/acme/booking/ConflictDetector.scala
++++ b/server/src/main/scala/com/acme/booking/ConflictDetector.scala
+@@ -6,3 +6,5 @@ object ConflictDetector:
++  def sameDay(a: Appointment, b: Appointment, zone: ZoneId): Boolean =
++    a.startsAt.atZone(zone).toLocalDate == b.startsAt.atZone(zone).toLocalDate
+--- a/server/src/main/scala/com/acme/booking/AgendaView.scala
++++ b/server/src/main/scala/com/acme/booking/AgendaView.scala
+@@ -4,3 +4,4 @@ object AgendaView:
++  def groupByDay(xs: List[Appointment], zone: ZoneId): Map[LocalDate, List[Appointment]] =
++    xs.groupBy(_.startsAt.atZone(zone).toLocalDate)
+=== END
+
+=== TURN
+labels: dup=1
+note: identical skunk codec defined in two repositories
+--- a/server/src/main/scala/com/acme/booking/db/AppointmentRepository.scala
++++ b/server/src/main/scala/com/acme/booking/db/AppointmentRepository.scala
+@@ -8,3 +8,4 @@ object AppointmentRepository:
++  private val window: Codec[TimeWindow] =
++    (timestamptz *: timestamptz).imap(TimeWindow.apply)(w => (w.start, w.end))
+--- a/server/src/main/scala/com/acme/booking/db/BlockedTimeRepository.scala
++++ b/server/src/main/scala/com/acme/booking/db/BlockedTimeRepository.scala
+@@ -8,3 +8,4 @@ object BlockedTimeRepository:
++  private val window: Codec[TimeWindow] =
++    (timestamptz *: timestamptz).imap(TimeWindow.apply)(w => (w.start, w.end))
+=== END
+
+=== TURN
+labels: dup=0
+note: one shared fixture used by two tests
+--- a/server/src/test/scala/com/acme/booking/Fixtures.scala
++++ b/server/src/test/scala/com/acme/booking/Fixtures.scala
+@@ -3,3 +3,5 @@ object Fixtures:
++  val morningAppointment: Appointment =
++    Appointment(AppointmentId(UUID.fromString("0f8c0000-0000-0000-0000-000000000001")), PractitionerId("dr-lee"), Instant.parse("2026-03-02T09:00:00Z"), 30.minutes)
+--- a/server/src/test/scala/com/acme/booking/BookingServiceSuite.scala
++++ b/server/src/test/scala/com/acme/booking/BookingServiceSuite.scala
+@@ -10,3 +10,4 @@ class BookingServiceSuite extends CatsEffectSuite:
++  test("confirm marks appointment confirmed"):
++    service.confirm(Fixtures.morningAppointment).map(a => assertEquals(a.status, Status.Confirmed))
+--- a/server/src/test/scala/com/acme/booking/ReminderServiceSuite.scala
++++ b/server/src/test/scala/com/acme/booking/ReminderServiceSuite.scala
+@@ -8,3 +8,4 @@ class ReminderServiceSuite extends CatsEffectSuite:
++  test("schedule creates one reminder"):
++    reminders.schedule(Fixtures.morningAppointment).map(r => assertEquals(r.size, 1))
+=== END
+
+=== TURN
+labels: dup=0
+note: two 15-minute values that mean different things
+--- a/server/src/main/scala/com/acme/reminders/ReminderPlanner.scala
++++ b/server/src/main/scala/com/acme/reminders/ReminderPlanner.scala
+@@ -4,3 +4,4 @@ object ReminderPlanner:
++  val LeadTime: FiniteDuration = 15.minutes
+--- a/server/src/main/scala/com/acme/booking/SlotGrid.scala
++++ b/server/src/main/scala/com/acme/booking/SlotGrid.scala
+@@ -4,3 +4,4 @@ object SlotGrid:
++  val Granularity: FiniteDuration = 15.minutes
+=== END
+
+=== TURN
+labels: dup=0
+note: reuses the existing named constant
+--- a/server/src/main/scala/com/acme/reminders/ReminderReconciler.scala
++++ b/server/src/main/scala/com/acme/reminders/ReminderReconciler.scala
+@@ -5,4 +5,4 @@ object ReminderReconciler:
+-  def isOverdue(start: Instant, now: Instant): Boolean = now.isAfter(start.minusMillis(15.minutes.toMillis))
++  def isOverdue(start: Instant, now: Instant): Boolean = now.isAfter(ReminderPlanner.dueAt(start))
+--- a/server/src/main/scala/com/acme/reminders/ReminderDigest.scala
++++ b/server/src/main/scala/com/acme/reminders/ReminderDigest.scala
+@@ -5,4 +5,4 @@ object ReminderDigest:
+-  def upcoming(start: Instant): Boolean = start.isBefore(Instant.now.plusMillis(15.minutes.toMillis))
++  def upcoming(start: Instant): Boolean = start.isBefore(Instant.now.plusMillis(ReminderPlanner.LeadTime.toMillis))
+=== END
+
+=== TURN
+labels: dup=0
+note: extension method introduced and called twice
+--- a/shared/src/main/scala/com/acme/booking/TimeExtensions.scala
++++ b/shared/src/main/scala/com/acme/booking/TimeExtensions.scala
+@@ -0,0 +1,4 @@
++extension (instant: Instant)
++  def localDateIn(zone: ZoneId): LocalDate = instant.atZone(zone).toLocalDate
+--- a/server/src/main/scala/com/acme/booking/ConflictDetector.scala
++++ b/server/src/main/scala/com/acme/booking/ConflictDetector.scala
+@@ -6,3 +6,3 @@ object ConflictDetector:
+-    a.startsAt.atZone(zone).toLocalDate == b.startsAt.atZone(zone).toLocalDate
++    a.startsAt.localDateIn(zone) == b.startsAt.localDateIn(zone)
+=== END
+
+=== TURN
+labels: dup=1
+note: same slot-length validation literal repeated in two endpoints
+--- a/server/src/main/scala/com/acme/booking/api/AppointmentEndpoints.scala
++++ b/server/src/main/scala/com/acme/booking/api/AppointmentEndpoints.scala
+@@ -9,3 +9,3 @@ object AppointmentEndpoints:
++  private val maxLength = 8.hours
++  val create = endpoint.post.in(jsonBody[NewAppointment].validate(Validator.custom(a => ValidationResult.validWhen(a.length <= 8.hours))))
+--- a/server/src/main/scala/com/acme/booking/api/BlockEndpoints.scala
++++ b/server/src/main/scala/com/acme/booking/api/BlockEndpoints.scala
+@@ -9,3 +9,3 @@ object BlockEndpoints:
++  private val maxLength = 8.hours
++  val create = endpoint.post.in(jsonBody[NewBlock].validate(Validator.custom(b => ValidationResult.validWhen(b.length <= 8.hours))))
+=== END

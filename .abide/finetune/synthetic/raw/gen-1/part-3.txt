@@ -1,0 +1,354 @@
+=== EDIT server/src/main/scala/com/acme/invoices/InvoiceService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: InvoiceService calls concrete OrderService
+@@ -6,8 +6,10 @@ final class InvoiceService[F[_]: Sync](
+     invoices: InvoiceRepository[F],
++    orderService: OrderService[F]
+ ):
+   def issueFor(id: OrderId): F[Invoice] =
+-    invoices.create(id)
++    orderService.get(id).flatMap(invoices.createFrom)
+=== END
+=== EDIT server/src/main/scala/com/acme/carts/CartService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: coupon stacking rules inlined in service
+@@ -27,3 +27,12 @@ final class CartService[F[_]: Sync](carts: CartRepository[F], coupons: CouponRepository[F]):
++  def applyCoupons(id: CartId, codes: List[CouponCode]): F[Cart] =
++    (carts.get(id), coupons.find(codes)).tupled.flatMap: (cart, found) =>
++      val percent = found.filter(_.kind == Percent).map(_.value).maxOption.getOrElse(BigDecimal(0))
++      val fixed = found.filter(_.kind == Fixed).map(_.value).sum
++      val discounted = cart.subtotal * (1 - percent) - Money(fixed)
++      val floor = if cart.subtotal > Money(50) then Money.zero else Money(1)
++      carts.save(cart.copy(total = discounted.max(floor)))
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderSummary.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent effects combined by flatMap/map instead of mapN
+@@ -14,4 +14,6 @@ final class OrderSummaryBuilder[F[_]: Monad](orders: OrderAlgebra[F], payments: PaymentAlgebra[F]):
+   def build(id: OrderId): F[OrderSummary] =
+-    (orders.get(id), payments.forOrder(id)).mapN(OrderSummary.apply)
++    orders.get(id).flatMap: order =>
++      payments.forOrder(id).map: paid =>
++        OrderSummary(order, paid)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentRepository.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unique row lookup with getOrElse default status
+@@ -19,5 +19,6 @@ final class PaymentRepositoryLive[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def statusOf(id: PaymentId): F[PaymentStatus] =
+-    pool.use(_.option(selectStatus)(id)).flatMap(_.liftTo[F](PaymentNotFound(id)))
++    pool.use(_.option(selectStatus)(id)).map(_.getOrElse(PaymentStatus.Pending))
+=== END
+=== EDIT server/src/main/scala/com/acme/shipping/ShippingQuote.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: reqWt and custom abbreviation names
+@@ -4,5 +4,7 @@ object ShippingQuote:
++  def quote(reqWt: Weight, dst: Country): Money =
++    val baseRt = Rates.base(dst)
++    baseRt * reqWt.kilos
+=== END
+=== EDIT server/src/main/scala/com/acme/invoices/InvoiceService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, service-to-service dependency replaced by algebra trait
+@@ -6,10 +6,10 @@ final class InvoiceService[F[_]: Sync](
+     invoices: InvoiceRepository[F],
+-    orderService: OrderService[F]
++    orders: OrderAlgebra[F]
+ ):
+   def issueFor(id: OrderId): F[Invoice] =
+-    orderService.get(id).flatMap(invoices.createFrom)
++    orders.get(id).flatMap(invoices.createFrom)
+=== END
+=== EDIT server/src/main/scala/com/acme/carts/CartLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, inline logic moved into Logic trait
+@@ -1,3 +1,12 @@
++trait CartLogic[F[_]: Monad]:
++  def carts: CartAlgebra[F]
++  def pricing: PricingAlgebra[F]
++  def checkoutTotal(id: CartId): F[Money] =
++    for
++      cart <- carts.get(id)
++      priced <- pricing.price(cart.lines)
++    yield priced.sum
+--- a/server/src/main/scala/com/acme/carts/CartService.scala
++++ b/server/src/main/scala/com/acme/carts/CartService.scala
+@@ -20,6 +20,3 @@ final class CartService[F[_]: Sync]:
+-  def checkoutTotal(id: CartId): F[Money] =
+-    carts.get(id).flatMap: cart =>
+-      pricing.price(cart.lines).map(_.sum)
+=== END
+=== EDIT server/src/main/scala/com/acme/refunds/RefundService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: concrete CartService plus inline restock logic
+@@ -10,10 +10,18 @@ final class RefundService[F[_]: Sync](
+     refunds: RefundRepository[F],
++    cartService: CartService[F]
+ ):
++  def restock(id: RefundId): F[Unit] =
++    refunds.get(id).flatMap: refund =>
++      val restockable = refund.lines.filter(l => l.condition == Condition.Resellable)
++      val damaged = refund.lines.diff(restockable)
++      cartService.releaseStock(restockable) *> refunds.markWriteOff(damaged)
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentRoutes.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: swallowed decode failure and abbreviation
+@@ -16,5 +16,6 @@ final class PaymentRoutes[F[_]: Concurrent](service: PaymentService[F]) extends Http4sDsl[F]:
+     case req @ POST -> Root / "payments" / "webhook" =>
+-      req.as[Webhook].flatMap(service.handle) *> Ok()
++      val evtPayload = req.as[Webhook].map(Option(_)).handleError(_ => None)
++      evtPayload.flatMap(_.traverse_(service.handle)) *> Ok()
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderDashboard.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: abbreviated names with independent flatMaps
+@@ -12,5 +12,8 @@ final class OrderDashboard[F[_]: Monad](orders: OrderAlgebra[F], refunds: RefundAlgebra[F]):
++  def load(cid: CustomerId): F[Dashboard] =
++    orders.byCustomer(cid).flatMap: ords =>
++      refunds.byCustomer(cid).map: rfnds =>
++        Dashboard(ords, rfnds)
+=== END
+=== EDIT server/src/main/scala/com/acme/pricing/PricingService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+note: inline logic with foldLeft that should be foldMap
+@@ -18,3 +18,10 @@ final class PricingService[F[_]: Sync](prices: PriceRepository[F]):
++  def bundlePrice(skus: List[Sku]): F[Money] =
++    prices.findAll(skus).map: found =>
++      val gross = found.foldLeft(Money.zero)((acc, p) => acc + p.amount)
++      val bundleDiscount = if found.size >= 3 then gross * BigDecimal("0.1") else Money.zero
++      gross - bundleDiscount
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=1
+note: concrete service with sequential independent calls
+@@ -8,6 +8,9 @@ final class PaymentService[F[_]: Sync](
+     gateway: PaymentGateway[F],
++    ledgerService: LedgerService[F]
+ ):
+   def reconcile(id: PaymentId): F[Reconciliation] =
+-    (gateway.fetch(id), ledgerService.entries(id)).mapN(Reconciliation.apply)
++    gateway.fetch(id).flatMap: remote =>
++      ledgerService.entries(id).map(Reconciliation(remote, _))
+=== END
+=== EDIT server/src/main/scala/com/acme/refunds/RefundService.scala
+labels: fail-loud=1 service-dep=0 logic=1 names=0 cats=0
+note: inline policy logic that swallows gateway error
+@@ -28,3 +28,10 @@ final class RefundService[F[_]: Sync](refunds: RefundRepository[F], gateway: PaymentGateway[F]):
++  def autoRefund(id: OrderId): F[Option[Refund]] =
++    refunds.pending(id).flatMap:
++      case r if r.amount < Money(30) && r.reason == RefundReason.Damaged =>
++        gateway.refund(r.paymentId, r.amount).map(g => Some(Refund.from(r, g)))
++          .handleErrorWith(_ => Applicative[F].pure(None))
++      case _ => Applicative[F].pure(None)
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderRepository.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, liftTo on missing row
+@@ -21,4 +21,5 @@ final class OrderRepositoryLive[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def get(id: OrderId): F[Order] =
+-    find(id).flatMap(_.getOrElse(throw OrderNotFound(id)))
++    find(id).flatMap(_.liftTo[F](OrderNotFound(id)))
+=== END
+=== EDIT server/src/main/scala/com/acme/inventory/StockReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, established domain words and standard abbreviations
+@@ -3,5 +3,8 @@ object StockReport:
++  def lineFor(sku: Sku, invoice: Invoice, id: ReservationId): String =
++    s"${sku.value} ${invoice.number} ${id.value}"
++  def parse(json: Json): Either[DecodingFailure, StockEntry] =
++    json.as[StockEntry]
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, flatMap where second effect depends on first
+@@ -17,4 +17,6 @@ final class OrderService[F[_]: Sync](orders: OrderRepository[F], payments: PaymentRepository[F]):
++  def paid(id: OrderId): F[Boolean] =
++    orders.get(id).flatMap: order =>
++      payments.find(order.paymentId).map(_.exists(_.settled))
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentCaptureJob.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: stream error swallowed with handleError and empty stream
+@@ -14,4 +14,5 @@ final class PaymentCaptureJob(service: PaymentService[IO]):
+   val run: Stream[IO, Unit] =
+-    Stream.awakeEvery[IO](1.minute).evalMap(_ => service.captureDue)
++    Stream.awakeEvery[IO](1.minute).evalMap: _ =>
++      service.captureDue.handleError(_ => ())
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/PaymentNotifier.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: Notifier service holds concrete OrderService
+@@ -5,6 +5,8 @@ final class PaymentNotifier[F[_]: Sync](
+     mailer: Mailer[F],
++    orderService: OrderService[F]
+ ):
+   def paid(id: OrderId): F[Unit] =
+-    mailer.send(Email.paid(id))
++    orderService.get(id).flatMap(o => mailer.send(Email.paid(o)))
+=== END
+=== EDIT server/src/main/scala/com/acme/carts/CartAlgebra.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: object algebra with concrete logic, no trait
+@@ -1,3 +1,10 @@
++object CartAlgebra:
++  def merge(guest: Cart, user: Cart): Cart =
++    val lines = (guest.lines ++ user.lines).groupBy(_.sku).map: (sku, ls) =>
++      CartLine(sku, ls.map(_.quantity).sum)
++    user.copy(lines = lines.toList)
++  def save(pool: Resource[IO, Session[IO]], cart: Cart): IO[Unit] =
++    pool.use(_.prepare(upsert).flatMap(_.execute(cart)).void)
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/CouponForm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: metaphor name rung/strut in Laminar component
+@@ -8,5 +8,7 @@ object CouponForm:
++  private val strut = div(cls := "w-4")
++  def view(codeVar: Var[String]): HtmlElement =
++    div(input(controlled(value <-- codeVar, onInput.mapToValue --> codeVar)), strut, button("Apply"))
+=== END
+=== EDIT server/src/main/scala/com/acme/pricing/PriceListLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, traverse over independent effects
+@@ -9,3 +9,5 @@ final class PriceListLoader[F[_]: Async](files: Files[F]):
++  def loadAll(paths: List[Path]): F[List[PriceList]] =
++    paths.traverse(load)
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft building a Map should be foldMap
+@@ -16,4 +16,7 @@ object OrderStats:
+   def revenueByCustomer(orders: List[Order]): Map[CustomerId, Money] =
+-    orders.foldMap(o => Map(o.customer -> o.total))
++    orders.foldLeft(Map.empty[CustomerId, Money]): (acc, o) =>
++      acc.updatedWith(o.customer):
++        case Some(m) => Some(m + o.total)
++        case None => Some(o.total)
+=== END
+=== EDIT server/src/main/scala/com/acme/refunds/RefundService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: three independent lookups chained
+@@ -33,5 +33,8 @@ final class RefundService[F[_]: Sync](
+   def snapshot(id: RefundId): F[Snapshot] =
+-    (refunds.get(id), audits.forRefund(id), gateway.status(id)).mapN(Snapshot.apply)
++    refunds.get(id).flatMap: r =>
++      audits.forRefund(id).flatMap: a =>
++        gateway.status(id).map: s =>
++          Snapshot(r, a, s)
+=== END
+=== TURN
+labels: dup=1
+note: same default currency constant defined in pricing and carts
+--- a/server/src/main/scala/com/acme/pricing/PricingConfig.scala
++++ b/server/src/main/scala/com/acme/pricing/PricingConfig.scala
+@@ -3,3 +3,4 @@ object PricingConfig:
++  val DefaultCurrency = Currency.getInstance("CHF")
+--- a/server/src/main/scala/com/acme/carts/CartConfig.scala
++++ b/server/src/main/scala/com/acme/carts/CartConfig.scala
+@@ -3,3 +3,4 @@ object CartConfig:
++  val DefaultCurrency = Currency.getInstance("CHF")
+=== END
+=== TURN
+labels: dup=1
+note: same Money generator duplicated in two property suites
+--- a/server/src/test/scala/com/acme/pricing/PricingSuite.scala
++++ b/server/src/test/scala/com/acme/pricing/PricingSuite.scala
+@@ -8,3 +8,5 @@ class PricingSuite extends ScalaCheckSuite:
++  val genMoney: Gen[Money] =
++    Gen.choose(1L, 100000L).map(c => Money(BigDecimal(c, 2)))
+--- a/server/src/test/scala/com/acme/refunds/RefundSuite.scala
++++ b/server/src/test/scala/com/acme/refunds/RefundSuite.scala
+@@ -8,3 +8,5 @@ class RefundSuite extends ScalaCheckSuite:
++  val genMoney: Gen[Money] =
++    Gen.choose(1L, 100000L).map(c => Money(BigDecimal(c, 2)))
+=== END
+=== TURN
+labels: dup=1
+note: same 3-line http4s error-to-response mapping in three routes
+--- a/server/src/main/scala/com/acme/api/OrderRoutes.scala
++++ b/server/src/main/scala/com/acme/api/OrderRoutes.scala
+@@ -20,3 +20,5 @@ final class OrderRoutes[F[_]]:
++      .handleErrorWith:
++        case e: DomainError => UnprocessableEntity(e.message)
++        case e => InternalServerError(e.getMessage)
+--- a/server/src/main/scala/com/acme/api/RefundRoutes.scala
++++ b/server/src/main/scala/com/acme/api/RefundRoutes.scala
+@@ -20,3 +20,5 @@ final class RefundRoutes[F[_]]:
++      .handleErrorWith:
++        case e: DomainError => UnprocessableEntity(e.message)
++        case e => InternalServerError(e.getMessage)
+--- a/server/src/main/scala/com/acme/api/PaymentRoutes.scala
++++ b/server/src/main/scala/com/acme/api/PaymentRoutes.scala
+@@ -20,3 +20,5 @@ final class PaymentRoutes[F[_]]:
++      .handleErrorWith:
++        case e: DomainError => UnprocessableEntity(e.message)
++        case e => InternalServerError(e.getMessage)
+=== END
+=== TURN
+labels: dup=1
+note: same CSS class string in two Laminar views
+--- a/app/src/main/scala/com/acme/ui/CartView.scala
++++ b/app/src/main/scala/com/acme/ui/CartView.scala
+@@ -10,3 +10,4 @@ object CartView:
++  private val primaryButton = "rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+--- a/app/src/main/scala/com/acme/ui/CheckoutView.scala
++++ b/app/src/main/scala/com/acme/ui/CheckoutView.scala
+@@ -10,3 +10,4 @@ object CheckoutView:
++  private val primaryButton = "rounded bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
+=== END
+=== TURN
+labels: dup=0
+note: hard negative, two tests sharing one generator via import
+--- a/server/src/test/scala/com/acme/Generators.scala
++++ b/server/src/test/scala/com/acme/Generators.scala
+@@ -1,3 +1,5 @@
++object Generators:
++  val genMoney: Gen[Money] = Gen.choose(1L, 100000L).map(c => Money(BigDecimal(c, 2)))
+--- a/server/src/test/scala/com/acme/pricing/PricingSuite.scala
++++ b/server/src/test/scala/com/acme/pricing/PricingSuite.scala
+@@ -8,3 +8,3 @@ class PricingSuite extends ScalaCheckSuite:
++  import Generators.genMoney
+--- a/server/src/test/scala/com/acme/refunds/RefundSuite.scala
++++ b/server/src/test/scala/com/acme/refunds/RefundSuite.scala
+@@ -8,3 +8,3 @@ class RefundSuite extends ScalaCheckSuite:
++  import Generators.genMoney
+=== END
+=== TURN
+labels: dup=0
+note: hard negative, same timeout value but unrelated settings
+--- a/server/src/main/scala/com/acme/payments/GatewayConfig.scala
++++ b/server/src/main/scala/com/acme/payments/GatewayConfig.scala
+@@ -3,3 +3,4 @@ object GatewayConfig:
++  val RequestTimeout = 30.seconds
+--- a/server/src/main/scala/com/acme/carts/CartExpiry.scala
++++ b/server/src/main/scala/com/acme/carts/CartExpiry.scala
+@@ -3,3 +3,4 @@ object CartExpiry:
++  val AbandonedAfter = 30.days
+=== END
+=== TURN
+labels: dup=0
+note: new endpoint file and its route, no repetition
+--- a/app/src/main/scala/com/acme/api/CartEndpoints.scala
++++ b/app/src/main/scala/com/acme/api/CartEndpoints.scala
+@@ -1,3 +1,7 @@
++object CartEndpoints:
++  val get = endpoint.get.in("carts" / path[CartId]("id"))
++    .errorOut(jsonBody[ApiError]).out(jsonBody[Cart])
+--- a/server/src/main/scala/com/acme/api/CartRoutes.scala
++++ b/server/src/main/scala/com/acme/api/CartRoutes.scala
+@@ -1,3 +1,4 @@
++  val getCart = CartEndpoints.get.serverLogic(service.find)
+=== END
+=== TURN
+labels: dup=0
+note: extension defined once and called in one place
+--- a/server/src/main/scala/com/acme/pricing/MoneySyntax.scala
++++ b/server/src/main/scala/com/acme/pricing/MoneySyntax.scala
+@@ -1,3 +1,5 @@
++extension (m: Money)
++  def times(q: Int): Money = m * BigDecimal(q)
+--- a/server/src/main/scala/com/acme/carts/CartLine.scala
++++ b/server/src/main/scala/com/acme/carts/CartLine.scala
+@@ -5,3 +5,4 @@ final case class CartLine(sku: Sku, quantity: Int, unitPrice: Money):
++  def lineTotal: Money = unitPrice.times(quantity)
+=== END

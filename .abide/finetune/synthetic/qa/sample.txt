@@ -1,0 +1,1974 @@
+=== TURN
+labels: ?
+note: id=s001
+--- a/server/src/main/scala/com/acme/users/UserRoutes.scala
++++ b/server/src/main/scala/com/acme/users/UserRoutes.scala
+@@ -12,4 +12,7 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++      users.find(id).attempt.flatMap:
++        case Right(user) => Ok(user)
++        case Left(e)     => InternalServerError(ErrorBody(e.getMessage))
+--- a/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
++++ b/server/src/main/scala/com/acme/billing/InvoiceRoutes.scala
+@@ -12,4 +12,7 @@ final class InvoiceRoutes[F[_]: Concurrent](invoices: InvoiceService[F]) extends Http4sDsl[F]:
++      invoices.find(id).attempt.flatMap:
++        case Right(invoice) => Ok(invoice)
++        case Left(e)        => InternalServerError(ErrorBody(e.getMessage))
+=== END
+
+=== TURN
+labels: ?
+note: id=s002
+--- a/server/src/main/scala/com/acme/suppliers/PurchaseOrderService.scala
++++ b/server/src/main/scala/com/acme/suppliers/PurchaseOrderService.scala
+@@ -5,3 +5,4 @@ final class PurchaseOrderService[F[_]: Temporal](
++  private val MaxAttempts = 4
++  private val InitialDelay = 250.millis
+--- a/server/src/main/scala/com/acme/suppliers/SupplierCatalogSync.scala
++++ b/server/src/main/scala/com/acme/suppliers/SupplierCatalogSync.scala
+@@ -5,3 +5,4 @@ final class SupplierCatalogSync[F[_]: Temporal](
++  private val MaxAttempts = 4
++  private val InitialDelay = 250.millis
+=== END
+
+=== EDIT server/src/main/scala/com/acme/carts/CartService.scala
+labels: ?
+note: id=s003
+@@ -21,3 +21,14 @@ final class CartService[F[_]: Sync](carts: CartRepository[F]):
+   def total(id: CartId): F[Money] =
+-    carts.get(id).map(_.subtotal)
++    carts.get(id).map { cart =>
++      val discounted = cart.lines.foldLeft(Money.zero) { (acc, line) =>
++        val rate = if line.quantity >= 10 then BigDecimal("0.15") else BigDecimal("0.05")
++        acc + line.unitPrice * line.quantity * (1 - rate)
++      }
++      val shipping = if discounted > Money(100) then Money.zero else Money(7)
++      val tax = (discounted + shipping) * BigDecimal("0.077")
++      discounted + shipping + tax
++    }
+=== END
+
+=== TURN
+labels: ?
+note: id=s004
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertMailer.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertMailer.scala
+@@ -10,3 +10,5 @@ object AlertMailer:
++  private def subjectFor(alert: Alert): String =
++    s"[${alert.severity.toString.toUpperCase}] ${alert.deviceId.value}: ${alert.kind}"
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertWebhook.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertWebhook.scala
+@@ -10,3 +10,5 @@ object AlertWebhook:
++  private def titleFor(alert: Alert): String =
++    s"[${alert.severity.toString.toUpperCase}] ${alert.deviceId.value}: ${alert.kind}"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/PractitionerLookup.scala
+labels: ?
+note: id=s005
+@@ -12,4 +12,4 @@ final class PractitionerLookup[F[_]: MonadThrow](repo: PractitionerRepository[F]
+   def require(id: PractitionerId): F[Practitioner] =
+-    repo.find(id).map(_.get)
++    repo.find(id).flatMap(_.liftTo[F](PractitionerNotFound(id)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/orders/OrderTotals.scala
+labels: ?
+note: id=s006
+@@ -7,5 +7,4 @@ object OrderTotals:
+   def totalWeight(lines: List[OrderLine]): Weight =
+-    lines.foldLeft(Weight.zero): (acc, l) =>
+-      acc |+| l.weight
++    lines.foldMap(_.weight)
+=== END
+
+=== TURN
+labels: ?
+note: id=s007
+--- a/server/src/main/scala/com/acme/telemetry/ingest/syntax.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/syntax.scala
+@@ -1,3 +1,6 @@
++extension [F[_]: Temporal, A](fa: F[A])
++  def withDbTimeout(op: String): F[A] =
++    fa.timeout(5.seconds).adaptError { case _: TimeoutException => DbTimeout(op) }
+--- a/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
+@@ -20,3 +20,3 @@ object PgDeviceRepository:
++    session.use(_.option(Sql.byId)(id)).withDbTimeout("devices.find")
+--- a/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
+@@ -20,3 +20,3 @@ object PgAlertRepository:
++    session.use(_.execute(Sql.openByDevice)(id)).withDbTimeout("alerts.openFor")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/chat/PresenceTracker.scala
+labels: ?
+note: id=s008
+@@ -9,4 +9,5 @@ final class PresenceTracker[F[_]: Sync](ref: Ref[F, Map[UserId, Instant]]):
++  def heartbeatLadder(users: List[UserId]): F[List[UserId]] =
++    ref.get.map(m => users.filter(u => m.contains(u)))
++  def rung(user: UserId): F[Option[Instant]] = ref.get.map(_.get(user))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/imports/ImportService.scala
+labels: ?
+note: id=s009
+@@ -9,6 +9,15 @@ final class ImportService[F[_]: Async](products: ProductRepository[F]):
++  def run(bytes: Stream[F, Byte]): F[Int] =
++    bytes
++      .through(text.utf8.decode)
++      .through(text.lines)
++      .drop(1)
++      .map(_.split(',').toList)
++      .collect { case sku :: name :: price :: Nil => RawProduct(sku, name, price) }
++      .evalMap(raw => products.exists(raw.sku).map(found => Option.when(!found)(raw)))
++      .unNone
++      .chunkN(200)
++      .evalMap(chunk => products.insertAll(chunk.toList))
++      .compile.foldMonoid
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/prefs/ChannelPicker.scala
+labels: ?
+note: id=s010
+@@ -11,5 +11,5 @@ final class ChannelPicker[F[_]: Sync](prefs: PreferenceRepository[F]):
+   def channelFor(user: UserId): F[Channel] =
+-    prefs.find(user).flatMap(_.map(_.channel).liftTo[F](PreferenceMissing(user)))
++    prefs.find(user).map(_.map(_.channel).getOrElse(Channel.Email))
+=== END
+
+=== TURN
+labels: ?
+note: id=s011
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
+@@ -3,3 +3,4 @@ object IngestConfig:
++  val MaxPayloadBytes = 1024
+--- a/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
+@@ -3,3 +3,4 @@ object DeviceLimits:
++  val MaxNameLength = 1024
+=== END
+
+=== EDIT server/src/main/scala/com/acme/sync/OfflineSyncService.scala
+labels: ?
+note: id=s012
+@@ -5,6 +5,7 @@ import com.acme.tiles.TileService
+ final class OfflineSyncService[F[_]: Monad](
+     device: DeviceStore[F],
++    tileService: TileService[F]
+ ):
+   def downloadRegion(bounds: BoundingBox, zoom: Zoom): F[Unit] =
+-    device.reserve(bounds)
++    tileService.stitched(bounds, zoom).flatMap(device.store(bounds, _))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/email/PreviewService.scala
+labels: ?
+note: id=s013
+@@ -12,6 +12,9 @@ final class PreviewService[F[_]: Monad](templates: TemplateStore[F], brands: BrandRepository[F], users: UserRepository[F]):
+-  def preview(key: TemplateKey, brand: BrandId, user: UserId): F[Preview] = (templates.get(key), brands.get(brand), users.get(user)).mapN(Preview(_, _, _))
++  def preview(key: TemplateKey, brand: BrandId, user: UserId): F[Preview] =
++    templates.get(key).flatMap: t =>
++      brands.get(brand).flatMap: b =>
++        users.get(user).map(u => Preview(t, b, u))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/PickLists.scala
+labels: ?
+note: id=s014
+@@ -1,3 +1,13 @@
++package com.acme.warehouse
++
++trait PickLists[F[_]]:
++  def forShipment(id: ShipmentId): F[List[PickLine]]
++
++object PickLists:
++  def apply[F[_]: MonadCancelThrow](db: Resource[F, Session[F]]): PickLists[F] =
++    new PickLists[F]:
++      def forShipment(id: ShipmentId): F[List[PickLine]] =
++        db.use(_.prepare(selectPicks).flatMap(_.stream(id, 64).compile.toList))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/PaymentFlow.scala
+labels: ?
+note: id=s015
+@@ -4,6 +4,11 @@ trait PaymentFlow[F[_]: Monad]:
++  def pay(id: OrderId): F[Receipt] =
++    for
++      order <- orders.get(id)
++      auth <- gateway.authorize(order.total)
++      receipt <- gateway.capture(auth.id)
++    yield receipt
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reports/ReportService.scala
+labels: ?
+note: id=s016
+@@ -5,8 +5,8 @@ import com.acme.booking.AppointmentService
+ final class ReportService[F[_]: Monad](
+-  appointments: AppointmentQueries[F]
++  apptSvc: AppointmentService[F]
+ ):
+   def countFor(day: LocalDate): F[Int] =
+-    appointments.onDay(day).map(_.size)
++    apptSvc.listOn(day).map(_.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/users/UserRoutes.scala
+labels: ?
+note: id=s017
+@@ -14,4 +14,5 @@ final class UserRoutes[F[_]: Concurrent](users: UserService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "users" :? PageSizeParam(size) =>
++      users.list(size.getOrElse(PageSize.Default)).flatMap(Ok(_))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/returns/ReturnsService.scala
+labels: ?
+note: id=s018
+@@ -5,6 +5,9 @@ final class ReturnsService[F[_]: Monad](returns: ReturnRepository[F], payments: PaymentService[F]):
++  def accept(id: ReturnId): F[Unit] =
++    returns.markAccepted(id) *> returns.get(id).flatMap(r => payments.refund(r.payment, RefundReason.Return).void)
+=== END
+
+=== TURN
+labels: ?
+note: id=s019
+--- a/server/src/main/scala/com/acme/messaging/retry/LinearRetry.scala
++++ b/server/src/main/scala/com/acme/messaging/retry/LinearRetry.scala
+@@ -3,3 +3,3 @@ object LinearRetry:
++  def delay(attempt: Int): FiniteDuration = (attempt * 10).seconds
+--- a/server/src/main/scala/com/acme/messaging/retry/ExponentialRetry.scala
++++ b/server/src/main/scala/com/acme/messaging/retry/ExponentialRetry.scala
+@@ -3,3 +3,3 @@ object ExponentialRetry:
++  def delay(attempt: Int): FiniteDuration = (1 << attempt).seconds
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/AisleLayout.scala
+labels: ?
+note: id=s020
+@@ -9,6 +9,11 @@ final class AisleLayoutService[F[_]: Sync](zones: ZoneRepository[F], bins: BinRepository[F]):
++  def layout(id: ZoneId): F[List[BinId]] =
++    zones.get(id).flatMap: zone =>
++      bins.inZone(id).flatMap: all =>
++        val backbone = all.filter(_.aisle == zone.mainAisle).sortBy(_.position)
++        val branches = all.diff(backbone).groupBy(_.aisle).values.flatMap(_.sortBy(_.position))
++        bins.reorder(id, (backbone ++ branches).map(_.id)).as((backbone ++ branches).map(_.id))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/refunds/RefundSuite.scala
+labels: ?
+note: id=s021
+@@ -1,3 +1,10 @@
++class RefundServiceSuite extends CatsEffectSuite:
++  test("refund above order total is rejected"):
++    val order = genOrder.sample.get
++    val service = RefundService(InMemoryRefunds(), StubGateway())
++    service.request(RefundRequest(order.id, order.total + Money(1), order.total))
++      .attempt
++      .map(r => assertEquals(r, Left(ExceedsOrderTotal(order.id))))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/alerts/AlertService.scala
+labels: ?
+note: id=s022
+@@ -4,6 +4,7 @@ import com.acme.geofence.GeofenceService
+ final class AlertService[F[_]: Monad](
+     sender: AlertSender[F],
++    geofences: GeofenceService[F]
+ ):
+   def onPosition(pos: GeoPoint): F[Unit] =
+-    sender.send(Alert.Heartbeat)
++    geofences.entered(pos).flatMap(_.traverse_(z => sender.send(Alert.Entered(z))))
+=== END
+
+=== TURN
+labels: ?
+note: id=s023
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
+@@ -4,4 +4,4 @@ object OrderCard:
+-    div(cls := "card", order.id.value)
++    div(cls := "order-card order-card--open", order.id.value)
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
+@@ -4,4 +4,4 @@ object ProductCard:
+-    div(cls := "card", product.name)
++    div(cls := "product-card product-card--featured", product.name)
+=== END
+
+=== EDIT app/src/main/scala/com/acme/ui/CouponForm.scala
+labels: ?
+note: id=s024
+@@ -8,5 +8,7 @@ object CouponForm:
++  private val strut = div(cls := "w-4")
++  def view(codeVar: Var[String]): HtmlElement =
++    div(input(controlled(value <-- codeVar, onInput.mapToValue --> codeVar)), strut, button("Apply"))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/WelcomeService.scala
+labels: ?
+note: id=s025
+@@ -11,6 +11,8 @@ final class WelcomeService[F[_]: Monad](users: UserRepository[F], mail: MailService[F]):
++  def run(id: UserId): F[Unit] =
++    users.count.flatMap: count =>
++      mail.queueLength.flatMap: queued =>
++        mail.sendDigest(count, queued)
+=== END
+
+=== TURN
+labels: ?
+note: id=s026
+--- a/server/src/main/scala/com/acme/billing/CouponService.scala
++++ b/server/src/main/scala/com/acme/billing/CouponService.scala
+@@ -14,4 +14,5 @@ final class CouponService[F[_]: MonadThrow](coupons: CouponRepository[F]):
++  def get(code: CouponCode): F[Coupon] =
++    coupons.find(code).flatMap(_.liftTo[F](UnknownCoupon(code)))
+=== END
+
+=== TURN
+labels: ?
+note: id=s027
+--- a/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
+@@ -22,3 +22,8 @@ final class OrderApiClient(backend: SttpBackend[Future, Any], base: Uri):
++  def cancel(id: OrderId): Future[Unit] =
++    basicRequest.delete(base.addPath("orders", id.value)).send(backend).flatMap: response =>
++      response.body.fold(error => Future.failed(ApiError(error)), _ => Future.unit)
+--- a/web/src/test/scala/com/acme/shop/api/OrderApiClientSpec.scala
++++ b/web/src/test/scala/com/acme/shop/api/OrderApiClientSpec.scala
+@@ -12,3 +12,7 @@ class OrderApiClientSpec extends FunSuite:
++  test("cancel surfaces server errors"):
++    val client = OrderApiClient(stubFailing(StatusCode.Conflict), baseUri)
++    interceptFuture[ApiError](client.cancel(Fixtures.sampleOrder.id))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/geo/Distances.scala
+labels: ?
+note: id=s028
+@@ -4,5 +4,5 @@ object Distances:
+-  def calcDst(from: GeoPoint, to: GeoPoint): Distance =
++  def between(from: GeoPoint, to: GeoPoint): Distance =
+     Geodesy.haversine(from, to)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/CheckoutService.scala
+labels: ?
+note: id=s029
+@@ -33,6 +33,8 @@ final class CheckoutService[F[_]: Sync](coupons: CouponAlgebra[F], mailer: Mailer[F]):
+   def checkout(user: User, code: CouponCode): F[Receipt] =
+-    coupons.validate(code).flatMap(c => mailer.sendReceipt(user, c))
++    for
++      _       <- coupons.validate(code).attempt
++      receipt <- mailer.sendReceipt(user, code)
++    yield receipt
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/PlanLabels.scala
+labels: ?
+note: id=s030
+@@ -5,4 +5,5 @@ object PlanLabels:
++  def label(prm: Plan, dsc: Option[Discount]): String =
++    dsc.fold(prm.name)(d => s"${prm.name} (-${d.percent}%)")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/auth/MfaService.scala
+labels: ?
+note: id=s031
+@@ -6,6 +6,8 @@ final class MfaService[F[_]: Sync](codes: CodeRepository[F], sms: SmsClient[F]):
+   def challenge(user: User): F[Unit] =
+-    codes.issue(user.id).flatMap(c => sms.send(user.phone, c.text))
++    codes.issue(user.id).flatMap: code =>
++      sms.send(user.phone, s"Your code is ${code.text}")
+=== END
+
+=== TURN
+labels: ?
+note: id=s032
+--- a/server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
+@@ -20,3 +20,6 @@ final class ReadingRoutes(service: ReadingQueryService[IO]) extends Http4sDsl[IO]:
++      .handleErrorWith: e =>
++        logger.error(e)("request failed") *>
++          InternalServerError(ErrorBody("internal error"))
+--- a/server/src/main/scala/com/acme/telemetry/http/AlertRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/http/AlertRoutes.scala
+@@ -20,3 +20,6 @@ final class AlertRoutes(service: AlertService[IO]) extends Http4sDsl[IO]:
++      .handleErrorWith: e =>
++        logger.error(e)("request failed") *>
++          InternalServerError(ErrorBody("internal error"))
+=== END
+
+=== TURN
+labels: ?
+note: id=s033
+--- a/web/src/main/scala/com/acme/shop/ui/nav/HomeLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/HomeLinks.scala
+@@ -6,3 +6,4 @@ object HomeLinks:
++      onClick --> (_ => { router.pushState(Page.Orders); dom.window.scrollTo(0, 0) }),
+--- a/web/src/main/scala/com/acme/shop/ui/nav/OrderLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/OrderLinks.scala
+@@ -6,3 +6,4 @@ object OrderLinks:
++      onClick --> (_ => { router.pushState(Page.Order(id)); dom.window.scrollTo(0, 0) }),
+--- a/web/src/main/scala/com/acme/shop/ui/nav/SettingsLinks.scala
++++ b/web/src/main/scala/com/acme/shop/ui/nav/SettingsLinks.scala
+@@ -6,3 +6,4 @@ object SettingsLinks:
++      onClick --> (_ => { router.pushState(Page.Settings); dom.window.scrollTo(0, 0) }),
+=== END
+
+=== EDIT server/src/main/scala/com/acme/alerts/AlertService.scala
+labels: ?
+note: id=s034
+@@ -18,3 +18,11 @@ final class AlertService[F[_]: Monad](sender: AlertSender[F], routeService: RouteService[F]):
++  def offRoute(id: RouteId, position: GeoPoint): F[Unit] =
++    routeService.get(id).flatMap: route =>
++      val nearest = route.legs.map(leg => Geodesy.distanceToLeg(position, leg)).min
++      if nearest > Distance.meters(75) then sender.send(Alert.OffRoute(id, nearest))
++      else Monad[F].unit
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/ReceivingService.scala
+labels: ?
+note: id=s035
+@@ -20,5 +20,6 @@ final class ReceivingService[F[_]: Sync](deliveries: DeliveryRepository[F], stock: StockRepository[F]):
+   def confirm(id: DeliveryId): F[Unit] =
+-    deliveries.markReceived(id)
++    deliveries.get(id).flatMap: delivery =>
++      delivery.lines.traverse_(l => stock.add(l.sku, BinId.receiving, l.quantity)) *> deliveries.markReceived(id)
+=== END
+
+=== TURN
+labels: ?
+note: id=s036
+--- a/server/src/main/scala/com/acme/billing/StripeClient.scala
++++ b/server/src/main/scala/com/acme/billing/StripeClient.scala
+@@ -5,4 +5,5 @@ object StripeClient:
++  private val RequestTimeout = 30.seconds
++  def build[F[_]: Async](builder: EmberClientBuilder[F]) = builder.withTimeout(RequestTimeout).build
+--- a/server/src/main/scala/com/acme/auth/OidcClient.scala
++++ b/server/src/main/scala/com/acme/auth/OidcClient.scala
+@@ -5,4 +5,5 @@ object OidcClient:
++  private val RequestTimeout = 30.seconds
++  def build[F[_]: Async](builder: EmberClientBuilder[F]) = builder.withTimeout(RequestTimeout).build
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingIngestService.scala
+labels: ?
+note: id=s037
+@@ -15,6 +15,17 @@ final class ReadingIngestService[F[_]: Sync](
+   def ingest(raw: List[RawReading]): F[Int] =
+-    logic.process(raw)
++    val deduped = raw.distinctBy(r => (r.deviceId, r.measuredAt))
++    val valid = deduped.filter(r => r.value > -90.0 && r.value < 150.0)
++    for
++      known <- devices.knownIds(valid.map(_.deviceId).distinct)
++      enriched = valid.filter(r => known.contains(r.deviceId)).map: r =>
++        Reading(r.deviceId, r.measuredAt, r.value, receivedAt = clock.now)
++      grouped = enriched.groupBy(_.deviceId)
++      _ <- grouped.toList.traverse_((id, rs) => readings.insertMany(Chunk.from(rs)))
++      _ <- grouped.keys.toList.traverse_(id => lastSeen.touch(id))
++    yield enriched.size
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingLogic.scala
+labels: ?
+note: id=s038
+@@ -10,4 +10,12 @@ trait BookingLogic[F[_]: MonadThrow]:
++  def bookSeries(req: SeriesRequest): F[List[Appointment]] =
++    for
++      _ <- availability.ensureFree(req.practitioner, req.firstWindow)
++      saved <- appointments.insertAll(req.expand)
++      _ <- reminders.scheduleAll(saved)
++    yield saved
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/DeliveryStats.scala
+labels: ?
+note: id=s039
+@@ -9,6 +9,7 @@ object DeliveryStats:
++  def avgDlvMs(reqs: List[DeliveryRecord]): Double =
++    reqs.map(_.durationMs).sum.toDouble / reqs.size.max(1)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/api/HttpTrace.scala
+labels: ?
+note: id=s040
+@@ -6,6 +6,8 @@ object HttpTrace:
++  def describe(reqPayload: Json, respHdrs: Map[String, String]): String =
++    val ctype = respHdrs.getOrElse("Content-Type", "unknown")
++    s"${reqPayload.noSpaces.length} bytes -> $ctype"
+=== END
+
+=== TURN
+labels: ?
+note: id=s041
+--- a/server/src/main/scala/com/acme/warehouse/StockRepository.scala
++++ b/server/src/main/scala/com/acme/warehouse/StockRepository.scala
+@@ -8,3 +8,4 @@ object StockRepository:
++  private val skuCodec: Codec[Sku] = text.imap(Sku.unsafe)(_.value)
+--- a/server/src/main/scala/com/acme/suppliers/SupplierCatalogRepository.scala
++++ b/server/src/main/scala/com/acme/suppliers/SupplierCatalogRepository.scala
+@@ -8,3 +8,4 @@ object SupplierCatalogRepository:
++  private val skuCodec: Codec[Sku] = text.imap(Sku.unsafe)(_.value)
+=== END
+
+=== TURN
+labels: ?
+note: id=s042
+--- a/server/src/main/scala/com/acme/auth/PasswordPolicy.scala
++++ b/server/src/main/scala/com/acme/auth/PasswordPolicy.scala
+@@ -4,4 +4,5 @@ object PasswordPolicy:
++  val MinLength = 12
+--- a/app/src/main/scala/com/acme/ui/LoginForm.scala
++++ b/app/src/main/scala/com/acme/ui/LoginForm.scala
+@@ -9,4 +9,5 @@ object LoginForm:
++  private val passwordInput = input(typ := "password", minLength := PasswordPolicy.MinLength)
+=== END
+
+=== TURN
+labels: ?
+note: id=s043
+--- a/server/src/main/scala/com/acme/messaging/config/MailConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/config/MailConfig.scala
+@@ -5,3 +5,3 @@ object MailConfig:
++  val retry = BackoffPolicy(base = 250.millis, maxAttempts = 6)
+--- a/server/src/main/scala/com/acme/messaging/config/PushConfig.scala
++++ b/server/src/main/scala/com/acme/messaging/config/PushConfig.scala
+@@ -5,3 +5,3 @@ object PushConfig:
++  val retry = BackoffPolicy(base = 250.millis, maxAttempts = 6)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/StockService.scala
+labels: ?
+note: id=s044
+@@ -30,5 +30,5 @@ final class StockService[F[_]: Sync](stock: StockRepository[F]) extends StockLevels[F]:
+   def binCapacity(bin: BinId): F[Quantity] =
+-    bins.find(bin).flatMap(_.liftTo[F](UnknownBin(bin))).map(_.capacity)
++    bins.find(bin).map(_.fold(Quantity.zero)(_.capacity))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/ReturnsService.scala
+labels: ?
+note: id=s045
+@@ -6,8 +6,10 @@ final class ReturnsService[F[_]: Sync](
+     returns: ReturnRepository[F],
+-    stock: StockLevels[F]
++    stock: StockLevels[F],
++    shipments: ShipmentService[F]
+ ):
+   def accept(id: ReturnId): F[Unit] =
+-    returns.markAccepted(id)
++    returns.markAccepted(id) *> shipments.confirm(ShipmentId.returnFor(id))
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/config/Cfg.scala
+labels: ?
+note: id=s046
+@@ -0,0 +1,9 @@
++package com.acme.shop.config
++
++object RemoteCfg:
++  def fetchCfg(using backend: SttpBackend[IO, Any]): IO[AppCfg] =
++    basicRequest.get(uri"/config.json").response(asJson[AppCfg]).send(backend)
++      .flatMap(rsp => rsp.body.liftTo[IO])
++      .map(cfg => cfg.copy(apiUrl = cfg.apiUrl.stripSuffix("/")))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/Reservations.scala
+labels: ?
+note: id=s047
+@@ -1,3 +1,13 @@
++package com.acme.warehouse
++
++object Reservations:
++  def expire[F[_]: Sync](
++      repo: ReservationRepository[F],
++      now: Instant
++  ): F[Int] =
++    repo.openBefore(now).flatMap: stale =>
++      stale.traverse_(r => repo.markExpired(r.id)) *>
++        stale.traverse_(r => repo.returnStock(r.sku, r.quantity)).as(stale.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/payments/PaymentGateway.scala
+labels: ?
+note: id=s048
+@@ -1,3 +1,12 @@
++trait PaymentGateway[F[_]]:
++  def charge(c: Charge): F[Receipt]
++
++object PaymentGateway:
++  def apply[F[_]: Concurrent](http: Client[F], base: Uri): PaymentGateway[F] =
++    new PaymentGateway[F]:
++      def charge(c: Charge): F[Receipt] =
++        http.expect[Receipt](Request[F](Method.POST, base / "charges").withEntity(c))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/export/ExportService.scala
+labels: ?
+note: id=s049
+@@ -3,9 +3,11 @@ package com.acme.telemetry.export
+-final class ExportService[F[_]: Monad](store: ObjectStore[F]):
++final class ExportService[F[_]: Monad](store: ObjectStore[F], ingestService: ReadingIngestService[F]):
+ 
+   def restore(key: ObjectKey): F[Int] =
+-    store.get(key).map(_.size)
++    store.get(key).flatMap(raw => ingestService.ingest(raw))
+=== END
+
+=== TURN
+labels: ?
+note: id=s050
+--- a/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
+@@ -8,4 +8,6 @@ class OrderCodecSpec extends ScalaCheckSuite:
++  private val genOrderId: Gen[OrderId] =
++    Gen.choose(1, 99999).map(n => OrderId(s"o-$n"))
+--- a/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
+@@ -8,4 +8,6 @@ class OrderRoutingSpec extends ScalaCheckSuite:
++  private val genOrderId: Gen[OrderId] =
++    Gen.choose(1, 99999).map(n => OrderId(s"o-$n"))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/ReminderScheduler.scala
+labels: ?
+note: id=s051
+@@ -15,4 +15,6 @@ final class ReminderScheduler[F[_]: Temporal](zones: ZoneLookup[F]):
+   def nextRun(id: UserId): F[Instant] =
+-    Temporal[F].realTimeInstant
++    Temporal[F].realTimeInstant.flatMap: now =>
++      zones.of(id).flatMap: zone =>
++        quietHours.forUser(id).map(quiet => quiet.nextAllowed(now, zone))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/WebhookDispatcher.scala
+labels: ?
+note: id=s052
+@@ -21,7 +21,8 @@ final class WebhookDispatcher[F[_]: Async](client: Client[F], log: Logger[F]):
+   def deliver(sub: Subscription, event: Event): F[Unit] =
+     val request = Request[F](Method.POST, sub.url).withEntity(event.asJson)
+-    client.expect[Unit](request).adaptError { case e => WebhookFailed(sub.id, e) }
++    client.expect[Unit](request).handleError(_ => ())
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/admin/AdminStats.scala
+labels: ?
+note: id=s053
+@@ -8,5 +8,10 @@ final class AdminStats[F[_]: Monad](repo: StatsRepository[F]):
++  def snapshot: F[Stats] =
++    for
++      users    <- repo.countUsers
++      orders   <- repo.countOrders
++      invoices <- repo.countInvoices
++    yield Stats(users, orders, invoices)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/pricing/PriceRepository.scala
+labels: ?
+note: id=s054
+@@ -25,5 +25,6 @@ final class PriceRepositoryLive[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def currencyOf(sku: Sku): F[Currency] =
+-    pool.use(_.option(selectCurrency)(sku)).flatMap(_.liftTo[F](CurrencyMissing(sku)))
++    pool.use(_.option(selectCurrency)(sku)).map(_.getOrElse(Currency.CHF))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/EventCounter.scala
+labels: ?
+note: id=s055
+@@ -7,5 +7,7 @@ object EventCounter:
++  def countByKind(events: List[Event]): Map[EventKind, Int] =
++    events.foldLeft(Map.empty[EventKind, Int]): (acc, e) =>
++      acc.updated(e.kind, acc.getOrElse(e.kind, 0) + 1)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/push/DeviceSync.scala
+labels: ?
+note: id=s056
+@@ -10,7 +10,9 @@ final class DeviceSync[F[_]: Monad](ios: ApnsClient[F], android: FcmClient[F], log: Logger[F]):
+   def sync(user: UserId): F[Unit] =
+-    (ios.sync(user), android.sync(user)).mapN((_, _) => ())
++    for
++      _ <- ios.sync(user)
++      _ <- android.sync(user)
++    yield ()
+=== END
+
+=== TURN
+labels: ?
+note: id=s057
+--- a/server/src/main/scala/com/acme/http/RequestIdMiddleware.scala
++++ b/server/src/main/scala/com/acme/http/RequestIdMiddleware.scala
+@@ -5,4 +5,5 @@ object RequestIdMiddleware:
++  def read(req: Request[IO]): Option[String] = req.headers.get(CIString("X-Request-Id")).map(_.head.value)
+--- a/server/src/main/scala/com/acme/billing/StripeClient.scala
++++ b/server/src/main/scala/com/acme/billing/StripeClient.scala
+@@ -9,4 +9,5 @@ object StripeClient:
++  def tag(req: Request[IO], id: String): Request[IO] = req.putHeaders(Header.Raw(CIString("X-Request-Id"), id))
+--- a/server/src/main/scala/com/acme/auth/OidcClient.scala
++++ b/server/src/main/scala/com/acme/auth/OidcClient.scala
+@@ -9,4 +9,5 @@ object OidcClient:
++  def tag(req: Request[IO], id: String): Request[IO] = req.putHeaders(Header.Raw(CIString("X-Request-Id"), id))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/FailoverService.scala
+labels: ?
+note: id=s058
+@@ -10,6 +10,9 @@ final class FailoverService[F[_]: MonadThrow](primary: SmsSender[F], backup: SmsSender[F], health: HealthRepository[F]):
+-  def send(to: PhoneNumber, text: String): F[Unit] = logic.send(to, text)
++  def send(to: PhoneNumber, text: String): F[Unit] =
++    health.isUp(primary.name).flatMap:
++      case true  => primary.send(to, text).handleErrorWith(_ => backup.send(to, text))
++      case false => backup.send(to, text)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/RetryScheduler.scala
+labels: ?
+note: id=s059
+@@ -16,6 +16,12 @@ final class RetryScheduler[F[_]: Sync](failed: FailedRepository[F], clock: Clock[F]):
+-  def reschedule(d: FailedDelivery): F[Unit] = logic.reschedule(d)
++  def reschedule(d: FailedDelivery): F[Unit] =
++    clock.realTimeInstant.flatMap: now =>
++      if d.attempts >= 8 then failed.deadLetter(d.id)
++      else
++        val wait = (30 * math.pow(2, d.attempts)).toLong.seconds
++        failed.update(d.id, d.attempts + 1, now.plusSeconds(wait.toSeconds))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/profile/ProfileFormController.scala
+labels: ?
+note: id=s060
+@@ -14,6 +14,10 @@ final class ProfileFormController(api: ProfileApi[IO], analytics: Analytics[IO]):
+-  def submit(draft: ProfileDraft): IO[Profile] =
+-    ProfileValidation.validate(draft).liftTo[IO].flatMap(api.save)
++  def submit(draft: ProfileDraft): IO[ValidatedNec[FieldError, Profile]] =
++    for
++      checked <- IO.pure(ProfileValidation.validate(draft))
++      _       <- analytics.track("profile_submit")
++      saved   <- checked.traverse(api.save)
++    yield saved
+=== END
+
+=== EDIT server/src/main/scala/com/acme/inventory/StockAlgebra.scala
+labels: ?
+note: id=s061
+@@ -1,4 +1,14 @@
++package com.acme.inventory
++
++object StockAlgebra:
++  def reserve(pool: Resource[IO, Session[IO]], sku: Sku, qty: Int): IO[Reservation] =
++    pool.use: s =>
++      s.prepare(selectStock).flatMap(_.unique(sku)).flatMap: onHand =>
++        if onHand >= qty then s.prepare(decrement).flatMap(_.execute((sku, qty))).as(Reservation(sku, qty))
++        else IO.raiseError(OutOfStock(sku))
+=== END
+
+=== TURN
+labels: ?
+note: id=s062
+--- a/server/src/test/scala/com/acme/messaging/MailgunClientSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/MailgunClientSuite.scala
+@@ -9,3 +9,3 @@ class MailgunClientSuite extends CatsEffectSuite:
++  private val from = EmailAddress("noreply@acme.example")
+--- a/server/src/test/scala/com/acme/messaging/SmtpGatewaySuite.scala
++++ b/server/src/test/scala/com/acme/messaging/SmtpGatewaySuite.scala
+@@ -9,3 +9,3 @@ class SmtpGatewaySuite extends CatsEffectSuite:
++  private val from = EmailAddress("noreply@acme.example")
+--- a/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/EmailComposerSuite.scala
+@@ -9,3 +9,3 @@ class EmailComposerSuite extends CatsEffectSuite:
++  private val from = EmailAddress("noreply@acme.example")
+=== END
+
+=== TURN
+labels: ?
+note: id=s063
+--- a/server/src/main/scala/com/acme/elevation/RemoteElevationClient.scala
++++ b/server/src/main/scala/com/acme/elevation/RemoteElevationClient.scala
+@@ -20,3 +20,5 @@ final class RemoteElevationClient[F[_]: Temporal](http: Client[F]):
++  private def guarded[A](fa: F[A]): F[A] =
++    fa.timeout(10.seconds).adaptError { case _: TimeoutException => ElevationTimeout }
+--- a/server/src/main/scala/com/acme/geocoding/HttpGeocoder.scala
++++ b/server/src/main/scala/com/acme/geocoding/HttpGeocoder.scala
+@@ -14,3 +14,5 @@ final class HttpGeocoder[F[_]: Temporal](http: Client[F]):
++  private def guarded[A](fa: F[A]): F[A] =
++    fa.timeout(10.seconds).adaptError { case _: TimeoutException => ElevationTimeout }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/QuantityRounding.scala
+labels: ?
+note: id=s064
+@@ -1,3 +1,11 @@
++package com.acme.warehouse
++
++object Replenishments:
++  def topUp[F[_]: Sync](stock: StockRepository[F], bins: BinRepository[F]): F[Int] =
++    bins.belowMinimum.flatMap: low =>
++      low.traverse_(b => stock.add(b.sku, b.id, b.maxCapacity - b.occupied)).as(low.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/billing/UsageService.scala
+labels: ?
+note: id=s065
+@@ -9,6 +9,7 @@ final class UsageService[F[_]: Sync](
+     usage: UsageRepository[F],
++    quotaService: QuotaService[F]
+ ):
+   def record(account: AccountId, kind: Channel): F[Unit] =
+-    usage.increment(account, kind)
++    usage.increment(account, kind) *> quotaService.recheck(account)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/AgendaService.scala
+labels: ?
+note: id=s066
+@@ -12,4 +12,6 @@ final class AgendaService[F[_]: Monad](appointments: AppointmentRepository[F], r
+   def agenda(id: UserId, day: LocalDate): F[Agenda] =
+-    appointments.forUser(id, day).map(Agenda.apply)
++    appointments.forUser(id, day).flatMap: items =>
++      reminderService.forDay(id, day).map: reminders =>
++        Agenda(items, reminders)
+=== END
+
+=== TURN
+labels: ?
+note: id=s067
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ReadingSql.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ReadingSql.scala
+@@ -3,3 +3,4 @@ object ReadingSql:
++  val Table = "readings"
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertSql.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertSql.scala
+@@ -3,3 +3,4 @@ object AlertSql:
++  val Table = "alerts"
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingFlushJob.scala
+labels: ?
+note: id=s068
+@@ -16,6 +16,8 @@ final class ReadingFlushJob[F[_]: Async: Logger](writer: ReadingWriter[F], buffer: BatchBuffer[F]):
+   def tick: F[Unit] =
+     buffer.drain.flatMap: batch =>
+-      writer.flush(batch).attempt.void
++      writer.flush(batch).onError: e =>
++        Logger[F].error(e)(s"flush of ${batch.size} readings failed")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/StockHistory.scala
+labels: ?
+note: id=s069
+@@ -8,6 +8,8 @@ object StockHistory:
+   def movedPerSku(moves: List[Movement]): Map[Sku, Quantity] =
+-    moves.foldMap(m => Map(m.sku -> m.quantity))
++    moves.foldLeft(Map.empty[Sku, Quantity]): (acc, move) =>
++      acc.updatedWith(move.sku):
++        case Some(total) => Some(total + move.quantity)
++        case None => Some(move.quantity)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/live/LiveSocket.scala
+labels: ?
+note: id=s070
+@@ -9,6 +9,6 @@ object LiveSocket:
+   def parse(raw: String): js.Dynamic =
+-    Try(js.JSON.parse(raw).asInstanceOf[js.Dynamic]).fold(e => throw MalformedFrame(raw, e), identity)
++    Try(js.JSON.parse(raw).asInstanceOf[js.Dynamic]).getOrElse(js.Dynamic.literal())
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/email/EmailQueue.scala
+labels: ?
+note: id=s071
+@@ -18,6 +18,7 @@ final class EmailRoutes[F[_]: Concurrent](queue: EmailQueueService[F]) extends Http4sDsl[F]:
+     case GET -> Root / "emails" / UUIDVar(id) =>
+-      queue.find(EmailId(id)).flatMap(Ok(_))
++      queue.find(EmailId(id)).flatMap:
++        case Some(email) => Ok(email)
++        case None        => NotFound(s"no email $id")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
+labels: ?
+note: id=s072
+@@ -12,6 +12,9 @@ final class ReadingRoutes(service: ReadingQueryService[IO]) extends Http4sDsl[IO]:
+   val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
++    case GET -> Root / "devices" / DeviceIdVar(id) / "latest" =>
++      service.latest(id).flatMap:
++        case Some(reading) => Ok(reading.asJson)
++        case None => NotFound(s"no readings for ${id.value}")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/Codecs.scala
+labels: ?
+note: id=s073
+@@ -8,5 +8,5 @@ object Codecs:
+   given Codec.PlainCodec[Instant] =
+-    Codec.string.map(raw => Try(Instant.parse(raw)).getOrElse(Instant.EPOCH))(_.toString)
++    Codec.string.mapDecode(raw => DecodeResult.fromEitherString(raw, Try(Instant.parse(raw)).toEither.left.map(_.getMessage)))(_.toString)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shipping/ShippingPlan.scala
+labels: ?
+note: id=s074
+@@ -4,5 +4,8 @@ object ShippingPlan:
++  def legCost(leg: Leg, zone: Zone, grade: ServiceGrade): Money =
++    Tariff.rate(zone, grade) * leg.distanceKm
++  def total(legs: List[Leg], zone: Zone, grade: ServiceGrade): Money =
++    legs.foldMap(legCost(_, zone, grade))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/CarrierBookingService.scala
+labels: ?
+note: id=s075
+@@ -6,6 +6,7 @@ final class CarrierBookingService[F[_]: Sync](
+     shipments: ShipmentRepository[F],
++    carrier: CarrierClient[F]
+ ):
+   def book(id: ShipmentId): F[Booking] =
+-    shipments.get(id).map(Booking.pending)
++    shipments.get(id).flatMap(carrier.book)
+=== END
+
+=== TURN
+labels: ?
+note: id=s076
+--- a/server/src/main/scala/com/acme/users/UserSql.scala
++++ b/server/src/main/scala/com/acme/users/UserSql.scala
+@@ -6,4 +6,5 @@ object UserSql:
++  val selectById: Query[UserId, User] = sql"SELECT id, email, role FROM users WHERE id = $userId".query(user)
+--- a/server/src/main/scala/com/acme/billing/PlanSql.scala
++++ b/server/src/main/scala/com/acme/billing/PlanSql.scala
+@@ -6,4 +6,5 @@ object PlanSql:
++  val selectById: Query[PlanId, Plan] = sql"SELECT id, name, price FROM plans WHERE id = $planId".query(plan)
+=== END
+
+=== TURN
+labels: ?
+note: id=s077
+--- a/server/src/main/scala/com/acme/suppliers/SupplierCatalogClient.scala
++++ b/server/src/main/scala/com/acme/suppliers/SupplierCatalogClient.scala
+@@ -4,3 +4,3 @@ object SupplierCatalogClient:
++  val RequestTimeout = 20.seconds
+--- a/server/src/main/scala/com/acme/suppliers/PurchaseOrderClient.scala
++++ b/server/src/main/scala/com/acme/suppliers/PurchaseOrderClient.scala
+@@ -4,3 +4,3 @@ object PurchaseOrderClient:
++  val RequestTimeout = 20.seconds
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/TemperatureRange.scala
+labels: ?
+note: id=s078
+@@ -4,6 +4,8 @@ object TemperatureRange:
+   def of(readings: NonEmptyList[Reading]): Range =
+-    Range(readings.minimumBy(_.value).value, readings.maximumBy(_.value).value)
++    val minTmp = readings.minimumBy(_.value).value
++    val maxTmp = readings.maximumBy(_.value).value
++    Range(minTmp, maxTmp)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/DeviceRepository.scala
+labels: ?
+note: id=s079
+@@ -3,6 +3,8 @@ package com.acme.telemetry.devices
+ trait DeviceRepository[F[_]]:
+   def insert(spec: NewDevice): F[Device]
++  def find(id: DeviceId): F[Option[Device]]
++  def findByGateway(id: GatewayId): F[List[Device]]
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookingService.scala
+labels: ?
+note: id=s080
+@@ -44,4 +44,6 @@ final class BookingService[F[_]: Monad](
+   def reserve(req: BookingRequest): F[Reservation] =
+-    appointments.hold(req.toHold)
++    appointments.hold(req.toHold).map: rsv =>
++      val apptDur = rsv.endsAt.toEpochMilli - rsv.startsAt.toEpochMilli
++      rsv.copy(lengthMillis = apptDur)
+=== END
+
+=== TURN
+labels: ?
+note: id=s081
+--- a/server/src/main/scala/com/acme/api/OrderRoutes.scala
++++ b/server/src/main/scala/com/acme/api/OrderRoutes.scala
+@@ -6,3 +6,4 @@ object OrderRoutes:
++  object LimitParam extends OptionalQueryParamDecoderMatcher[Int]("limit")
+--- a/server/src/main/scala/com/acme/api/RefundRoutes.scala
++++ b/server/src/main/scala/com/acme/api/RefundRoutes.scala
+@@ -6,3 +6,4 @@ object RefundRoutes:
++  object LimitParam extends OptionalQueryParamDecoderMatcher[Int]("limit")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/elevation/ElevationService.scala
+labels: ?
+note: id=s082
+@@ -9,6 +9,7 @@ final class ElevationService[F[_]: Monad](dem: DemStore[F], tileService: TileService[F]):
+   def at(point: GeoPoint): F[Elevation] =
+-    dem.read(TileGrid.coordOf(point)).map(_.sample(point))
++    tileService.demTileFor(point).map(_.sample(point))
+=== END
+
+=== TURN
+labels: ?
+note: id=s083
+--- a/server/src/test/scala/com/acme/auth/RoundTrip.scala
++++ b/server/src/test/scala/com/acme/auth/RoundTrip.scala
+@@ -1,3 +1,6 @@
++def roundTrips[A: Codec: Show](name: String, gen: Gen[A])(using loc: munit.Location): ScalaCheckSuite ?=> Unit =
++  property(s"$name round trips")(forAll(gen)(a => assertEquals(Codec.decode(Codec.encode(a)), Right(a))))
+--- a/server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
++++ b/server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
+@@ -8,4 +8,3 @@ class TokenCodecSpec extends ScalaCheckSuite:
++  roundTrips("session token", Generators.sessionToken)
+--- a/server/src/test/scala/com/acme/auth/ApiKeyCodecSpec.scala
++++ b/server/src/test/scala/com/acme/auth/ApiKeyCodecSpec.scala
+@@ -8,4 +8,3 @@ class ApiKeyCodecSpec extends ScalaCheckSuite:
++  roundTrips("api key", Generators.apiKey)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/ZonedAgenda.scala
+labels: ?
+note: id=s084
+@@ -9,4 +9,5 @@ final class ZonedAgenda[F[_]: Monad](zones: ZoneLookup[F], agenda: AgendaRepository[F]):
+   def forUser(id: UserId, day: LocalDate): F[(ZoneId, List[Appointment])] =
+-    zones.of(id).map((_, Nil))
++    zones.of(id).flatMap(zone => agenda.forUser(id, day).map(items => (zone, items)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/pricing/PriceBands.scala
+labels: ?
+note: id=s085
+@@ -8,4 +8,7 @@ final class PriceBands[F[_]: Monad](low: PriceAlgebra[F], high: PriceAlgebra[F]):
++  def rung(sku: Sku): F[(Money, Money)] =
++    low.current(sku).flatMap: floor =>
++      high.current(sku).map: ceiling =>
++        (floor, ceiling)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/routing/RouteSearchService.scala
+labels: ?
+note: id=s086
+@@ -15,6 +15,12 @@ final class RouteSearchService[F[_]: Sync](routes: RouteRepository[F]):
++  def search(query: RouteQuery, page: Int): F[List[Route]] =
++    routes.all.map: all =>
++      val matching = all.filter(r => r.length >= query.minLength && r.length <= query.maxLength)
++      val ranked = matching.sortBy(r => (-r.rating, r.length.meters))
++      ranked.slice(page * 20, page * 20 + 20)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/common/Format.scala
+labels: ?
+note: id=s087
+@@ -4,6 +4,8 @@ object Format:
++  def ids(urls: List[String]): List[String] = urls.map(u => u.split('/').last)
++  def total(xs: List[Int]): Int = xs.foldLeft(0)((a, b) => a + b)
++  def hasJson(headers: Map[String, String]): Boolean = headers.get("Content-Type").exists(_.contains("json"))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/cart/LineTotals.scala
+labels: ?
+note: id=s088
+@@ -4,5 +4,5 @@ object LineTotals:
+-  def quantity(lines: List[CartLine]): Int = lines.foldMap(_.quantity)
++  def quantity(lines: List[CartLine]): Int =
++    val ttlQty = lines.foldLeft(0)((acc, ln) => acc + ln.quantity)
++    ttlQty
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/SlotGrid.scala
+labels: ?
+note: id=s089
+@@ -9,4 +9,5 @@ object SlotGrid:
+-  def candidates(start: Instant, step: FiniteDuration, count: Int): List[Instant] =
+-    List.tabulate(count)(i => start.plusMillis(step.toMillis * i))
++  def ladder(start: Instant, step: FiniteDuration, count: Int): List[Instant] =
++    List.tabulate(count)(i => start.plusMillis(step.toMillis * i))
++
++  def topRung(start: Instant, step: FiniteDuration, count: Int): Instant = ladder(start, step, count).last
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/BookedTime.scala
+labels: ?
+note: id=s090
+@@ -6,4 +6,5 @@ object BookedTime:
+   def totalMinutes(appointments: List[Appointment]): Long =
+-    appointments.map(_.length.toMinutes).sum
++    appointments.foldLeft(0L): (total, appointment) =>
++      total + appointment.length.toMinutes
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/email/RecipientResolver.scala
+labels: ?
+note: id=s091
+@@ -9,4 +9,4 @@ object RecipientResolver:
+-  def limit(requested: Option[Int]): Int = requested.getOrElse(50)
++  def limit(requested: Option[PageSize]): PageSize = requested.getOrElse(PageSize.Default)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/DeviceStatsService.scala
+labels: ?
+note: id=s092
+@@ -12,6 +12,14 @@ final class DeviceStatsService[F[_]: Monad](
+   def report(id: DeviceId): F[Report] =
+-    logic.report(id)
++    readings.count(id).flatMap: count =>
++      alerts.openCount(id).flatMap: open =>
++        readings.latest(id).map: latest =>
++          val ratio = if count == 0 then 0.0 else open.toDouble / count
++          val health =
++            if ratio > 0.2 then Health.Degraded
++            else if latest.isEmpty then Health.Silent
++            else Health.Ok
++          Report(id, count, open, health)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/stats/DistanceSummary.scala
+labels: ?
+note: id=s093
+@@ -5,4 +5,6 @@ object DistanceSummary:
++  def average(legs: List[Leg]): Distance =
++    val avgDist = legs.foldLeft(Distance.Zero)((sum, leg) => sum + leg.length) / legs.size
++    avgDist
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/ReminderTimes.scala
+labels: ?
+note: id=s094
+@@ -4,4 +4,5 @@ object ReminderTimes:
++  def calcRemTime(start: Instant, leadMin: Int): Instant =
++    start.minusSeconds(leadMin * 60L)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+labels: ?
+note: id=s095
+@@ -11,5 +11,8 @@ object InvoiceTotals:
+   def total(lines: List[InvoiceLine]): Money =
+-    lines.foldMap(_.amount)
++    lines.foldLeft(Money.zero): (acc, line) =>
++      acc + line.amount
+=== END
+
+=== TURN
+labels: ?
+note: id=s096
+--- a/server/src/main/scala/com/acme/auth/BearerToken.scala
++++ b/server/src/main/scala/com/acme/auth/BearerToken.scala
+@@ -1,3 +1,6 @@
++object BearerToken:
++  def from(req: Request[IO]): Option[String] =
++    req.headers.get[Authorization].map(_.credentials.renderString).collect { case s if s.startsWith("Bearer ") => s.drop(7) }
+--- a/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
++++ b/server/src/main/scala/com/acme/auth/AuthMiddleware.scala
+@@ -9,4 +9,3 @@ object AuthMiddleware:
++  private def token(req: Request[IO]) = BearerToken.from(req)
+--- a/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
++++ b/server/src/main/scala/com/acme/auth/WebsocketAuth.scala
+@@ -9,4 +9,3 @@ object WebsocketAuth:
++  private def token(req: Request[IO]) = BearerToken.from(req)
+=== END
+
+=== TURN
+labels: ?
+note: id=s097
+--- a/web/src/test/scala/com/acme/shop/ui/common/BadgeSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/common/BadgeSpec.scala
+@@ -8,4 +8,7 @@ class BadgeSpec extends FunSuite:
++  test("badge renders count"):
++    val root = dom.document.createElement("div")
++    render(root, Badge(Val(3)))
++    assertEquals(root.querySelector("span").textContent, "3")
+--- a/web/src/test/scala/com/acme/shop/ui/common/PillSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/common/PillSpec.scala
+@@ -8,4 +8,7 @@ class PillSpec extends FunSuite:
++  test("pill renders label"):
++    val root = dom.document.createElement("div")
++    render(root, Pill(Val("new")))
++    assertEquals(root.querySelector("span").textContent, "new")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/ZoneParser.scala
+labels: ?
+note: id=s098
+@@ -4,4 +4,6 @@ object ZoneParser:
++  def zonesFor(rmndrs: List[Reminder], fallback: String): List[ZoneId] =
++    rmndrs.map(r => Try(ZoneId.of(r.zone)).getOrElse(ZoneOffset.UTC))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/dashboard/DashboardQueries.scala
+labels: ?
+note: id=s099
+@@ -10,5 +10,8 @@ final class DashboardQueries[F[_]: Parallel: Monad](users: UserQueries[F], orders: OrderQueries[F]):
+   def summary: F[Summary] =
+-    (users.activeCount, orders.openCount).parMapN(Summary.apply)
++    for
++      active <- users.activeCount
++      open   <- orders.openCount
++    yield Summary(active, open)
+=== END
+
+=== TURN
+labels: ?
+note: id=s100
+--- a/server/src/main/scala/com/acme/messaging/webhook/SlackWebhookReader.scala
++++ b/server/src/main/scala/com/acme/messaging/webhook/SlackWebhookReader.scala
+@@ -12,3 +12,5 @@ final class SlackWebhookReader[F[_]: Async]:
++    req.bodyText.compile.string
++      .map(io.circe.parser.decode[SlackEvent](_))
++      .flatMap(_.leftMap(InvalidPayload(_)).liftTo[F])
+--- a/server/src/main/scala/com/acme/messaging/webhook/GithubWebhookReader.scala
++++ b/server/src/main/scala/com/acme/messaging/webhook/GithubWebhookReader.scala
+@@ -12,3 +12,5 @@ final class GithubWebhookReader[F[_]: Async]:
++    req.bodyText.compile.string
++      .map(io.circe.parser.decode[GithubEvent](_))
++      .flatMap(_.leftMap(InvalidPayload(_)).liftTo[F])
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/ChargeService.scala
+labels: ?
+note: id=s101
+@@ -20,6 +20,8 @@ final class ChargeService[F[_]: Sync](gateway: PaymentGateway[F], logger: Logger[F]):
+   def charge(invoice: Invoice): F[Unit] =
+-    gateway.charge(invoice.customer, invoice.total)
++    gateway.charge(invoice.customer, invoice.total).handleErrorWith: err =>
++      logger.warn(err)("charge failed")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/WindowStats.scala
+labels: ?
+note: id=s102
+@@ -11,6 +11,8 @@ object WindowStats:
+   def summarize(window: List[Reading]): Option[Summary] =
+-    window.headOption.map(first => Summary(first.deviceId, window.size))
++    val avgTemp = window.map(_.value).sum / window.size
++    val reqTs = window.map(_.measuredAt).max
++    window.headOption.map(first => Summary(first.deviceId, window.size, avgTemp, reqTs))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/RefundLogic.scala
+labels: ?
+note: id=s103
+@@ -1,2 +1,10 @@
++trait RefundLogic[F[_]: Monad]:
++  def invoices: InvoiceRepository[F]
++  def payments: PaymentAlgebra[F]
++
++  def refundLast(id: SubscriptionId): F[Unit] =
++    invoices.lastFor(id).flatMap: invoice =>
++      payments.refund(invoice.chargeId, invoice.total)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/http/OrderRoutes.scala
+labels: ?
+note: id=s104
+@@ -12,6 +12,10 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4sDsl[F]:
++    case GET -> Root / "orders" / OrderIdVar(id) =>
++      orders.find(id).flatMap:
++        case Some(order) => Ok(order.asJson)
++        case None        => NotFound(ErrorBody(s"order ${id.value} not found").asJson)
+=== END
+
+=== TURN
+labels: ?
+note: id=s105
+--- a/server/src/test/scala/com/acme/orders/OrderFixtures.scala
++++ b/server/src/test/scala/com/acme/orders/OrderFixtures.scala
+@@ -1,3 +1,8 @@
++object OrderFixtures:
++  val placedOrder = Order(OrderId.random, CustomerId("c-1"), Nil, Placed)
+--- a/server/src/test/scala/com/acme/orders/OrderServiceSuite.scala
++++ b/server/src/test/scala/com/acme/orders/OrderServiceSuite.scala
+@@ -12,3 +12,4 @@ class OrderServiceSuite extends CatsEffectSuite:
++  test("cancel placed order")(service.cancel(OrderFixtures.placedOrder.id).map(assert(_)))
+--- a/server/src/test/scala/com/acme/orders/OrderRepositorySuite.scala
++++ b/server/src/test/scala/com/acme/orders/OrderRepositorySuite.scala
+@@ -12,3 +12,4 @@ class OrderRepositorySuite extends CatsEffectSuite:
++  test("insert placed order")(repo.insert(OrderFixtures.placedOrder).map(assertEquals(_, 1)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/reminders/ReminderConfig.scala
+labels: ?
+note: id=s106
+@@ -0,0 +1,8 @@
++package com.acme.reminders
++
++import scala.concurrent.duration.FiniteDuration
++
++final case class ReminderConfig(
++  pollInterval: FiniteDuration,
++  maxAttempts: Int,
++  defaultLead: FiniteDuration
++)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/StockReport.scala
+labels: ?
+note: id=s107
+@@ -9,5 +9,5 @@ object StockReport:
+   def summarise(lines: List[StockLine]): Summary =
+-    val avgLvl = lines.map(_.onHand.value).sum / lines.size.max(1)
+-    Summary(avgLvl)
++    val averageOnHand = lines.map(_.onHand.value).sum / lines.size.max(1)
++    Summary(averageOnHand)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/RecurringBookingService.scala
+labels: ?
+note: id=s108
+@@ -14,12 +14,4 @@ final class RecurringBookingService[F[_]: Monad](appointments: AppointmentReposi
+   def bookSeries(req: SeriesRequest): F[List[Appointment]] =
+-    val starts = Iterator.iterate(req.first)(_.plus(req.every)).takeWhile(_.isBefore(req.until)).toList
+-    val shifted = starts.map: start =>
+-      val zoned = start.atZone(req.zone)
+-      val adjusted = if zoned.getDayOfWeek == DayOfWeek.SATURDAY then zoned.plusDays(2) else zoned
+-      adjusted.toInstant
+-    val unique = shifted.distinct
+-    appointments.insertAll(unique.map(req.at))
++    appointments.insertAll(expandSeries(req))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/carts/CartService.scala
+labels: ?
+note: id=s109
+@@ -15,4 +15,5 @@ final class CartService[F[_]: Sync](carts: CartRepository[F]):
+   def view(id: CartId): F[Cart] =
+-    carts.find(id).flatMap(_.liftTo[F](CartNotFound(id)))
++    carts.find(id).map(_.getOrElse(Cart.empty(id)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/pricing/PricingService.scala
+labels: ?
+note: id=s110
+@@ -9,6 +9,13 @@ final class PricingService[F[_]: Monad](rates: RateRepository[F]):
++  def quote(items: List[CartItem], customer: CustomerId): F[Money] =
++    rates.forCustomer(customer).map: rate =>
++      val gross = items.map(i => i.price * i.quantity).foldMap(identity)
++      val volume = items.map(_.quantity).sum
++      val tier = if volume > 100 then BigDecimal("0.85") else if volume > 20 then BigDecimal("0.95") else BigDecimal(1)
++      (gross * tier * rate.factor).setScale(2, RoundingMode.HALF_EVEN)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/CycleCountService.scala
+labels: ?
+note: id=s111
+@@ -26,5 +26,6 @@ final class CycleCountService[F[_]: Sync](
+   def padTo(count: CycleCount, minimum: Int): CycleCount =
+-    count.withQuantity(count.counted.max(minimum))
++    val filler = (minimum - count.counted.value).max(0)
++    count.withQuantity(Quantity.unsafe(count.counted.value + filler))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/ThresholdLoader.scala
+labels: ?
+note: id=s112
+@@ -14,8 +14,8 @@ final class ThresholdLoader[F[_]: Monad](
+   def load(id: DeviceId): F[Context] =
+-    (devices.find(id), thresholds.forDevice(id)).mapN(Context.apply)
++    devices.find(id).flatMap: device =>
++      thresholds.forDevice(id).map: limits =>
++        Context(device, limits)
+=== END
+
+=== TURN
+labels: ?
+note: id=s113
+--- a/server/src/main/scala/com/acme/telemetry/devices/OtaClient.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/OtaClient.scala
+@@ -5,3 +5,6 @@ object OtaClient:
++  private val MaxAttempts = 3
++  private def backoff(attempt: Int): FiniteDuration = (200 * math.pow(2, attempt - 1)).toInt.millis
+--- a/server/src/main/scala/com/acme/telemetry/alerts/WebhookClient.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/WebhookClient.scala
+@@ -5,3 +5,6 @@ object WebhookClient:
++  private val MaxAttempts = 3
++  private def backoff(attempt: Int): FiniteDuration = (200 * math.pow(2, attempt - 1)).toInt.millis
+=== END
+
+=== EDIT server/src/test/scala/com/acme/billing/BillingFlowSuite.scala
+labels: ?
+note: id=s114
+@@ -10,6 +10,8 @@ class BillingFlowSuite extends CatsEffectSuite:
++  private val fixture = ResourceFunFixture(
++    createUsers.flatMap: users =>
++      createInvoices.map(invoices => Env(users, invoices))
++  )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/webhook/DeadLetterSweeper.scala
+labels: ?
+note: id=s115
+@@ -14,6 +14,7 @@ final class DeadLetterSweeper[F[_]: Sync](dead: DeadLetterRepository[F], sender: Sender[F]):
+   def sweep: F[Int] =
+     dead.all.flatMap: items =>
+-      items.traverse(i => sender.send(i.message) *> dead.remove(i.id)).map(_.size)
++      items.traverse(i => (sender.send(i.message) *> dead.remove(i.id)).attempt).map(_.count(_.isRight))
+=== END
+
+=== TURN
+labels: ?
+note: id=s116
+--- a/server/src/main/scala/com/acme/booking/api/SlotRoutes.scala
++++ b/server/src/main/scala/com/acme/booking/api/SlotRoutes.scala
+@@ -14,3 +14,5 @@ final class SlotRoutes(service: AvailabilityService[IO]) extends Http4sDsl[IO]:
++    service.freeOn(id, day)
++      .map(_.map(s => SlotView(s.startsAt.toString, s.endsAt.toString, s.length.toMinutes)))
+--- a/server/src/main/scala/com/acme/booking/api/WaitlistRoutes.scala
++++ b/server/src/main/scala/com/acme/booking/api/WaitlistRoutes.scala
+@@ -12,3 +12,5 @@ final class WaitlistRoutes(service: WaitlistService[IO]) extends Http4sDsl[IO]:
++    service.offered(id)
++      .map(_.map(s => SlotView(s.startsAt.toString, s.endsAt.toString, s.length.toMinutes)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/auth/SessionService.scala
+labels: ?
+note: id=s117
+@@ -30,5 +30,6 @@ final class SessionService[F[_]: MonadThrow](sessions: SessionRepository[F], clock: Clock[F]):
+   def resume(token: SessionToken): F[Session] =
+-    sessions.find(token).map(_.get)
++    sessions.find(token).flatMap(_.toRight(SessionExpired(token)).liftTo[F])
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/OverviewService.scala
+labels: ?
+note: id=s118
+@@ -11,7 +11,10 @@ final class OverviewService[F[_]: Monad](devices: DeviceRepository[F], alerts: AlertRepository[F], readings: ReadingRepository[F]):
+   def overview: F[Overview] =
+-    (devices.count, alerts.openCount, readings.countToday).mapN(Overview.apply)
++    devices.count.flatMap: deviceCount =>
++      alerts.openCount.flatMap: openAlerts =>
++        readings.countToday.map: today =>
++          Overview(deviceCount, openAlerts, today)
+=== END
+
+=== TURN
+labels: ?
+note: id=s119
+--- a/server/src/main/scala/com/acme/warehouse/StockRoutes.scala
++++ b/server/src/main/scala/com/acme/warehouse/StockRoutes.scala
+@@ -3,3 +3,5 @@ object StockRoutes:
++extension [F[_]: Concurrent, A: EntityEncoder[F, *]](found: F[Option[A]])
++  def okOrNotFound(what: String): F[Response[F]] = ???
+--- a/server/src/main/scala/com/acme/warehouse/ShipmentRoutes.scala
++++ b/server/src/main/scala/com/acme/warehouse/ShipmentRoutes.scala
+@@ -14,3 +14,3 @@ final class ShipmentRoutes[F[_]: Concurrent](shipments: ShipmentService[F]) extends Http4sDsl[F]:
++      shipments.find(id).okOrNotFound(s"shipment $id")
+--- a/server/src/main/scala/com/acme/warehouse/ReservationRoutes.scala
++++ b/server/src/main/scala/com/acme/warehouse/ReservationRoutes.scala
+@@ -14,3 +14,3 @@ final class ReservationRoutes[F[_]: Concurrent](reservations: ReservationService[F]) extends Http4sDsl[F]:
++      reservations.find(id).okOrNotFound(s"reservation $id")
+=== END
+
+=== EDIT server/src/test/scala/com/acme/booking/SlotGridSuite.scala
+labels: ?
+note: id=s120
+@@ -0,0 +1,10 @@
++package com.acme.booking
++
++import munit.ScalaCheckSuite
++import org.scalacheck.Prop.forAll
++
++class SlotGridSuite extends ScalaCheckSuite:
++  property("candidates are evenly spaced"):
++    forAll(Gen.chooseNum(1, 48)): count =>
++      val times = SlotGrid.candidates(Instant.EPOCH, 30.minutes, count)
++      times.zip(times.drop(1)).forall((a, b) => b.toEpochMilli - a.toEpochMilli == 1800000L)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/QuietHoursService.scala
+labels: ?
+note: id=s121
+@@ -14,6 +14,13 @@ final class QuietHoursService[F[_]: Sync](clock: Clock[F], prefs: PreferenceRepository[F]):
+-  def nextSendTime(user: UserId): F[Instant] = logic.nextSendTime(user)
++  def nextSendTime(user: UserId): F[Instant] =
++    for
++      now <- clock.realTimeInstant
++      p   <- prefs.get(user)
++      zoned = now.atZone(p.zone)
++      inQuiet = zoned.toLocalTime.isAfter(p.quietStart) || zoned.toLocalTime.isBefore(p.quietEnd)
++      next = if inQuiet then zoned.`with`(p.quietEnd).toInstant else now
++    yield next
+=== END
+
+=== TURN
+labels: ?
+note: id=s122
+--- a/server/src/main/scala/com/acme/messaging/http/RequestOps.scala
++++ b/server/src/main/scala/com/acme/messaging/http/RequestOps.scala
+@@ -1,3 +1,5 @@
++extension [F[_]](req: Request[F])
++  def withIdempotencyKey(key: String): Request[F] = req.putHeaders(Header.Raw(ci"Idempotency-Key", key))
+--- a/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
++++ b/server/src/main/scala/com/acme/messaging/sms/TwilioClient.scala
+@@ -20,3 +20,3 @@ final class TwilioClient[F[_]: Async](client: Client[F]):
++    request(to, text).withIdempotencyKey(id.value)
+--- a/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
++++ b/server/src/main/scala/com/acme/messaging/email/MailgunClient.scala
+@@ -20,3 +20,3 @@ final class MailgunClient[F[_]: Async](client: Client[F]):
++    request(email).withIdempotencyKey(email.id.value)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/orders/OrderStats.scala
+labels: ?
+note: id=s123
+@@ -11,4 +11,6 @@ object OrderStats:
+   def itemCount(orders: List[Order]): Int =
+-    orders.foldMap(_.lines.size)
++    orders.foldLeft(0): (acc, order) =>
++      acc + order.lines.size
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/routing/AuthGuard.scala
+labels: ?
+note: id=s124
+@@ -4,6 +4,8 @@ object AuthGuard:
++  def bouncer(session: Signal[Option[Session]], router: Router[Page]): Modifier[HtmlElement] =
++    session.changes.filter(_.isEmpty) --> Observer(_ => router.pushState(Page.Login))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingFlushJob.scala
+labels: ?
+note: id=s125
+@@ -16,6 +16,6 @@ final class ReadingFlushJob[F[_]: Async](writer: ReadingWriter[F], buffer: BatchBuffer[F]):
+   def tick: F[Unit] =
+     buffer.drain.flatMap: batch =>
+-      writer.flush(batch)
++      writer.flush(batch).attempt.void
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/BatchFileLoader.scala
+labels: ?
+note: id=s126
+@@ -11,5 +11,5 @@ object BatchFileLoader:
+   def load(lines: List[String]): Either[BadBatch, List[Reading]] =
+-    lines.flatMap(line => ReadingParser.parse(line).toOption)
++    lines.traverse(ReadingParser.parse).leftMap(BadBatch(_))
+=== END
+
+=== TURN
+labels: ?
+note: id=s127
+--- a/server/src/main/scala/com/acme/warehouse/PickBatching.scala
++++ b/server/src/main/scala/com/acme/warehouse/PickBatching.scala
+@@ -3,3 +3,3 @@ object PickBatching:
++  val MaxLinesPerBatch = 30
+--- a/server/src/main/scala/com/acme/audit/RetentionPolicy.scala
++++ b/server/src/main/scala/com/acme/audit/RetentionPolicy.scala
+@@ -3,3 +3,3 @@ object RetentionPolicy:
++  val AuditRetentionDays = 30
+=== END
+
+=== EDIT server/src/main/scala/com/acme/geo/GeoPointParser.scala
+labels: ?
+note: id=s128
+@@ -7,4 +7,6 @@ object GeoPointParser:
+   def parse(rawLat: String, rawLon: String): Option[GeoPoint] =
+-    (rawLat.toDoubleOption.flatMap(Latitude.option), rawLon.toDoubleOption.flatMap(Longitude.option)).mapN(GeoPoint.apply)
++    rawLat.toDoubleOption.flatMap(Latitude.option).flatMap: lat =>
++      rawLon.toDoubleOption.flatMap(Longitude.option).map: lon =>
++        GeoPoint(lat, lon)
+=== END
+
+=== TURN
+labels: ?
+note: id=s129
+--- a/server/src/main/scala/com/acme/shop/stock/StockClient.scala
++++ b/server/src/main/scala/com/acme/shop/stock/StockClient.scala
+@@ -5,4 +5,5 @@ object StockClient:
++  private val Retry = RetryPolicy(maxAttempts = 3, baseDelay = 200.millis, factor = 2.0)
+--- a/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
++++ b/server/src/main/scala/com/acme/shop/shipping/CarrierClient.scala
+@@ -5,4 +5,5 @@ object CarrierClient:
++  private val Retry = RetryPolicy(maxAttempts = 3, baseDelay = 200.millis, factor = 2.0)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/refunds/RefundPolicies.scala
+labels: ?
+note: id=s130
+@@ -1,6 +1,14 @@
++package com.acme.refunds
++
++import doobie.*
++
++object RefundPolicies:
++  def eligible(order: Order, now: Instant): IO[Boolean] =
++    val deadline = order.deliveredAt.plus(30, ChronoUnit.DAYS)
++    for
++      history <- RefundDb.countFor(order.customer)
++      allowed = history < 3 && now.isBefore(deadline) && order.status == Delivered
++    yield allowed
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/wizard/Stepper.scala
+labels: ?
+note: id=s131
+@@ -4,10 +4,11 @@ object Stepper:
+-  def apply(steps: List[WizardStep], current: Signal[Int]): HtmlElement =
+-    ul(steps.zipWithIndex.map((step, idx) => li(step.title, cls.toggle("active") <-- current.map(_ == idx))))
++  def apply(steps: List[WizardStep], current: Signal[Int]): HtmlElement =
++    val rungs = steps.zipWithIndex.map((step, idx) => li(step.title, cls.toggle("active") <-- current.map(_ == idx)))
++    val ladder = ul(rungs)
++    ladder
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/email/AttachmentLoader.scala
+labels: ?
+note: id=s132
+@@ -11,6 +11,8 @@ final class AttachmentLoader[F[_]: Monad](files: FileStore[F], quotas: QuotaRepository[F]):
+-  def load(id: AttachmentId, user: UserId): F[(Bytes, Quota)] = (files.read(id), quotas.get(user)).tupled
++  def load(id: AttachmentId, user: UserId, msgCnt: Int): F[(Bytes, Quota)] =
++    files.read(id).flatMap: bytes =>
++      quotas.get(user).map(q => (bytes, q.copy(used = q.used + msgCnt)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/OrderLine.scala
+labels: ?
+note: id=s133
+@@ -4,4 +4,6 @@ final case class OrderLine(
++  qty: Int,
++  amt: Money
+ ):
++  def lineTotal: Money = amt * qty
+=== END
+
+=== EDIT app/src/main/scala/com/acme/api/RefundEndpoints.scala
+labels: ?
+note: id=s134
+@@ -22,4 +22,6 @@ final class RefundEndpoints[F[_]: Concurrent](service: RefundService[F]):
++  val getRefund = RefundApi.get.serverLogic[F]: id =>
++    service.find(id).map(_.fold[Either[ApiError, Refund]](Left(ApiError.NotFound(id)))(Right(_)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/sms/CarrierRouter.scala
+labels: ?
+note: id=s135
+@@ -6,5 +6,6 @@ object CarrierRouter:
++  def pickCrr(nbr: PhoneNumber, crrs: List[Carrier]): Option[Carrier] =
++    crrs.find(_.prefixes.exists(nbr.value.startsWith))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/retention/RetentionService.scala
+labels: ?
+note: id=s136
+@@ -18,6 +18,16 @@ final class RetentionService[F[_]: Temporal](readings: ReadingRepository[F], roll
+   def sweep(now: Instant): F[Unit] =
+-    logic.sweep(now)
++    RetentionPolicy.tiers.traverse_ { tier =>
++      val cutoff = now.minusMillis(tier.maxAge.toMillis)
++      for
++        stale <- readings.idsOlderThan(cutoff)
++        _ <- stale.grouped(1000).toList.traverse_ { ids =>
++          rollups.aggregate(ids, tier.resolution) *> readings.deleteByIds(ids)
++        }
++      yield ()
++    }
+=== END
+
+=== EDIT server/src/main/scala/com/acme/suppliers/PricingService.scala
+labels: ?
+note: id=s137
+@@ -14,5 +14,5 @@ final class PricingService[F[_]: Sync](catalog: SupplierCatalog[F]) extends Pricing[F]:
+   def unitPrice(sku: Sku, supplier: SupplierId): F[Money] =
+-    catalog.quote(sku, supplier).flatMap(_.liftTo[F](NoQuote(sku, supplier)))
++    catalog.quote(sku, supplier).map(_.getOrElse(Money.zero))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceMailer.scala
+labels: ?
+note: id=s138
+@@ -9,4 +9,5 @@ object InvoiceMailer:
++  def render(i: Invoice, c: Customer, t: Template): String =
++    t.fill(c.name, i.number, i.total.show)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/tracks/TrackSummaryService.scala
+labels: ?
+note: id=s139
+@@ -21,6 +21,14 @@ final class TrackSummaryService[F[_]: Sync](tracks: TrackRepository[F]):
++  def monthlyTotals(owner: UserId, year: Int): F[List[MonthTotal]] =
++    tracks.byOwner(owner).map: all =>
++      all
++        .filter(_.recordedAt.getYear == year)
++        .groupBy(_.recordedAt.getMonth)
++        .map((month, ts) => MonthTotal(month, ts.map(_.distance).reduce(_ + _), ts.size))
++        .toList
++        .sortBy(_.month)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/billing/CheckoutService.scala
+labels: ?
+note: id=s140
+@@ -29,6 +29,7 @@ final class CheckoutService[F[_]: Sync](cards: CardAlgebra[F], payments: PaymentAlgebra[F]):
+   def checkout(card: CardInput, amount: Money): F[Receipt] =
+-    cards.validate(card).flatMap(valid => payments.charge(valid, amount))
++    for
++      _       <- cards.validate(card).attempt
++      receipt <- payments.charge(card.number, amount)
++    yield receipt
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/profile/ProfileSaver.scala
+labels: ?
+note: id=s141
+@@ -12,6 +12,6 @@ final class ProfileSaver(api: ProfileApi[Future]):
+   def saves(drafts: EventStream[ProfileDraft]): EventStream[Profile] =
+-    drafts.flatMapSwitch(d => EventStream.fromFuture(api.save(d)))
++    drafts.flatMapSwitch(d => EventStream.fromFuture(api.save(d)).recoverIgnoreErrors)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/recommend/RecommendationService.scala
+labels: ?
+note: id=s142
+@@ -2,7 +2,7 @@ package com.acme.shop.recommend
+-final class RecommendationService[F[_]: Monad](history: HistoryRepository[F]):
++final class RecommendationService[F[_]: Monad](products: ProductService[F], orders: OrderService[F]):
+   def forUser(user: UserId): F[List[Product]] =
+-    history.bought(user).flatMap(_.traverse(history.related))
++    orders.recent(user).flatMap(_.traverse(o => products.related(o.product)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/booking/RoomAllocator.scala
+labels: ?
+note: id=s143
+@@ -0,0 +1,11 @@
++package com.acme.booking
++
++object RoomAllocator:
++  def allocate(session: Session[IO], window: TimeWindow, size: Int): IO[Option[RoomId]] =
++    session.prepare(freeRooms).flatMap: query =>
++      query.stream((window.start, window.end, size), 64).compile.toList.map: rooms =>
++        rooms.sortBy(_.capacity).headOption.map(_.id)
++
++  def release(session: Session[IO], id: RoomId): IO[Unit] =
++    session.prepare(releaseRoom).flatMap(_.execute(id)).void
+=== END
+
+=== EDIT server/src/main/scala/com/acme/refunds/RefundService.scala
+labels: ?
+note: id=s144
+@@ -24,6 +24,8 @@ final class RefundService[F[_]: Sync](refunds: RefundRepository[F], gateway: PaymentGateway[F]):
+   def summary(id: OrderId): F[RefundSummary] =
+-    (refunds.countFor(id), refunds.sumFor(id)).mapN(RefundSummary.apply)
++    refunds.countFor(id).flatMap: count =>
++      refunds.sumFor(id).flatMap: total =>
++        gateway.refundableBalance(id).handleError(_ => Money.zero).map(RefundSummary(count, total, _))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/template/LocaleResolver.scala
+labels: ?
+note: id=s145
+@@ -8,5 +8,5 @@ final class LocaleResolver[F[_]: Sync](users: UserRepository[F]):
+   def localeOf(user: UserId): F[Locale] =
+-    users.find(user).flatMap(_.map(_.locale).liftTo[F](UserNotFound(user)))
++    users.find(user).map(_.map(_.locale).getOrElse(Locale.ENGLISH))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/warehouse/CountVarianceService.scala
+labels: ?
+note: id=s146
+@@ -12,6 +12,10 @@ final class CountVarianceService[F[_]: Sync](counts: CycleCounts[F], stock: StockRepository[F]):
++  def reconcile(id: CountId): F[Adjustment] =
++    for
++      count <- counts.get(id)
++      expected <- stock.find(count.sku, count.bin).map(_.map(_.onHand).getOrElse(Quantity.zero))
++      adjustment = Adjustment(count.sku, count.bin, count.counted.value - expected.value)
++      _ <- counts.close(id, adjustment)
++    yield adjustment
+=== END
+
+=== TURN
+labels: ?
+note: id=s147
+--- a/server/src/main/scala/com/acme/orders/OrderRepository.scala
++++ b/server/src/main/scala/com/acme/orders/OrderRepository.scala
+@@ -20,3 +20,4 @@ final class OrderRepositoryLive[F[_]]:
++  private def total(r: OrderRow): Money = Money(BigDecimal(r.cents, 2), Currency.getInstance(r.currency))
+--- a/server/src/main/scala/com/acme/refunds/RefundRepository.scala
++++ b/server/src/main/scala/com/acme/refunds/RefundRepository.scala
+@@ -18,3 +18,4 @@ final class RefundRepositoryLive[F[_]]:
++  private def amount(r: RefundRow): Money = Money(BigDecimal(r.cents, 2), Currency.getInstance(r.currency))
+--- a/server/src/main/scala/com/acme/payments/PaymentRepository.scala
++++ b/server/src/main/scala/com/acme/payments/PaymentRepository.scala
+@@ -16,3 +16,4 @@ final class PaymentRepositoryLive[F[_]]:
++  private def charged(r: PaymentRow): Money = Money(BigDecimal(r.cents, 2), Currency.getInstance(r.currency))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/stock/StockQueries.scala
+labels: ?
+note: id=s148
+@@ -12,5 +12,5 @@ final class StockQueries[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def inStock(sku: Sku): F[Boolean] =
+-    pool.use(_.unique(selectStock)(sku)).map(_ > 0)
++    pool.use(_.unique(selectStock)(sku)).map(_ > 0).handleError(_ => false)
+=== END
+
+=== EDIT server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
+labels: ?
+note: id=s149
+@@ -7,4 +7,6 @@ class TokenCodecSpec extends ScalaCheckSuite:
++  property("decode inverts encode"):
++    forAll(Generators.token): token =>
++      assertEquals(TokenCodec.decode(TokenCodec.encode(token)), Right(token))
++
++  test("sorted ids"): assertEquals(List(3, 1, 2).sortBy(x => x), List(1, 2, 3))
+=== END
+
+=== TURN
+labels: ?
+note: id=s150
+--- a/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
++++ b/server/src/test/scala/com/acme/billing/ChargeServiceSuite.scala
+@@ -7,5 +7,7 @@ class ChargeServiceSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.pure(ChargeId("ch_1"))
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.unit
+--- a/server/src/test/scala/com/acme/billing/DeclinedChargeSuite.scala
++++ b/server/src/test/scala/com/acme/billing/DeclinedChargeSuite.scala
+@@ -7,5 +7,7 @@ class DeclinedChargeSuite extends CatsEffectSuite:
++  private val gateway = new PaymentGateway[IO]:
++    def charge(owner: UserId, amount: Money): IO[ChargeId] = IO.raiseError(CardDeclined)
++    def refund(id: ChargeId, amount: Money): IO[Unit]     = IO.raiseError(CardDeclined)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/common/Breadcrumbs.scala
+labels: ?
+note: id=s151
+@@ -0,0 +1,9 @@
++package com.acme.shop.ui.common
++
++object Breadcrumbs:
++  def trail(page: Page): List[Crumb] = page match
++    case Page.Home           => List(Crumb("Home", Page.Home))
++    case Page.Orders         => List(Crumb("Home", Page.Home), Crumb("Orders", Page.Orders))
++    case Page.Order(id)      => trail(Page.Orders) :+ Crumb(id.value, page)
++    case Page.NotFound       => Nil
+=== END
+
+=== EDIT server/src/main/scala/com/acme/users/UserDeletion.scala
+labels: ?
+note: id=s152
+@@ -10,6 +10,12 @@ final class UserDeletion[F[_]: Sync](users: UserRepository[F], sessions: SessionRepository[F], invoices: InvoiceRepository[F]):
++  def delete(id: UserId): F[Unit] =
++    for
++      open <- invoices.openFor(id)
++      _    <- Sync[F].raiseWhen(open.nonEmpty)(OpenInvoices(id))
++      _    <- sessions.revokeAll(id)
++      _    <- invoices.anonymise(id)
++      _    <- users.delete(id)
++    yield ()
+=== END
+
+=== EDIT server/src/main/scala/com/acme/export/GpxExportService.scala
+labels: ?
+note: id=s153
+@@ -6,6 +6,7 @@ import com.acme.geocoding.GeocodingService
+ final class GpxExportService[F[_]: Sync](
+     tracks: TrackRepository[F],
++    geocoding: GeocodingService[F],
+     writer: GpxWriter[F]
+ ):
+   def export(id: TrackId): F[Array[Byte]] =
+=== END
+
+=== TURN
+labels: ?
+note: id=s154
+--- a/server/src/main/scala/com/acme/auth/TokenService.scala
++++ b/server/src/main/scala/com/acme/auth/TokenService.scala
+@@ -6,4 +6,4 @@ final class TokenService[F[_]: Sync](clock: Clock[F]):
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(AuthConfig.SessionTtl.toSeconds))
+--- a/server/src/main/scala/com/acme/auth/SessionService.scala
++++ b/server/src/main/scala/com/acme/auth/SessionService.scala
+@@ -6,4 +6,4 @@ final class SessionService[F[_]: Sync](clock: Clock[F]):
++  def expiry: F[Instant] = clock.realTimeInstant.map(_.plusSeconds(AuthConfig.SessionTtl.toSeconds))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/sms/SmsReminderService.scala
+labels: ?
+note: id=s155
+@@ -4,7 +4,8 @@ package com.acme.messaging.sms
+ final class SmsReminderService[F[_]: Sync](
+     appointments: AppointmentRepository[F],
+-    sms: SmsSender[F]
++    sms: SmsSender[F],
++    templates: TemplateRenderer[F]
+ ):
+   def remind(id: AppointmentId): F[Unit] =
+     appointments.get(id).flatMap(a => templates.render(Reminder, a).flatMap(sms.send(a.phone, _)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/messaging/campaign/CampaignService.scala
+labels: ?
+note: id=s156
+@@ -4,10 +4,11 @@ package com.acme.messaging.campaign
+ final class CampaignService[F[_]: Sync](
+     campaigns: CampaignRepository[F],
+-    outbox: Outbox[F]
++    outbox: Outbox[F],
++    templateService: TemplateService[F]
+ ):
+   def schedule(c: Campaign): F[Unit] =
+-    campaigns.save(c)
++    templateService.validate(c.template) *> campaigns.save(c)
+=== END
+
+=== TURN
+labels: ?
+note: id=s157
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+@@ -16,3 +16,5 @@ object OrderListView:
++      child <-- loading.splitBoolean(
++        whenTrue = _ => div(cls := "spinner"),
++        whenFalse = _ => emptyNode
++      ),
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
+@@ -16,3 +16,5 @@ object ProductListView:
++      child <-- loading.splitBoolean(
++        whenTrue = _ => div(cls := "spinner"),
++        whenFalse = _ => emptyNode
++      ),
+=== END
+
+=== TURN
+labels: ?
+note: id=s158
+--- a/server/src/main/scala/com/acme/warehouse/LineParsing.scala
++++ b/server/src/main/scala/com/acme/warehouse/LineParsing.scala
+@@ -1,3 +1,4 @@
++extension (raw: (String, String))
++  def toStockLine(quantity: Quantity): StockLine = StockLine(Sku(raw._1.trim.toUpperCase), BinId(raw._2.trim.toUpperCase), quantity)
+--- a/server/src/main/scala/com/acme/warehouse/StockRoutes.scala
++++ b/server/src/main/scala/com/acme/warehouse/StockRoutes.scala
+@@ -12,3 +12,3 @@ final class StockRoutes[F[_]: Concurrent](stock: StockService[F]) extends Http4sDsl[F]:
++      val line = (skuRaw, binRaw).toStockLine(quantity)
+--- a/server/src/main/scala/com/acme/warehouse/ReservationRoutes.scala
++++ b/server/src/main/scala/com/acme/warehouse/ReservationRoutes.scala
+@@ -12,3 +12,3 @@ final class ReservationRoutes[F[_]: Concurrent](reservations: ReservationService[F]) extends Http4sDsl[F]:
++      val line = (skuRaw, binRaw).toStockLine(quantity)
+=== END
+
+=== TURN
+labels: ?
+note: id=s159
+--- a/server/src/test/scala/com/acme/messaging/SmsFixtures.scala
++++ b/server/src/test/scala/com/acme/messaging/SmsFixtures.scala
+@@ -1,3 +1,3 @@
++val receipt = DlvReceipt(Instant.parse("2026-01-01T00:00:00Z"), TemplateId("welcome"))
+--- a/server/src/test/scala/com/acme/messaging/DlvReceiptParserSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/DlvReceiptParserSuite.scala
+@@ -8,3 +8,3 @@ class DlvReceiptParserSuite extends FunSuite:
++  test("round trips")(assertEquals(DlvReceiptParser.parse(SmsFixtures.receipt.asJson), Right(SmsFixtures.receipt)))
+--- a/server/src/test/scala/com/acme/messaging/SmsStoreSuite.scala
++++ b/server/src/test/scala/com/acme/messaging/SmsStoreSuite.scala
+@@ -8,3 +8,3 @@ class SmsStoreSuite extends CatsEffectSuite:
++  test("stores")(store.save(SmsFixtures.receipt).assert)
+=== END
+
+=== EDIT server/src/test/scala/com/acme/geo/GeodesySuite.scala
+labels: ?
+note: id=s160
+@@ -8,4 +8,6 @@ class GeodesySuite extends ScalaCheckSuite:
++  property("haversine is symmetric"):
++    forAll(genGeoPoint, genGeoPoint): (a, b) =>
++      assertEquals(Geodesy.haversine(a, b), Geodesy.haversine(b, a))
+=== END

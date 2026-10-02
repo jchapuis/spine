@@ -1,0 +1,31 @@
+#!/bin/sh
+# Serve the local kev decision model that abide queries on every edit.
+# First run clones kev and installs its deps; later runs just serve. See ../README.md.
+#
+#   KEV_MODEL   model to serve (default: Kev-4B fine-tuned on .abide/rubric.json; jaredpalmer/kev-4b is the stock one)
+#   KEV_PORT    port (default 8009; must match TYPESAFE_AI_BASE_URL in your .env)
+#   KEV_DIR     where the kev clone lives (default <spine>/tools/kev, shared by all projects)
+set -eu
+
+MODEL="${KEV_MODEL:-jchapuis/kev-4b-spine-scala}"
+PORT="${KEV_PORT:-8009}"
+
+# Physical path, so this resolves to the spine root even when invoked through a
+# project's symlinked .claude/skills. bin -> compliance-gate -> skills -> .claude -> spine
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SPINE_ROOT=$(cd -- "$SCRIPT_DIR/../../../.." && pwd -P)
+KEV_DIR="${KEV_DIR:-$SPINE_ROOT/tools/kev}"
+
+command -v uv >/dev/null 2>&1 || { echo "kev-serve: needs 'uv' — https://docs.astral.sh/uv/" >&2; exit 1; }
+
+if [ ! -d "$KEV_DIR/.git" ]; then
+  echo "kev-serve: cloning kev into $KEV_DIR"
+  mkdir -p "$(dirname -- "$KEV_DIR")"
+  git clone --depth 1 https://github.com/jaredpalmer/kev.git "$KEV_DIR"
+fi
+
+cd "$KEV_DIR"
+echo "kev-serve: syncing deps (first run downloads torch/mlx; the model downloads on first serve)…"
+uv sync --extra serve
+echo "kev-serve: serving $MODEL on http://127.0.0.1:$PORT  (Ctrl-C to stop)"
+exec uv run --extra serve python -m kev.serve --run "$MODEL" --port "$PORT"

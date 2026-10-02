@@ -1,0 +1,340 @@
+=== EDIT server/src/main/scala/com/acme/gpx/GpxStreamReader.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: handleErrorWith turns a corrupt GPX stream into an empty one
+@@ -24,5 +24,6 @@ final class GpxStreamReader[F[_]: Async]:
+   def points(bytes: Stream[F, Byte]): Stream[F, TrackPoint] =
+-    bytes.through(xmlEvents).through(toTrackPoints)
++    bytes.through(xmlEvents).through(toTrackPoints)
++      .handleErrorWith(_ => Stream.empty)
+=== END
+=== EDIT server/src/main/scala/com/acme/gpx/CoordinateParser.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: invalid latitude silently becomes equator
+@@ -9,4 +9,4 @@ object CoordinateParser:
+   def latitude(raw: String): Either[ParseError, Latitude] =
+-    raw.toDoubleOption.toRight(NotANumber(raw)).flatMap(Latitude.either(_).left.map(ParseError.OutOfRange(_)))
++    Right(raw.toDoubleOption.flatMap(Latitude.option).getOrElse(Latitude(0.0)))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/WaypointSaver.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: attempt.void discards database failure
+@@ -17,5 +17,5 @@ final class WaypointSaver[F[_]: MonadCancelThrow](repo: WaypointRepository[F]):
+   def save(waypoint: Waypoint): F[Unit] =
+-    repo.insert(waypoint)
++    repo.insert(waypoint).attempt.void
+=== END
+=== EDIT server/src/main/scala/com/acme/navigation/NavigationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: holds concrete RoutePlannerService
+@@ -7,7 +7,7 @@ import com.acme.routing.RoutePlannerService
+ final class NavigationService[F[_]: Monad](
+-    planner: RoutePlanner[F],
++    planner: RoutePlannerService[F],
+     positions: PositionFeed[F]
+ ):
+   def reroute(from: GeoPoint, goal: GeoPoint): F[Route] =
+     planner.plan(from, goal)
+=== END
+=== EDIT server/src/main/scala/com/acme/sync/TrackSyncService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: calls another service's method through a concrete field
+@@ -22,6 +22,7 @@ final class TrackSyncService[F[_]: Monad](
+   def sync(track: Track): F[SyncReport] =
+-    uploader.push(track).map(SyncReport.pushed)
++    elevationService.profileFor(track).flatMap: profile =>
++      uploader.push(track.withProfile(profile)).map(SyncReport.pushed)
+=== END
+=== EDIT server/src/main/scala/com/acme/geofence/GeofenceService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: constructor takes concrete AlertService
+@@ -5,6 +5,7 @@ import com.acme.alerts.AlertService
+ final class GeofenceService[F[_]: Sync](
+     zones: ZoneRepository[F],
++    alertService: AlertService[F]
+ ):
+   def check(position: GeoPoint): F[Unit] =
+-    zones.containing(position).void
++    zones.containing(position).flatMap(_.traverse_(alertService.raise))
+=== END
+=== EDIT server/src/main/scala/com/acme/waypoints/WaypointStore.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: repository algebra shipped as object with concrete skunk logic and no trait
+@@ -1,7 +1,12 @@
++package com.acme.waypoints
++
++object WaypointStore:
++  private val insertWaypoint: Command[Waypoint] =
++    sql"INSERT INTO waypoints (id, lat, lon) VALUES ($waypointId, $latitude, $longitude)".command.to[Waypoint]
++
++  def insert(session: Session[IO], waypoint: Waypoint): IO[Unit] =
++    session.prepare(insertWaypoint).flatMap(_.execute(waypoint)).void
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackSimplifyService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: simplification algorithm inlined in Service
+@@ -18,6 +18,16 @@ final class TrackSimplifyService[F[_]: Sync](tracks: TrackRepository[F]):
++  def simplified(id: TrackId, tolerance: Distance): F[Track] =
++    tracks.get(id).map: track =>
++      def go(points: Vector[TrackPoint]): Vector[TrackPoint] =
++        val (farthest, index) = points.zipWithIndex.maxBy((p, _) => Geodesy.crossTrack(p, points.head, points.last))
++        if Geodesy.crossTrack(farthest, points.head, points.last) > tolerance then
++          go(points.take(index + 1)).init ++ go(points.drop(index))
++        else Vector(points.head, points.last)
++      track.copy(points = go(track.points))
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TileService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step stitch plus fallback orchestration in service method
+@@ -26,6 +26,13 @@ final class TileService[F[_]: Async](primary: TileSource[F], backup: TileSource[F]):
++  def stitched(bounds: BoundingBox, zoom: Zoom): F[Image] =
++    val coords = TileGrid.covering(bounds, zoom)
++    coords.parTraverse(c => primary.get(c).orElse(backup.get(c))).map: tiles =>
++      val canvas = Image.blank(coords.width * 256, coords.height * 256)
++      tiles.zip(coords).foreach((tile, c) => canvas.draw(tile, c.column * 256, c.row * 256))
++      canvas.crop(bounds)
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/SnapLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: non-idiomatic single-letter parameters p r t
+@@ -6,4 +6,5 @@ trait SnapLogic[F[_]]:
++  def snapToRoad(p: GeoPoint, r: Distance, t: Int): F[Option[GeoPoint]] =
++    nearestEdges(p, r).map(_.take(t).headOption.map(_.project(p)))
+=== END
+=== EDIT server/src/main/scala/com/acme/elevation/GainCalculator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: calcElevGain and distKm abbreviations
+@@ -4,4 +4,7 @@ object GainCalculator:
++  def calcElevGain(profile: ElevationProfile): Elevation =
++    profile.points.sliding(2).collect:
++      case List(lower, upper) if upper.elevation > lower.elevation => upper.elevation - lower.elevation
++    .foldLeft(Elevation.Zero)(_ + _)
+=== END
+=== EDIT server/src/main/scala/com/acme/gpx/GapPadding.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: filler is a metaphor name for interpolated points
+@@ -5,4 +5,5 @@ object GapPadding:
++  def fill(gap: TimeGap, before: TrackPoint, after: TrackPoint): List[TrackPoint] =
++    val filler = Interpolation.between(before, after, gap.missingSeconds)
++    before :: filler ::: List(after)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteSummaryService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent calls sequenced with flatMap instead of parMapN
+@@ -14,5 +14,7 @@ final class RouteSummaryService[F[_]: Concurrent](distances: DistanceAlgebra[F], climbs: ClimbAlgebra[F]):
+   def summary(route: Route): F[RouteSummary] =
+-    (distances.total(route), climbs.total(route)).parMapN(RouteSummary.apply)
++    distances.total(route).flatMap: distance =>
++      climbs.total(route).map(climb => RouteSummary(distance, climb))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft merging Maps should be foldMap
+@@ -9,4 +9,7 @@ object TrackStats:
++  def pointsPerZone(points: List[TrackPoint]): Map[ZoneId, Int] =
++    points.foldLeft(Map.empty[ZoneId, Int]): (counts, point) =>
++      counts.updated(point.zone, counts.getOrElse(point.zone, 0) + 1)
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TileWarmer.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: map then sequence should be traverse
+@@ -12,4 +12,4 @@ final class TileWarmer[F[_]: Async](tiles: TileAlgebra[F]):
+   def warm(coords: List[TileCoord]): F[List[Tile]] =
+-    coords.traverse(tiles.get)
++    coords.map(tiles.get).sequence
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackSimplifyService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=1 cats=0
+note: inlined algorithm in service and abbreviated names
+@@ -30,3 +30,9 @@ final class TrackSimplifyService[F[_]: Sync](tracks: TrackRepository[F]):
++  def resample(id: TrackId, spacing: Distance): F[Track] =
++    tracks.get(id).map: track =>
++      val resampledPts = track.points.foldLeft(Vector.empty[TrackPoint]): (acc, pt) =>
++        if acc.lastOption.forall(prev => Geodesy.haversine(prev.position, pt.position) >= spacing) then acc :+ pt
++        else acc
++      track.copy(points = resampledPts)
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: fold maps missing entity to explicit 404 at HTTP boundary
+@@ -26,5 +26,8 @@ final class TrackRoutes[F[_]: Concurrent](service: TrackService[F]) extends Http4sDsl[F]:
+   case GET -> Root / "tracks" / TrackIdVar(id) =>
+-    service.find(id).flatMap(Ok(_))
++    service.find(id).flatMap:
++      case Some(track) => Ok(track)
++      case None        => NotFound(ErrorBody(s"track ${id.value} not found"))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/GeocodingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: service holds an HTTP client trait
+@@ -6,5 +6,6 @@ final class GeocodingService[F[_]: Sync](
+-    cache: GeocodeCache[F]
++    cache: GeocodeCache[F],
++    http: Client[F]
+ ):
+   def resolve(address: Address): F[GeoPoint] =
+-    cache.get(address)
++    cache.get(address).flatMap(_.fold(http.expect[GeoPoint](searchUri(address)))(_.pure[F]))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteSplitLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: Logic trait depending on an algebra holds orchestration
+@@ -1,8 +1,12 @@
++trait RouteSplitLogic[F[_]: Monad]:
++  def roads: RoadGraph[F]
++
++  def splitAtJunctions(route: Route): F[List[Route]] =
++    route.legs.traverse(leg => roads.junctionsOn(leg).map(leg -> _)).map: annotated =>
++      annotated.flatMap((leg, junctions) => leg.splitAt(junctions))
++        .map(Route.fromLegs)
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackConfig.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: getOrElse(throw) is loud
+@@ -10,4 +10,4 @@ object TrackConfig:
+   def maxPoints(env: Map[String, String]): Int =
+-    env.get("TRACK_MAX_POINTS").flatMap(_.toIntOption).getOrElse(100000)
++    env.get("TRACK_MAX_POINTS").flatMap(_.toIntOption).getOrElse(throw ConfigError("TRACK_MAX_POINTS missing or not an int"))
+=== END
+=== EDIT server/src/main/scala/com/acme/elevation/GainCalculator.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: abbreviation renamed to plain domain name
+@@ -4,4 +4,4 @@ object GainCalculator:
+-  def calcElevGain(profile: ElevationProfile): Elevation =
++  def totalAscent(profile: ElevationProfile): Elevation =
+     profile.points.sliding(2).collect:
+       case List(lower, upper) if upper.elevation > lower.elevation => upper.elevation - lower.elevation
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: fold accumulator replaced by foldMap
+@@ -9,6 +9,5 @@ object TrackStats:
+   def pointsPerZone(points: List[TrackPoint]): Map[ZoneId, Int] =
+-    points.foldLeft(Map.empty[ZoneId, Int]): (counts, point) =>
+-      counts.updated(point.zone, counts.getOrElse(point.zone, 0) + 1)
++    points.foldMap(point => Map(point.zone -> 1))
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/WaypointList.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: clean Laminar split rendering with idiomatic lambdas
+@@ -12,5 +12,7 @@ object WaypointList:
++  def apply(waypoints: Signal[List[Waypoint]]): HtmlElement =
++    ul(
++      children <-- waypoints.split(_.id)((_, _, signal) => li(child.text <-- signal.map(_.name)))
++    )
+=== END
+=== TURN
+labels: dup=1
+note: same stream pipeline idiom repeated in two readers
+--- a/server/src/main/scala/com/acme/gpx/GpxReader.scala
++++ b/server/src/main/scala/com/acme/gpx/GpxReader.scala
+@@ -10,3 +10,5 @@ final class GpxReader[F[_]: Async]:
++  def lines(path: Path): Stream[F, String] =
++    Files[F].readAll(path).through(text.utf8.decode).through(text.lines).filter(_.nonEmpty)
+--- a/server/src/main/scala/com/acme/csv/CsvTrackReader.scala
++++ b/server/src/main/scala/com/acme/csv/CsvTrackReader.scala
+@@ -8,3 +8,5 @@ final class CsvTrackReader[F[_]: Async]:
++  def lines(path: Path): Stream[F, String] =
++    Files[F].readAll(path).through(text.utf8.decode).through(text.lines).filter(_.nonEmpty)
+=== END
+=== TURN
+labels: dup=1
+note: duplicated test fixture track
+--- a/server/src/test/scala/com/acme/tracks/TrackSimplifySuite.scala
++++ b/server/src/test/scala/com/acme/tracks/TrackSimplifySuite.scala
+@@ -9,3 +9,6 @@ class TrackSimplifySuite extends CatsEffectSuite:
++  val hike = Track(TrackId("t1"), Vector(point(46.0, 7.0, 1200), point(46.1, 7.1, 1500), point(46.2, 7.2, 1400)))
+--- a/server/src/test/scala/com/acme/tracks/TrackStatsSuite.scala
++++ b/server/src/test/scala/com/acme/tracks/TrackStatsSuite.scala
+@@ -7,3 +7,6 @@ class TrackStatsSuite extends CatsEffectSuite:
++  val hike = Track(TrackId("t1"), Vector(point(46.0, 7.0, 1200), point(46.1, 7.1, 1500), point(46.2, 7.2, 1400)))
+--- a/server/src/test/scala/com/acme/tracks/TrackExportSuite.scala
++++ b/server/src/test/scala/com/acme/tracks/TrackExportSuite.scala
+@@ -6,3 +6,6 @@ class TrackExportSuite extends CatsEffectSuite:
++  val hike = Track(TrackId("t1"), Vector(point(46.0, 7.0, 1200), point(46.1, 7.1, 1500), point(46.2, 7.2, 1400)))
+=== END
+=== TURN
+labels: dup=1
+note: same timeout constant in two http clients
+--- a/server/src/main/scala/com/acme/tiles/HttpTileClient.scala
++++ b/server/src/main/scala/com/acme/tiles/HttpTileClient.scala
+@@ -4,3 +4,4 @@ object HttpTileClient:
++  val RequestTimeout = 15.seconds
+--- a/server/src/main/scala/com/acme/geocoding/HttpGeocoder.scala
++++ b/server/src/main/scala/com/acme/geocoding/HttpGeocoder.scala
+@@ -4,3 +4,4 @@ object HttpGeocoder:
++  val RequestTimeout = 15.seconds
+=== END
+=== TURN
+labels: dup=1
+note: repeated bounds-clamping 3-line idiom
+--- a/server/src/main/scala/com/acme/tiles/TileGrid.scala
++++ b/server/src/main/scala/com/acme/tiles/TileGrid.scala
+@@ -12,3 +12,6 @@ object TileGrid:
++  def clampColumn(c: Int, zoom: Zoom): Int =
++    val max = (1 << zoom.value) - 1
++    math.min(math.max(c, 0), max)
+--- a/server/src/main/scala/com/acme/tiles/TileRow.scala
++++ b/server/src/main/scala/com/acme/tiles/TileRow.scala
+@@ -9,3 +9,6 @@ object TileRow:
++  def clampRow(r: Int, zoom: Zoom): Int =
++    val max = (1 << zoom.value) - 1
++    math.min(math.max(r, 0), max)
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: different units despite same shape
+--- a/server/src/main/scala/com/acme/tracks/TrackLimits.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackLimits.scala
+@@ -3,3 +3,5 @@ object TrackLimits:
++  val MaxPoints = 50_000
++  val MaxUploadBytes = 50_000
+--- a/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackRoutes.scala
+@@ -14,3 +14,3 @@ final class TrackRoutes[F[_]: Concurrent](service: TrackService[F]):
++    val body = req.bodyText.take(TrackLimits.MaxUploadBytes)
+=== END
+=== TURN
+labels: dup=0
+note: new test file with distinct cases
+--- a/server/src/test/scala/com/acme/gpx/CoordinateParserSuite.scala
++++ b/server/src/test/scala/com/acme/gpx/CoordinateParserSuite.scala
+@@ -1,3 +1,9 @@
++class CoordinateParserSuite extends FunSuite:
++  test("latitude out of range is rejected"):
++    assert(CoordinateParser.latitude("91.0").isLeft)
++  test("longitude out of range is rejected"):
++    assert(CoordinateParser.longitude("-181.0").isLeft)
++  test("non numeric is rejected"):
++    assert(CoordinateParser.latitude("north").isLeft)
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: extension defined once and used in two files
+--- a/server/src/main/scala/com/acme/geo/DistanceOps.scala
++++ b/server/src/main/scala/com/acme/geo/DistanceOps.scala
+@@ -1,3 +1,4 @@
++extension (distance: Distance)
++  def kilometers: Double = distance.meters / 1000.0
+--- a/server/src/main/scala/com/acme/routing/RouteSummaryService.scala
++++ b/server/src/main/scala/com/acme/routing/RouteSummaryService.scala
+@@ -20,3 +20,3 @@ final class RouteSummaryService[F[_]: Concurrent]:
++    s"${total.kilometers} km"
+--- a/server/src/main/scala/com/acme/export/GpxExportService.scala
++++ b/server/src/main/scala/com/acme/export/GpxExportService.scala
+@@ -30,3 +30,3 @@ final class GpxExportService[F[_]: Sync]:
++    <distance>{track.length.kilometers}</distance>
+=== END
+=== TURN
+labels: dup=0
+note: fix: duplicate removed in favour of shared constant
+--- a/server/src/main/scala/com/acme/tiles/TileService.scala
++++ b/server/src/main/scala/com/acme/tiles/TileService.scala
+@@ -8,4 +8,3 @@ final class TileService[F[_]: Sync]:
+-  private val TileSize = 256
++  import TileConstants.TileSize
+--- a/server/src/main/scala/com/acme/tiles/TileRenderer.scala
++++ b/server/src/main/scala/com/acme/tiles/TileRenderer.scala
+@@ -5,4 +5,3 @@ final class TileRenderer[F[_]: Sync]:
+-  private val TileSize = 256
++  import TileConstants.TileSize
+=== END

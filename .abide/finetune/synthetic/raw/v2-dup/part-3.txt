@@ -1,0 +1,363 @@
+=== TURN
+labels: dup=1
+note: same Email test literal in two tests of one suite
+--- a/server/src/test/scala/com/acme/users/EmailSuite.scala
++++ b/server/src/test/scala/com/acme/users/EmailSuite.scala
+@@ -8,3 +8,15 @@ class EmailSuite extends FunSuite:
++  test("domain is extracted") {
++    val email = Email.unsafe("jane.doe+news@example.co.uk")
++    assertEquals(email.domain, "example.co.uk")
++  }
++
++  test("local part keeps plus tag") {
++    val email = Email.unsafe("jane.doe+news@example.co.uk")
++    assertEquals(email.local, "jane.doe+news")
++  }
++
++  test("masked form hides local part") {
++    assertEquals(Email.unsafe("jane.doe+news@example.co.uk").masked, "j***@example.co.uk")
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: near-identical helper in two companions of the same module
+--- a/shared/src/main/scala/com/acme/units/Meters.scala
++++ b/shared/src/main/scala/com/acme/units/Meters.scala
+@@ -5,3 +5,7 @@ object Meters:
++  def sum(xs: List[Meters]): Meters =
++    xs.foldLeft(Meters(0.0))((acc, x) => Meters(acc.value + x.value))
++  def max(xs: List[Meters]): Option[Meters] =
++    xs.maxByOption(_.value)
+--- a/shared/src/main/scala/com/acme/units/Seconds.scala
++++ b/shared/src/main/scala/com/acme/units/Seconds.scala
+@@ -5,3 +5,7 @@ object Seconds:
++  def sum(xs: List[Seconds]): Seconds =
++    xs.foldLeft(Seconds(0.0))((acc, x) => Seconds(acc.value + x.value))
++  def max(xs: List[Seconds]): Option[Seconds] =
++    xs.maxByOption(_.value)
+=== END
+
+=== TURN
+labels: dup=1
+note: same API base path constant in two frontend files
+--- a/ui/src/main/scala/com/acme/ui/api/OrdersApi.scala
++++ b/ui/src/main/scala/com/acme/ui/api/OrdersApi.scala
+@@ -5,3 +5,6 @@ object OrdersApi:
++  private val BaseUrl = "https://api.acme.example/v3"
++  def listUrl: String = s"$BaseUrl/orders"
+--- a/ui/src/main/scala/com/acme/ui/api/CustomersApi.scala
++++ b/ui/src/main/scala/com/acme/ui/api/CustomersApi.scala
+@@ -5,3 +5,6 @@ object CustomersApi:
++  private val BaseUrl = "https://api.acme.example/v3"
++  def listUrl: String = s"$BaseUrl/customers"
+=== END
+
+=== TURN
+labels: dup=1
+note: same 3-line Laminar loading-state idiom repeated in two views
+--- a/ui/src/main/scala/com/acme/ui/views/OrderListView.scala
++++ b/ui/src/main/scala/com/acme/ui/views/OrderListView.scala
+@@ -20,3 +20,7 @@ object OrderListView:
++    child <-- state.splitOne(_.isLoading):
++      case (true, _, _)  => div(cls := "spinner", "Loading...")
++      case (false, _, _) => emptyNode
+--- a/ui/src/main/scala/com/acme/ui/views/InvoiceListView.scala
++++ b/ui/src/main/scala/com/acme/ui/views/InvoiceListView.scala
+@@ -18,3 +18,7 @@ object InvoiceListView:
++    child <-- state.splitOne(_.isLoading):
++      case (true, _, _)  => div(cls := "spinner", "Loading...")
++      case (false, _, _) => emptyNode
+=== END
+
+=== TURN
+labels: dup=1
+note: SQL fragment duplicated in two repository queries
+--- a/server/src/main/scala/com/acme/db/OrderQueries.scala
++++ b/server/src/main/scala/com/acme/db/OrderQueries.scala
+@@ -12,3 +12,8 @@ object OrderQueries:
++  val selectActive: Query[Void, Order] =
++    sql"""SELECT id, customer_id, total_cents, status
++          FROM orders
++          WHERE deleted_at IS NULL AND status <> 'cancelled'""".query(orderCodec)
+--- a/server/src/main/scala/com/acme/db/OrderExportQueries.scala
++++ b/server/src/main/scala/com/acme/db/OrderExportQueries.scala
+@@ -10,3 +10,8 @@ object OrderExportQueries:
++  val selectActiveForExport: Query[Void, Order] =
++    sql"""SELECT id, customer_id, total_cents, status
++          FROM orders
++          WHERE deleted_at IS NULL AND status <> 'cancelled'""".query(orderCodec)
+=== END
+
+=== TURN
+labels: dup=1
+note: Grade magic number repeated in two tests
+--- a/app/src/test/scala/com/acme/bike/ClimbSuite.scala
++++ b/app/src/test/scala/com/acme/bike/ClimbSuite.scala
+@@ -10,3 +10,12 @@ class ClimbSuite extends FunSuite:
++  test("speed drops on a 12 percent grade") {
++    assert(Speed.estimate(Wattage(180), Grade(12)).kmh < 10.0)
++  }
++
++  test("power needed rises on a 12 percent grade") {
++    assert(PowerNeeded.at(Speed(15.0), Grade(12)).value > 300)
++  }
++
++  test("12 percent is classed hors categorie") {
++    assertEquals(ClimbCategory.of(Grade(12)), ClimbCategory.HorsCategorie)
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: copy-pasted validation block in two endpoints
+--- a/server/src/main/scala/com/acme/api/CreateUserEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/CreateUserEndpoint.scala
+@@ -25,3 +25,7 @@ object CreateUserEndpoint:
++    val name = req.name.trim
++    if name.isEmpty then Left(ApiError(422, "name must not be blank"))
++    else if name.length > 80 then Left(ApiError(422, "name too long"))
++    else Right(name)
+--- a/server/src/main/scala/com/acme/api/UpdateUserEndpoint.scala
++++ b/server/src/main/scala/com/acme/api/UpdateUserEndpoint.scala
+@@ -27,3 +27,7 @@ object UpdateUserEndpoint:
++    val name = req.name.trim
++    if name.isEmpty then Left(ApiError(422, "name must not be blank"))
++    else if name.length > 80 then Left(ApiError(422, "name too long"))
++    else Right(name)
+=== END
+
+=== TURN
+labels: dup=1
+note: same Instant fixture built per test instead of shared
+--- a/server/src/test/scala/com/acme/billing/DueDateSuite.scala
++++ b/server/src/test/scala/com/acme/billing/DueDateSuite.scala
+@@ -9,3 +9,13 @@ class DueDateSuite extends FunSuite:
++  test("net 30 adds thirty days") {
++    val issued = Instant.parse("2026-03-01T00:00:00Z")
++    assertEquals(DueDate.net30(issued), Instant.parse("2026-03-31T00:00:00Z"))
++  }
++
++  test("overdue after due date") {
++    val issued = Instant.parse("2026-03-01T00:00:00Z")
++    val now = Instant.parse("2026-04-02T00:00:00Z")
++    assert(DueDate.isOverdue(issued, now))
++  }
+=== END
+
+=== TURN
+labels: dup=1
+note: identical Tapir endpoint base defined in two files
+--- a/server/src/main/scala/com/acme/api/OrderEndpoints.scala
++++ b/server/src/main/scala/com/acme/api/OrderEndpoints.scala
+@@ -8,3 +8,6 @@ object OrderEndpoints:
++  private val base =
++    endpoint.in("api" / "v3").securityIn(auth.bearer[Token]()).errorOut(jsonBody[ApiError])
++  val list = base.get.in("orders").out(jsonBody[List[Order]])
+--- a/server/src/main/scala/com/acme/api/ProductEndpoints.scala
++++ b/server/src/main/scala/com/acme/api/ProductEndpoints.scala
+@@ -8,3 +8,6 @@ object ProductEndpoints:
++  private val base =
++    endpoint.in("api" / "v3").securityIn(auth.bearer[Token]()).errorOut(jsonBody[ApiError])
++  val list = base.get.in("products").out(jsonBody[List[Product]])
+=== END
+
+=== TURN
+labels: dup=0
+note: akka and pekko modules keep the same serializer binding
+--- a/akka-runtime/src/main/resources/reference.conf
++++ b/akka-runtime/src/main/resources/reference.conf
+@@ -1,3 +1,8 @@
++acme.runtime.serialization {
++  bindings {
++    "com.acme.runtime.Envelope" = jackson-cbor
++  }
++}
+--- a/pekko-runtime/src/main/resources/reference.conf
++++ b/pekko-runtime/src/main/resources/reference.conf
+@@ -1,3 +1,8 @@
++acme.runtime.serialization {
++  bindings {
++    "com.acme.runtime.Envelope" = jackson-cbor
++  }
++}
+=== END
+
+=== TURN
+labels: dup=0
+note: v1 and v2 DTO scaladoc applied to both versioned packages
+--- a/api/src/main/scala/com/acme/api/v1/InvoiceDto.scala
++++ b/api/src/main/scala/com/acme/api/v1/InvoiceDto.scala
+@@ -4,3 +4,6 @@ package com.acme.api.v1
++/** Wire format of an invoice.
++  * @param totalCents amount in the smallest currency unit
++  */
+ final case class InvoiceDto(id: String, totalCents: Long)
+--- a/api/src/main/scala/com/acme/api/v2/InvoiceDto.scala
++++ b/api/src/main/scala/com/acme/api/v2/InvoiceDto.scala
+@@ -4,3 +4,6 @@ package com.acme.api.v2
++/** Wire format of an invoice.
++  * @param totalCents amount in the smallest currency unit
++  */
+ final case class InvoiceDto(id: String, totalCents: Long)
+=== END
+
+=== TURN
+labels: dup=0
+note: scala-2 and scala-3 cross sources keep separate syntax
+--- a/core/src/main/scala-2/com/acme/util/Show.scala
++++ b/core/src/main/scala-2/com/acme/util/Show.scala
+@@ -1,3 +1,9 @@
++package com.acme.util
++
++object ShowSyntax {
++  implicit class ShowOps[A](private val a: A) extends AnyVal {
++    def show(implicit s: Show[A]): String = s.show(a)
++  }
++}
+--- a/core/src/main/scala-3/com/acme/util/Show.scala
++++ b/core/src/main/scala-3/com/acme/util/Show.scala
+@@ -1,3 +1,8 @@
++package com.acme.util
++
++object ShowSyntax:
++  extension [A](a: A)
++    def show(using s: Show[A]): String = s.show(a)
+=== END
+
+=== TURN
+labels: dup=0
+note: jvm and js storage backends deliberately separate
+--- a/shared/jvm/src/main/scala/com/acme/store/LocalStore.scala
++++ b/shared/jvm/src/main/scala/com/acme/store/LocalStore.scala
+@@ -1,3 +1,9 @@
++package com.acme.store
++
++object LocalStore:
++  private val dir = java.nio.file.Paths.get(sys.props("user.home"), ".acme")
++  def read(key: String): Option[String] =
++    Option.when(Files.exists(dir.resolve(key)))(Files.readString(dir.resolve(key)))
+--- a/shared/js/src/main/scala/com/acme/store/LocalStore.scala
++++ b/shared/js/src/main/scala/com/acme/store/LocalStore.scala
+@@ -1,3 +1,8 @@
++package com.acme.store
++
++object LocalStore:
++  def read(key: String): Option[String] =
++    Option(org.scalajs.dom.window.localStorage.getItem(key))
+=== END
+
+=== TURN
+labels: dup=0
+note: one shared generator reused in two properties
+--- a/server/src/test/scala/com/acme/gen/Generators.scala
++++ b/server/src/test/scala/com/acme/gen/Generators.scala
+@@ -1,3 +1,8 @@
++package com.acme.gen
++
++object Generators:
++  val genOrder: Gen[Order] =
++    for id <- Gen.posNum[Long]; lines <- Gen.nonEmptyListOf(genLine)
++    yield Order(OrderId(id), lines)
+--- a/server/src/test/scala/com/acme/orders/OrderTotalsProps.scala
++++ b/server/src/test/scala/com/acme/orders/OrderTotalsProps.scala
+@@ -8,3 +8,5 @@ class OrderTotalsProps extends ScalaCheckSuite:
++  property("total is non-negative")(forAll(Generators.genOrder)(o => OrderTotals.total(o).cents >= 0))
+--- a/server/src/test/scala/com/acme/orders/OrderRenderProps.scala
++++ b/server/src/test/scala/com/acme/orders/OrderRenderProps.scala
+@@ -8,3 +8,5 @@ class OrderRenderProps extends ScalaCheckSuite:
++  property("render is non-empty")(forAll(Generators.genOrder)(o => OrderRender.text(o).nonEmpty))
+=== END
+
+=== TURN
+labels: dup=0
+note: two timestamps that look alike but are different business facts
+--- a/server/src/test/scala/com/acme/billing/ReminderSuite.scala
++++ b/server/src/test/scala/com/acme/billing/ReminderSuite.scala
+@@ -9,3 +9,10 @@ class ReminderSuite extends FunSuite:
++  test("reminder fires one week after the due date") {
++    val issued = Instant.parse("2026-03-01T00:00:00Z")
++    val due = Instant.parse("2026-03-31T00:00:00Z")
++    val reminder = Reminder.schedule(issued, due)
++    assertEquals(reminder, Instant.parse("2026-04-07T00:00:00Z"))
++  }
+=== END
+
+=== TURN
+labels: dup=0
+note: same extension reused at three call sites, defined once
+--- a/app/src/main/scala/com/acme/nav/GeoSyntax.scala
++++ b/app/src/main/scala/com/acme/nav/GeoSyntax.scala
+@@ -1,3 +1,7 @@
++package com.acme.nav
++
++extension (w: Waypoint)
++  def distanceTo(other: Waypoint): Meters = Geodesy.haversine(w, other)
+--- a/app/src/main/scala/com/acme/nav/RouteLength.scala
++++ b/app/src/main/scala/com/acme/nav/RouteLength.scala
+@@ -9,3 +9,3 @@ object RouteLength:
+-    route.waypoints.sliding(2).map(p => Geodesy.haversine(p(0), p(1))).sum
++    route.waypoints.sliding(2).map(p => p(0).distanceTo(p(1))).sum
+--- a/app/src/main/scala/com/acme/nav/NearestStop.scala
++++ b/app/src/main/scala/com/acme/nav/NearestStop.scala
+@@ -7,3 +7,3 @@ object NearestStop:
+-    stops.minBy(s => Geodesy.haversine(here, s.location))
++    stops.minBy(s => here.distanceTo(s.location))
+=== END
+
+=== TURN
+labels: dup=0
+note: same test body in akka and pekko runtime modules
+--- a/akka-runtime/src/test/scala/com/acme/runtime/SupervisorSuite.scala
++++ b/akka-runtime/src/test/scala/com/acme/runtime/SupervisorSuite.scala
+@@ -9,3 +9,8 @@ class SupervisorSuite extends ActorSuite:
++  test("stops after five restarts") {
++    val probe = spawnFailing(times = 6)
++    probe.expectTerminated()
++  }
+--- a/pekko-runtime/src/test/scala/com/acme/runtime/SupervisorSuite.scala
++++ b/pekko-runtime/src/test/scala/com/acme/runtime/SupervisorSuite.scala
+@@ -9,3 +9,8 @@ class SupervisorSuite extends ActorSuite:
++  test("stops after five restarts") {
++    val probe = spawnFailing(times = 6)
++    probe.expectTerminated()
++  }
+=== END
+
+=== TURN
+labels: dup=0
+note: identical-looking helper lives in a different, non-duplicated role per module
+--- a/server/src/main/scala/com/acme/orders/Order.scala
++++ b/server/src/main/scala/com/acme/orders/Order.scala
+@@ -17,3 +17,5 @@ object Order:
++  /** Gross total, tax included. */
++  def total(o: Order): Money = o.lines.foldMap(_.price) |+| o.tax
+--- a/server/src/main/scala/com/acme/orders/OrderSummary.scala
++++ b/server/src/main/scala/com/acme/orders/OrderSummary.scala
+@@ -11,3 +11,5 @@ object OrderSummary:
++  /** Net total as shown on the picking list, tax excluded. */
++  def total(o: Order): Money = o.lines.foldMap(_.price)
+=== END
+
+=== TURN
+labels: dup=0
+note: jvm and js platform dirs both implement the same expect/actual trait
+--- a/shared/jvm/src/main/scala/com/acme/net/PlatformHttp.scala
++++ b/shared/jvm/src/main/scala/com/acme/net/PlatformHttp.scala
+@@ -1,3 +1,9 @@
++package com.acme.net
++
++object PlatformHttp:
++  /** Backed by the JDK client; blocking calls are shifted to the blocking pool. */
++  def client[F[_]: Async]: Resource[F, Client[F]] =
++    JdkHttpClient.simple[F]
+--- a/shared/js/src/main/scala/com/acme/net/PlatformHttp.scala
++++ b/shared/js/src/main/scala/com/acme/net/PlatformHttp.scala
+@@ -1,3 +1,9 @@
++package com.acme.net
++
++object PlatformHttp:
++  /** Backed by the browser fetch API. */
++  def client[F[_]: Async]: Resource[F, Client[F]] =
++    FetchClientBuilder[F].resource
+=== END

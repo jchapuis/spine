@@ -1,0 +1,323 @@
+=== EDIT server/src/main/scala/com/acme/telemetry/gateway/GatewayStatsService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unknown gateway reported as zero devices
+@@ -10,5 +10,5 @@ final class GatewayStatsService[F[_]: MonadThrow](gateways: GatewayRepository[F]):
+   def deviceCount(id: GatewayId): F[Int] =
+-    gateways.find(id).flatMap(_.liftTo[F](GatewayNotFound(id))).map(_.devices.size)
++    gateways.find(id).map(_.map(_.devices.size).getOrElse(0))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/BatchFileLoader.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unparseable lines silently dropped via toOption
+@@ -11,5 +11,5 @@ object BatchFileLoader:
+   def load(lines: List[String]): List[Reading] =
+-    lines.traverse(ReadingParser.parse).fold(e => throw BadBatch(e), identity)
++    lines.flatMap(line => ReadingParser.parse(line).toOption)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/CheckedIngest.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: owner notification fires even when validation failed
+@@ -12,9 +12,10 @@ final class CheckedIngest[F[_]: Monad](validator: BatchValidator[F], writer: ReadingWriter[F], notifier: Notifier[F]):
+   def ingest(owner: OwnerId, batch: RawBatch): F[ValidatedNel[BatchError, Int]] =
+     for
+       checked <- validator.check(batch)
++      _ <- notifier.send(owner, s"batch ${batch.id} accepted")
+       written <- checked.traverse(writer.write)
+     yield written
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/export/ExportService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: ExportService depends on concrete ReadingIngestService
+@@ -3,9 +3,11 @@ package com.acme.telemetry.export
+-final class ExportService[F[_]: Monad](store: ObjectStore[F]):
++final class ExportService[F[_]: Monad](store: ObjectStore[F], ingestService: ReadingIngestService[F]):
+
+   def restore(key: ObjectKey): F[Int] =
+-    store.get(key).map(_.size)
++    store.get(key).flatMap(raw => ingestService.ingest(raw))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/notify/NotificationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: NotificationService holds AlertService field
+@@ -4,10 +4,12 @@ import com.acme.telemetry.alerts.AlertService
+-final class NotificationService[F[_]: Async](channels: ChannelRepository[F], mailer: Mailer[F]):
++final class NotificationService[F[_]: Async](
++    channels: ChannelRepository[F],
++    mailer: Mailer[F],
++    alertService: AlertService[F]
++):
+
+   def pending(owner: OwnerId): F[List[Alert]] =
+-    channels.pendingFor(owner)
++    alertService.openFor(owner)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/StreamingIngestService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: whole parse/validate/enrich/write pipeline built inside a Service
+@@ -12,6 +12,15 @@ final class StreamingIngestService[F[_]: Async](decoder: Decoder[F], readings: ReadingRepository[F], devices: DeviceRepository[F]):
+   def run(source: Stream[F, Byte]): Stream[F, Int] =
+-    logic.pipeline(source)
++    source
++      .through(decoder.decode)
++      .filter(r => r.value > -90.0 && r.value < 150.0)
++      .evalFilter(r => devices.exists(r.deviceId))
++      .map(r => r.copy(receivedAt = Instant.now()))
++      .groupWithin(500, 2.seconds)
++      .evalMap(batch => readings.insertMany(batch).as(batch.size))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/retention/RollupStore.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete skunk logic
+@@ -1,6 +1,12 @@
+ package com.acme.telemetry.retention
+
+-trait RollupStore[F[_]]:
+-  def save(rollup: Rollup): F[Unit]
++object RollupStore:
++  def save(pool: Resource[IO, Session[IO]], rollup: Rollup): IO[Unit] =
++    pool.use: session =>
++      session.prepare(Sql.upsert).flatMap(_.execute(rollup)).void
++
++  def load(pool: Resource[IO, Session[IO]], id: DeviceId, day: LocalDate): IO[Option[Rollup]] =
++    pool.use(_.prepare(Sql.byDay).flatMap(_.option((id, day))))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/export/CsvExportService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: query, rounding, formatting and upload inlined in the Service
+@@ -9,6 +9,13 @@ final class CsvExportService[F[_]: Monad](readings: ReadingRepository[F], store: ObjectStore[F]):
+   def export(id: DeviceId, day: LocalDate): F[ObjectKey] =
+-    logic.export(id, day)
++    for
++      rows <- readings.forDay(id, day)
++      lines = rows.sortBy(_.measuredAt).map(r => s"${r.measuredAt},${BigDecimal(r.value).setScale(2, RoundingMode.HALF_UP)}")
++      csv = ("measured_at,value" :: lines).mkString("\n")
++      key = ObjectKey(s"exports/${id.value}/$day.csv")
++      _ <- store.put(key, csv.getBytes)
++    yield key
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/TemperatureRange.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: maxTmp / minTmp abbreviations
+@@ -4,6 +4,8 @@ object TemperatureRange:
+   def of(readings: NonEmptyList[Reading]): Range =
+-    Range(readings.minimumBy(_.value).value, readings.maximumBy(_.value).value)
++    val minTmp = readings.minimumBy(_.value).value
++    val maxTmp = readings.maximumBy(_.value).value
++    Range(minTmp, maxTmp)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/ThresholdLadder.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder metaphor where "thresholds" is the plain term
+@@ -1,6 +1,8 @@
+ package com.acme.telemetry.alerts
+
+-final case class DeviceThresholds(warn: Double, critical: Double)
++final case class ThresholdLadder(warn: Double, critical: Double):
++  def climb(value: Double): Option[AlertKind] =
++    if value >= critical then Some(AlertKind.Critical)
++    else if value >= warn then Some(AlertKind.TooHot)
++    else None
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/DailyTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft with merge should be combineAll
+@@ -8,5 +8,6 @@ object DailyTotals:
+   def total(days: List[Totals]): Totals =
+-    days.combineAll
++    days.foldLeft(Totals.empty): (acc, day) =>
++      acc.merge(day)
+=== END
+
+=== EDIT app/src/test/scala/com/acme/telemetry/ingest/PipelineSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent IO actions chained, should be mapN
+@@ -14,6 +14,9 @@ class PipelineSuite extends CatsEffectSuite:
+   test("pipeline writes and counts"):
+-    (writer.flush(batch), counter.current).mapN((_, n) => n).assertEquals(batch.size)
++    writer.flush(batch).flatMap: _ =>
++      counter.current.map: n =>
++        n
++    .assertEquals(batch.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/MultiDeviceWriter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: map then sequence should be traverse
+@@ -9,5 +9,5 @@ final class MultiDeviceWriter[F[_]: Applicative](writer: ReadingWriter[F]):
+   def writeAll(perDevice: List[Chunk[Reading]]): F[List[Unit]] =
+-    perDevice.traverse(writer.flush)
++    perDevice.map(writer.flush).sequence
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/AverageService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(throw) surfaces the missing case
+@@ -9,5 +9,5 @@ final class AverageService[F[_]: Sync](readings: ReadingRepository[F]):
+   def mean(id: DeviceId): F[Double] =
+-    readings.recent(id, 100).map(rs => rs.map(_.value).sum / rs.size)
++    readings.recent(id, 100).map(rs => NonEmptyList.fromList(rs).getOrElse(throw NoReadings(id))).map(rs => rs.map(_.value).toList.sum / rs.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertEscalationService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service depends on an algebra that another service implements
+@@ -4,9 +4,9 @@ final class AlertEscalationService[F[_]: Monad](
+     alerts: AlertRepository[F],
+-    deviceService: DeviceService[F]
++    directory: DeviceDirectory[F]
+ ):
+
+   def escalate(id: AlertId): F[Unit] =
+-    alerts.get(id).flatMap(a => deviceService.get(a.deviceId)).flatMap(d => logic.escalate(id, d))
++    alerts.get(id).flatMap(a => directory.get(a.deviceId)).flatMap(d => logic.escalate(id, d))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/util/SignalMath.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: pure helper object, not an algebra
+@@ -1,3 +1,9 @@
++object SignalMath:
++  def movingAverage(values: Vector[Double], window: Int): Vector[Double] =
++    values.sliding(window).map(w => w.sum / w.size).toVector
++
++  def zScore(value: Double, mean: Double, stdDev: Double): Double =
++    (value - mean) / stdDev
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/gateway/GatewayTopics.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: domain words, no jargon
+@@ -3,5 +3,7 @@ object GatewayTopics:
++  def telemetry(gateway: GatewayId): Topic = Topic(s"gw/${gateway.value}/telemetry")
++  def firmware(gateway: GatewayId): Topic = Topic(s"gw/${gateway.value}/firmware")
++  def parsePayload(payload: Array[Byte]): Either[DecodeError, Json] =
++    io.circe.parser.parse(new String(payload, UTF_8)).leftMap(DecodeError(_))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/BatchTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, foldLeft accumulator replaced by foldMap
+@@ -8,6 +8,5 @@ object BatchTotals:
+   def of(batches: List[WriteResult]): Totals =
+-    batches.foldLeft(Totals.empty): (acc, result) =>
+-      Totals(acc.inserted + result.inserted, acc.rejected + result.rejected)
++    batches.foldMap(r => Totals(r.inserted, r.rejected))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/BatchFileLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, dropped lines now reported as an error
+@@ -11,5 +11,5 @@ object BatchFileLoader:
+   def load(lines: List[String]): Either[BadBatch, List[Reading]] =
+-    lines.flatMap(line => ReadingParser.parse(line).toOption)
++    lines.traverse(ReadingParser.parse).leftMap(BadBatch(_))
+=== END
+
+=== TURN
+labels: dup=1
+note: same temperature formatter copied into two Laminar views
+--- a/app/src/main/scala/com/acme/telemetry/ui/DeviceCard.scala
++++ b/app/src/main/scala/com/acme/telemetry/ui/DeviceCard.scala
+@@ -9,3 +9,4 @@ object DeviceCard:
++  private def formatValue(value: Double): String =
++    if value.isNaN then "n/a" else f"$value%.1f °C"
+--- a/app/src/main/scala/com/acme/telemetry/ui/ReadingRow.scala
++++ b/app/src/main/scala/com/acme/telemetry/ui/ReadingRow.scala
+@@ -9,3 +9,4 @@ object ReadingRow:
++  private def formatValue(value: Double): String =
++    if value.isNaN then "n/a" else f"$value%.1f °C"
+=== END
+
+=== TURN
+labels: dup=1
+note: duplicated fake repository in two suites
+--- a/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
+@@ -6,3 +6,7 @@ class ReadingWriterSuite extends CatsEffectSuite:
++  private def fakeRepo(store: Ref[IO, List[Reading]]): ReadingRepository[IO] = new ReadingRepository[IO]:
++    def insertMany(batch: Chunk[Reading]) = store.update(_ ++ batch.toList).as(batch.size)
++    def latest(id: DeviceId) = store.get.map(_.findLast(_.deviceId == id))
+--- a/app/src/test/scala/com/acme/telemetry/ingest/IngestPipelineSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/ingest/IngestPipelineSuite.scala
+@@ -6,3 +6,7 @@ class IngestPipelineSuite extends CatsEffectSuite:
++  private def fakeRepo(store: Ref[IO, List[Reading]]): ReadingRepository[IO] = new ReadingRepository[IO]:
++    def insertMany(batch: Chunk[Reading]) = store.update(_ ++ batch.toList).as(batch.size)
++    def latest(id: DeviceId) = store.get.map(_.findLast(_.deviceId == id))
+=== END
+
+=== TURN
+labels: dup=1
+note: stream-start logging idiom repeated in three Resource builders
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestModule.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestModule.scala
+@@ -14,3 +14,5 @@ object IngestModule:
++  val writer: Resource[IO, ReadingWriter[IO]] =
++    ReadingWriter.resource[IO](pool).evalTap(_ => Logger[IO].info("reading writer started"))
++      .onFinalize(Logger[IO].info("reading writer stopped"))
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertModule.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertModule.scala
+@@ -14,3 +14,5 @@ object AlertModule:
++  val writer: Resource[IO, AlertWriter[IO]] =
++    AlertWriter.resource[IO](pool).evalTap(_ => Logger[IO].info("alert writer started"))
++      .onFinalize(Logger[IO].info("alert writer stopped"))
+=== END
+
+=== TURN
+labels: dup=0
+note: tests with different expected values, not duplication
+--- a/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
+@@ -6,3 +6,7 @@ class WindowStatsSuite extends FunSuite:
++  test("mean of two readings"):
++    assertEquals(WindowStats.mean(List(reading(10.0), reading(20.0))), 15.0)
++
++  test("mean of a single reading"):
++    assertEquals(WindowStats.mean(List(reading(7.0))), 7.0)
+=== END
+
+=== TURN
+labels: dup=0
+note: extension defined once and called from three sites
+--- a/server/src/main/scala/com/acme/telemetry/util/ReadingSyntax.scala
++++ b/server/src/main/scala/com/acme/telemetry/util/ReadingSyntax.scala
+@@ -1,3 +1,4 @@
++extension (reading: Reading)
++  def isOutOfRange: Boolean = reading.value < -90.0 || reading.value > 150.0
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ReadingValidator.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ReadingValidator.scala
+@@ -8,3 +8,3 @@ object ReadingValidator:
++    Validated.condNel(!reading.isOutOfRange, reading, OutOfRange(reading.deviceId))
+--- a/server/src/main/scala/com/acme/telemetry/stats/QualityReport.scala
++++ b/server/src/main/scala/com/acme/telemetry/stats/QualityReport.scala
+@@ -8,3 +8,3 @@ object QualityReport:
++    readings.count(_.isOutOfRange)
+--- a/server/src/main/scala/com/acme/telemetry/alerts/OutOfRangeAlerts.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/OutOfRangeAlerts.scala
+@@ -8,3 +8,3 @@ object OutOfRangeAlerts:
++    batch.filter(_.isOutOfRange)
+=== END
+
+=== TURN
+labels: dup=0
+note: reuses existing constant instead of redefining
+--- a/server/src/main/scala/com/acme/telemetry/gateway/GatewayRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/gateway/GatewayRoutes.scala
+@@ -14,3 +14,3 @@ final class GatewayRoutes(service: GatewayService[IO]) extends Http4sDsl[IO]:
+-    val limit = 100
++    val limit = PageSize.Default.value
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertRoutes.scala
+@@ -14,3 +14,3 @@ final class AlertRoutes(service: AlertService[IO]) extends Http4sDsl[IO]:
+-    val limit = 100
++    val limit = PageSize.Default.value
+=== END

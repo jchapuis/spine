@@ -1,0 +1,383 @@
+=== EDIT server/src/main/scala/com/acme/telemetry/calibration/CalibrationService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(0.0) hides a missing calibration offset
+@@ -18,8 +18,8 @@ final class CalibrationService[F[_]: Sync](offsets: CalibrationRepository[F]):
+   def calibrate(reading: Reading): F[Reading] =
+-    offsets.find(reading.deviceId).flatMap(_.liftTo[F](CalibrationMissing(reading.deviceId))).map: offset =>
+-      reading.copy(value = reading.value + offset.value)
++    offsets.find(reading.deviceId).map: found =>
++      reading.copy(value = reading.value + found.map(_.value).getOrElse(0.0))
+
+   def calibrateAll(batch: Chunk[Reading]): F[Chunk[Reading]] =
+     batch.traverse(calibrate)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: insert failure swallowed, batch silently dropped
+@@ -24,7 +24,8 @@ final class ReadingWriter[F[_]: Async: Logger](readings: ReadingRepository[F]):
+   def flush(batch: Chunk[Reading]): F[Unit] =
+-    readings.insertMany(batch)
++    readings.insertMany(batch).handleErrorWith: e =>
++      Logger[F].debug(e)(s"insert of ${batch.size} readings failed")
+
+   val sink: Pipe[F, Reading, Unit] =
+     _.groupWithin(BatchSize, BatchWindow).evalMap(flush)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: AlertService holds the concrete DeviceService
+@@ -1,13 +1,15 @@
+ package com.acme.telemetry.alerts
+
+ import cats.effect.Async
+ import com.acme.telemetry.devices.DeviceService
+
+-final class AlertService[F[_]: Async](alerts: AlertRepository[F]):
++final class AlertService[F[_]: Async](alerts: AlertRepository[F], deviceService: DeviceService[F]):
+
+   def raise(deviceId: DeviceId, kind: AlertKind): F[Alert] =
+-    alerts.insert(NewAlert(deviceId, kind))
++    deviceService.get(deviceId).flatMap: device =>
++      alerts.insert(NewAlert(device.id, kind))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/retention/RetentionService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: RetentionService calls ReadingIngestService directly
+@@ -9,6 +9,7 @@ final class RetentionService[F[_]: Temporal](
+-    readings: ReadingRepository[F]
++    readings: ReadingRepository[F],
++    ingest: ReadingIngestService[F]
+ ):
+
+   def compact(device: DeviceId, olderThan: Instant): F[Int] =
+-    readings.deleteOlderThan(device, olderThan)
++    ingest.rollupBefore(device, olderThan) *> readings.deleteOlderThan(device, olderThan)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingIngestService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: dedupe/validate/enrich/persist inlined in a Service method
+@@ -15,6 +15,17 @@ final class ReadingIngestService[F[_]: Sync](
+   def ingest(raw: List[RawReading]): F[Int] =
+-    logic.process(raw)
++    val deduped = raw.distinctBy(r => (r.deviceId, r.measuredAt))
++    val valid = deduped.filter(r => r.value > -90.0 && r.value < 150.0)
++    for
++      known <- devices.knownIds(valid.map(_.deviceId).distinct)
++      enriched = valid.filter(r => known.contains(r.deviceId)).map: r =>
++        Reading(r.deviceId, r.measuredAt, r.value, receivedAt = clock.now)
++      grouped = enriched.groupBy(_.deviceId)
++      _ <- grouped.toList.traverse_((id, rs) => readings.insertMany(Chunk.from(rs)))
++      _ <- grouped.keys.toList.traverse_(id => lastSeen.touch(id))
++    yield enriched.size
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/DeviceRegistry.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete skunk logic, no trait
+@@ -1,4 +1,15 @@
+ package com.acme.telemetry.devices
+
+-trait DeviceRegistry[F[_]]:
+-  def register(device: NewDevice): F[Device]
++object DeviceRegistry:
++  def register(session: Session[IO], device: NewDevice): IO[Device] =
++    session.prepare(Sql.insert).flatMap: cmd =>
++      cmd.unique(device).flatMap: row =>
++        session.prepare(Sql.initThresholds).flatMap(_.execute(row.id)).as(row)
++
++  def deregister(session: Session[IO], id: DeviceId): IO[Unit] =
++    session.prepare(Sql.markDecommissioned).flatMap(_.execute(id)).void
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/WindowStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: avgTemp / reqTs abbreviations
+@@ -11,6 +11,8 @@ object WindowStats:
+   def summarize(window: List[Reading]): Option[Summary] =
+-    window.headOption.map(first => Summary(first.deviceId, window.size))
++    val avgTemp = window.map(_.value).sum / window.size
++    val reqTs = window.map(_.measuredAt).max
++    window.headOption.map(first => Summary(first.deviceId, window.size, avgTemp, reqTs))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/retention/RetentionPolicy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder/rung jargon for retention tiers
+@@ -5,9 +5,11 @@ import scala.concurrent.duration.*
+-final case class RetentionTier(maxAge: FiniteDuration, resolution: FiniteDuration)
++final case class RetentionRung(maxAge: FiniteDuration, resolution: FiniteDuration)
+
+ object RetentionPolicy:
+-  val tiers: List[RetentionTier] =
+-    List(RetentionTier(7.days, 1.minute), RetentionTier(90.days, 1.hour))
++  val ladder: List[RetentionRung] =
++    List(RetentionRung(7.days, 1.minute), RetentionRung(90.days, 1.hour))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/ThresholdLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent loads chained by flatMap/map instead of mapN
+@@ -14,8 +14,8 @@ final class ThresholdLoader[F[_]: Monad](
+   def load(id: DeviceId): F[Context] =
+-    (devices.find(id), thresholds.forDevice(id)).mapN(Context.apply)
++    devices.find(id).flatMap: device =>
++      thresholds.forDevice(id).map: limits =>
++        Context(device, limits)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/BatchTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft accumulator instead of foldMap
+@@ -8,6 +8,8 @@ object BatchTotals:
+   def of(batches: List[WriteResult]): Totals =
+-    batches.foldMap(r => Totals(r.inserted, r.rejected))
++    batches.foldLeft(Totals.empty): (acc, result) =>
++      Totals(acc.inserted + result.inserted, acc.rejected + result.rejected)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/LastSeenTracker.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: getOrElse(EPOCH) masks never-seen device plus tsLst abbreviation
+@@ -12,5 +12,6 @@ final class LastSeenTracker[F[_]: Functor](seen: LastSeenRepository[F]):
+   def isStale(id: DeviceId, now: Instant, maxSilence: FiniteDuration): F[Boolean] =
+-    seen.get(id).map(_.exists(ts => now.isAfter(ts.plusMillis(maxSilence.toMillis))))
++    seen.get(id).map: found =>
++      val tsLst = found.getOrElse(Instant.EPOCH)
++      now.isAfter(tsLst.plusMillis(maxSilence.toMillis))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/DeviceService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: toRight at the boundary is fine
+@@ -16,5 +16,5 @@ final class DeviceService[F[_]: MonadThrow](devices: DeviceRepository[F]):
+   def get(id: DeviceId): F[Device] =
+-    devices.find(id).map(_.getOrElse(Device.unknown))
++    devices.find(id).map(_.toRight(DeviceNotFound(id))).rethrow
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/PgReadingRepository.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient retry with backoff then re-raise after N attempts
+@@ -22,6 +22,13 @@ object PgReadingRepository:
++  private def retrying[F[_]: Temporal, A](fa: F[A], attempt: Int = 1): F[A] =
++    fa.recoverWith:
++      case e: java.net.SocketException if attempt < MaxAttempts =>
++        Temporal[F].sleep(backoff(attempt)) *> retrying(fa, attempt + 1)
++      case e: java.net.SocketException =>
++        e.raiseError[F, A]
++
+   def apply[F[_]: Temporal](pool: Resource[F, Session[F]]): ReadingRepository[F] =
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertEvaluationService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service holds algebra traits only
+@@ -1,12 +1,14 @@
+ package com.acme.telemetry.alerts
+
+-final class AlertEvaluationService[F[_]: Async](alerts: AlertRepository[F]):
++final class AlertEvaluationService[F[_]: Async](
++    alerts: AlertRepository[F],
++    notifier: Notifier[F],
++    thresholds: ThresholdRepository[F]
++):
+
+   def evaluate(reading: Reading): F[Unit] =
+-    alerts.recordNone(reading.deviceId)
++    thresholds.forDevice(reading.deviceId).flatMap: limits =>
++      AlertLogic.check(reading, limits).traverse_(alerts.insert(_) *> notifier.send(_))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: orchestration in a Logic trait, dependent flatMaps
+@@ -1,3 +1,14 @@
++trait AlertLogic[F[_]: Monad]:
++  def devices: DeviceRepository[F]
++  def alerts: AlertRepository[F]
++
++  def escalate(id: DeviceId): F[Option[Alert]] =
++    for
++      device <- devices.find(id)
++      open <- alerts.openFor(id)
++      result <- (device, open) match
++        case (Some(d), Nil) => alerts.insert(NewAlert(d.id, AlertKind.Silent)).map(Some(_))
++        case _ => Monad[F].pure(None)
++    yield result
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingParser.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, silent default replaced by Either
+@@ -9,6 +9,8 @@ object ReadingParser:
+-  def parse(line: String): Reading =
+-    line.split(',').toList match
+-      case id :: ts :: v :: Nil => Reading(DeviceId(id), Instant.parse(ts), v.toDoubleOption.getOrElse(0.0))
+-      case _ => Reading.empty
++  def parse(line: String): Either[ParseError, Reading] =
++    line.split(',').toList match
++      case id :: ts :: v :: Nil =>
++        v.toDoubleOption.toRight(BadValue(v)).map(Reading(DeviceId(id), Instant.parse(ts), _))
++      case _ => Left(BadLine(line))
+=== END
+
+=== EDIT app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: idiomatic short lambdas in test
+@@ -14,3 +14,7 @@ class WindowStatsSuite extends ScalaCheckSuite:
++  property("sample count equals window size"):
++    forAll(Gen.nonEmptyListOf(readingGen)): window =>
++      val summary = WindowStats.summarize(window).get
++      assertEquals(summary.count, window.size)
++      assertEquals(window.map(_.value).sum, window.map(r => r.value).sum)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/IngestPipeline.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: plain fs2 pipeline with groupWithin and parEvalMap
+@@ -10,4 +10,9 @@ final class IngestPipeline[F[_]: Async](writer: ReadingWriter[F], decoder: Decod
++  def run(source: Stream[F, Chunk[Byte]]): Stream[F, Unit] =
++    source
++      .through(decoder.pipe)
++      .groupWithin(BatchSize, BatchWindow)
++      .parEvalMap(WriterParallelism)(writer.flush)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/DeviceStatsService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=1
+note: inlined multi-step logic in Service plus independent flatMaps
+@@ -12,6 +12,14 @@ final class DeviceStatsService[F[_]: Monad](
+   def report(id: DeviceId): F[Report] =
+-    logic.report(id)
++    readings.count(id).flatMap: count =>
++      alerts.openCount(id).flatMap: open =>
++        readings.latest(id).map: latest =>
++          val ratio = if count == 0 then 0.0 else open.toDouble / count
++          val health =
++            if ratio > 0.2 then Health.Degraded
++            else if latest.isEmpty then Health.Silent
++            else Health.Ok
++          Report(id, count, open, health)
+=== END
+
+=== TURN
+labels: dup=1
+note: same batch size constant defined in two writers
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
+@@ -4,3 +4,5 @@ object ReadingWriter:
++  val BatchSize = 500
++  val BatchWindow = 2.seconds
+--- a/server/src/main/scala/com/acme/telemetry/alerts/AlertWriter.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/AlertWriter.scala
+@@ -4,3 +4,5 @@ object AlertWriter:
++  val BatchSize = 500
++  val BatchWindow = 2.seconds
+=== END
+
+=== TURN
+labels: dup=1
+note: same Reading fixture built in two suites
+--- a/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
+@@ -8,3 +8,7 @@ class ReadingWriterSuite extends CatsEffectSuite:
++  val sample = Reading(DeviceId("dev-001"), Instant.parse("2025-03-01T10:00:00Z"), 21.5, Instant.parse("2025-03-01T10:00:01Z"))
++
++  test("writes one reading"):
++    writer.flush(Chunk.singleton(sample)).assertEquals(())
+--- a/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
+@@ -6,3 +6,7 @@ class WindowStatsSuite extends FunSuite:
++  val sample = Reading(DeviceId("dev-001"), Instant.parse("2025-03-01T10:00:00Z"), 21.5, Instant.parse("2025-03-01T10:00:01Z"))
++
++  test("single reading summary"):
++    assertEquals(WindowStats.summarize(List(sample)).map(_.count), Some(1))
+=== END
+
+=== TURN
+labels: dup=1
+note: same timeout/adaptError idiom repeated across repositories
+--- a/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
+@@ -20,3 +20,6 @@ object PgDeviceRepository:
++  def find(id: DeviceId): F[Option[Device]] =
++    session.use(_.option(Sql.byId)(id))
++      .timeout(5.seconds)
++      .adaptError { case _: TimeoutException => DbTimeout("devices.find") }
+--- a/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
+@@ -20,3 +20,6 @@ object PgAlertRepository:
++  def openFor(id: DeviceId): F[List[Alert]] =
++    session.use(_.execute(Sql.openByDevice)(id))
++      .timeout(5.seconds)
++      .adaptError { case _: TimeoutException => DbTimeout("alerts.openFor") }
+=== END
+
+=== TURN
+labels: dup=1
+note: retention window of 90 days spelled twice
+--- a/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
++++ b/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
+@@ -7,3 +7,4 @@ final class RetentionJob[F[_]: Temporal](service: RetentionService[F]):
++  private val ReadingRetention = 90.days
+   def tick: F[Unit] = clock.realTimeInstant.flatMap(now => service.compact(now.minus(ReadingRetention.toMillis, ChronoUnit.MILLIS)))
+--- a/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
++++ b/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
+@@ -7,3 +7,4 @@ final class ArchiveExporter[F[_]: Temporal](readings: ReadingRepository[F]):
++  private val ReadingRetention = 90.days
+   def pending(now: Instant): F[List[Reading]] = readings.olderThan(now.minus(ReadingRetention.toMillis, ChronoUnit.MILLIS))
+=== END
+
+=== TURN
+labels: dup=0
+note: two 100s with different meaning, hard negative
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestLimits.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestLimits.scala
+@@ -3,3 +3,5 @@ object IngestLimits:
++  val MaxBatchSize = 100
++  val MaxAlertsPerDevice = 100
+--- a/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
+@@ -3,3 +3,4 @@ object DeviceLimits:
++  val MaxTagsPerDevice = 20
+=== END
+
+=== TURN
+labels: dup=0
+note: one shared fixture used by two tests
+--- a/app/src/test/scala/com/acme/telemetry/Fixtures.scala
++++ b/app/src/test/scala/com/acme/telemetry/Fixtures.scala
+@@ -3,3 +3,5 @@ object Fixtures:
++  val sampleReading = Reading(DeviceId("dev-001"), Instant.parse("2025-03-01T10:00:00Z"), 21.5, Instant.parse("2025-03-01T10:00:01Z"))
+--- a/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/ingest/ReadingWriterSuite.scala
+@@ -8,3 +8,4 @@ class ReadingWriterSuite extends CatsEffectSuite:
++  test("writes one reading")(writer.flush(Chunk.singleton(Fixtures.sampleReading)).assertEquals(()))
+--- a/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/stats/WindowStatsSuite.scala
+@@ -6,3 +6,4 @@ class WindowStatsSuite extends FunSuite:
++  test("single reading summary")(assertEquals(WindowStats.summarize(List(Fixtures.sampleReading)).map(_.count), Some(1)))
+=== END
+
+=== TURN
+labels: dup=0
+note: extension method introduced and used twice
+--- a/server/src/main/scala/com/acme/telemetry/ingest/syntax.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/syntax.scala
+@@ -1,3 +1,6 @@
++extension [F[_]: Temporal, A](fa: F[A])
++  def withDbTimeout(op: String): F[A] =
++    fa.timeout(5.seconds).adaptError { case _: TimeoutException => DbTimeout(op) }
+--- a/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/PgDeviceRepository.scala
+@@ -20,3 +20,3 @@ object PgDeviceRepository:
++    session.use(_.option(Sql.byId)(id)).withDbTimeout("devices.find")
+--- a/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
++++ b/server/src/main/scala/com/acme/telemetry/alerts/PgAlertRepository.scala
+@@ -20,3 +20,3 @@ object PgAlertRepository:
++    session.use(_.execute(Sql.openByDevice)(id)).withDbTimeout("alerts.openFor")
+=== END

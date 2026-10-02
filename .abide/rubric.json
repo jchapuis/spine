@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "compiledAt": "2026-10-01T00:00:00.000Z",
+  "compiledBy": "spine (hand-authored from compliance-gate SKILL.md §6; do NOT run `abide compile`)",
+  "sources": [
+    {
+      "path": ".claude/skills/compliance-gate/SKILL.md",
+      "scope": "**/*"
+    }
+  ],
+  "thresholds": { "act": 0.8, "flag": 0.5 },
+  "rules": [
+    {
+      "id": "fail-loud-no-silent-fallback",
+      "text": "Surface failures; do not hide a missing value or a bug behind a silent default (getOrElse, recover on a non-transient failure, or a side effect that runs after an upstream validated step failed).",
+      "source": { "path": ".claude/skills/fail-loud/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change hide a failure instead of surfacing it: a getOrElse(<default>) that masks a missing-data case, a recover/handleError that swallows a bug or a non-transient external failure, or a side effect inside a for-comprehension that still runs after an upstream validated step failed?",
+          "criteria": {
+            "true": "getOrElse(0) / getOrElse(\"\") on a lookup that can legitimately miss; recover that returns a placeholder and hides the cause",
+            "false": "the failure is raised, logged with context, or returned as Either/Option/Validated to the caller"
+          }
+        }
+      }
+    },
+    {
+      "id": "server-architecture-service-depends-on-service",
+      "text": "A Service must not depend on another Service directly; it depends on an algebra (trait) the other service implements.",
+      "source": { "path": ".claude/skills/server-architecture/SKILL.md" },
+      "scope": ["**/*.scala"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does a Service depend directly on another concrete Service (holding it as a constructor field or calling it), instead of depending on an algebra/trait that the other service implements?",
+          "criteria": {
+            "true": "class FooService(bar: BarService) — one concrete service holding another",
+            "false": "class FooService(bar: BarAlgebra) — the dependency is a trait/algebra"
+          }
+        }
+      }
+    },
+    {
+      "id": "server-architecture-logic-placement",
+      "text": "Orchestration/business logic belongs in a Logic trait behind an algebra; an algebra ships as a trait, not an object with concrete logic.",
+      "source": { "path": ".claude/skills/server-architecture/SKILL.md" },
+      "scope": ["**/*.scala"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Is business/orchestration logic placed where it does not belong: concrete multi-step logic inlined in a Service method, or an algebra shipped as an object with concrete logic and no trait, rather than behind a trait / in a Logic trait?",
+          "criteria": {
+            "true": "object FooAlg { def run = <concrete multi-step logic> } with no trait; business rules inlined directly in a Service method",
+            "false": "the algebra is a trait with its impl in the companion; orchestration lives in a dedicated Logic trait"
+          }
+        }
+      }
+    },
+    {
+      "id": "scala-plain-readable-names",
+      "text": "Names say what the thing is in domain terms; no abbreviations or metaphors where a plain name exists.",
+      "source": { "path": ".claude/skills/scala/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change introduce an identifier a newcomer could not read: an abbreviation (avgX, reqY, a single-letter non-idiomatic parameter), or a metaphor/jargon name (ask, ladder, rung, strut, filler) where a plain domain name exists?",
+          "criteria": {
+            "true": "val rl = ...; def ofBearing; a metaphor name for a concept that already has a plain word",
+            "false": "names say what the thing is in domain terms (heading, waypoint, remainingDistance)"
+          }
+        }
+      }
+    },
+    {
+      "id": "cats-right-combinator",
+      "text": "Pick the right Cats combinator: mapN for independent effects, foldMap for monoidal accumulation, for/yield for dependent steps.",
+      "source": { "path": ".claude/skills/cats/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change use an imperative or wrong Cats combinator: a flatMap/map chain over independent effects that should be mapN, or a fold accumulator that should be foldMap?",
+          "criteria": {
+            "true": "a.flatMap(x => b.map(y => f(x, y))) for independent a and b (should be (a, b).mapN(f)); list.foldLeft(Monoid.empty)(_ |+| f(_)) (should be foldMap)",
+            "false": "mapN for independent effects; foldMap for monoidal accumulation; for/yield only for dependent steps"
+          }
+        }
+      }
+    },
+    {
+      "id": "factor-out-within-diff-duplication",
+      "text": "Do not define the same constant, fixture, or 2-3 line idiom twice across the change; lift it to one definition or an extension.",
+      "source": { "path": ".claude/skills/factor-out/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "turn",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change define the same thing twice — a constant, a test fixture, or a 2-3 line idiom repeated across the diff — that should be lifted to a single definition or an extension method?",
+          "criteria": {
+            "true": "the same literal, fixture, or 3-line block copied into two files or two tests within this change",
+            "false": "shared values, fixtures, and idioms defined once and reused"
+          }
+        }
+      }
+    }
+  ]
+}

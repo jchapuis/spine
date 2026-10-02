@@ -1,0 +1,373 @@
+=== TURN
+labels: dup=1
+note: same CSS class string defined in two components
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
+@@ -4,5 +4,6 @@ object OrderCard:
++  private val CardClass = "card card--elevated card--rounded"
+   def apply(order: Order): HtmlElement =
+-    div(cls := "card", order.id.value)
++    div(cls := CardClass, order.id.value)
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
+@@ -4,5 +4,6 @@ object ProductCard:
++  private val CardClass = "card card--elevated card--rounded"
+   def apply(product: Product): HtmlElement =
+-    div(cls := "card", product.name)
++    div(cls := CardClass, product.name)
+=== END
+
+=== TURN
+labels: dup=1
+note: debounce constant repeated in two search components
+--- a/web/src/main/scala/com/acme/shop/ui/search/SearchBox.scala
++++ b/web/src/main/scala/com/acme/shop/ui/search/SearchBox.scala
+@@ -5,6 +5,7 @@ object SearchBox:
++  private val Debounce = 300.millis
+   def apply(out: Observer[SearchQuery]): HtmlElement =
+-    input(onInput.mapToValue.map(SearchQuery(_)) --> out)
++    input(onInput.mapToValue.debounce(Debounce.toMillis.toInt).map(SearchQuery(_)) --> out)
+--- a/web/src/main/scala/com/acme/shop/ui/filters/FilterBar.scala
++++ b/web/src/main/scala/com/acme/shop/ui/filters/FilterBar.scala
+@@ -5,6 +5,7 @@ object FilterBar:
++  private val Debounce = 300.millis
+   def apply(out: Observer[Filter]): HtmlElement =
+-    input(onInput.mapToValue.map(Filter.text) --> out)
++    input(onInput.mapToValue.debounce(Debounce.toMillis.toInt).map(Filter.text) --> out)
+=== END
+
+=== TURN
+labels: dup=1
+note: same Order fixture defined in two test files
+--- a/web/src/test/scala/com/acme/shop/ui/orders/OrderRowSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/orders/OrderRowSpec.scala
+@@ -6,6 +6,9 @@ class OrderRowSpec extends FunSuite:
++  private val sampleOrder = Order(OrderId("o-1"), CustomerId("c-1"), Money(1250, Currency.CHF), OrderStatus.Open)
++
++  test("row shows id"):
++    assertEquals(OrderRow.label(sampleOrder), "o-1")
+--- a/web/src/test/scala/com/acme/shop/ui/orders/OrderDetailSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/orders/OrderDetailSpec.scala
+@@ -6,6 +6,9 @@ class OrderDetailSpec extends FunSuite:
++  private val sampleOrder = Order(OrderId("o-1"), CustomerId("c-1"), Money(1250, Currency.CHF), OrderStatus.Open)
++
++  test("detail shows total"):
++    assertEquals(OrderDetail.total(sampleOrder), "CHF 12.50")
+=== END
+
+=== TURN
+labels: dup=1
+note: trim-and-nonEmpty input idiom repeated in three fields
+--- a/web/src/main/scala/com/acme/shop/ui/forms/NameField.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/NameField.scala
+@@ -5,5 +5,5 @@ object NameField:
+-    input(onInput.mapToValue --> out)
++    input(onInput.mapToValue.map(_.trim).filter(_.nonEmpty) --> out)
+--- a/web/src/main/scala/com/acme/shop/ui/forms/CityField.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/CityField.scala
+@@ -5,5 +5,5 @@ object CityField:
+-    input(onInput.mapToValue --> out)
++    input(onInput.mapToValue.map(_.trim).filter(_.nonEmpty) --> out)
+--- a/web/src/main/scala/com/acme/shop/ui/forms/StreetField.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/StreetField.scala
+@@ -5,5 +5,5 @@ object StreetField:
+-    input(onInput.mapToValue --> out)
++    input(onInput.mapToValue.map(_.trim).filter(_.nonEmpty) --> out)
+=== END
+
+=== TURN
+labels: dup=1
+note: API base URI repeated in two clients
+--- a/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
+@@ -3,4 +3,5 @@ object OrderApiClient:
++  private val Base = uri"https://api.acme.example/v2"
+--- a/web/src/main/scala/com/acme/shop/api/ProductApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/ProductApiClient.scala
+@@ -3,4 +3,5 @@ object ProductApiClient:
++  private val Base = uri"https://api.acme.example/v2"
+=== END
+
+=== TURN
+labels: dup=1
+note: identical error banner block in two views
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+@@ -14,3 +14,6 @@ object OrderListView:
++      child.maybe <-- error.map(_.map: message =>
++        div(cls := "banner banner--error", span(cls := "banner__icon", "!"), message)
++      ),
+--- a/web/src/main/scala/com/acme/shop/ui/profile/ProfileView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/profile/ProfileView.scala
+@@ -11,3 +11,6 @@ object ProfileView:
++      child.maybe <-- error.map(_.map: message =>
++        div(cls := "banner banner--error", span(cls := "banner__icon", "!"), message)
++      ),
+=== END
+
+=== TURN
+labels: dup=1
+note: localStorage key duplicated as a string literal in two files
+--- a/web/src/main/scala/com/acme/shop/storage/ThemeStorage.scala
++++ b/web/src/main/scala/com/acme/shop/storage/ThemeStorage.scala
+@@ -4,4 +4,5 @@ object ThemeStorage:
++  def load(): Option[String] = Option(dom.window.localStorage.getItem("acme.shop.prefs.v1"))
+--- a/web/src/main/scala/com/acme/shop/storage/LocaleStorage.scala
++++ b/web/src/main/scala/com/acme/shop/storage/LocaleStorage.scala
+@@ -4,4 +4,5 @@ object LocaleStorage:
++  def save(raw: String): Unit = dom.window.localStorage.setItem("acme.shop.prefs.v1", raw)
+=== END
+
+=== TURN
+labels: dup=1
+note: same email regex literal in two forms
+--- a/shared/src/main/scala/com/acme/shop/forms/SignupForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/SignupForm.scala
+@@ -5,4 +5,6 @@ object SignupForm:
++  private val EmailPattern = """^[^@\s]+@[^@\s]+\.[a-z]{2,}$""".r
++  def validEmail(raw: String): Boolean = EmailPattern.matches(raw)
+--- a/shared/src/main/scala/com/acme/shop/forms/ContactForm.scala
++++ b/shared/src/main/scala/com/acme/shop/forms/ContactForm.scala
+@@ -5,4 +5,6 @@ object ContactForm:
++  private val EmailPattern = """^[^@\s]+@[^@\s]+\.[a-z]{2,}$""".r
++  def validEmail(raw: String): Boolean = EmailPattern.matches(raw)
+=== END
+
+=== TURN
+labels: dup=1
+note: ScalaCheck order id generator duplicated in two specs
+--- a/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderCodecSpec.scala
+@@ -8,4 +8,6 @@ class OrderCodecSpec extends ScalaCheckSuite:
++  private val genOrderId: Gen[OrderId] =
++    Gen.choose(1, 99999).map(n => OrderId(s"o-$n"))
+--- a/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
++++ b/shared/src/test/scala/com/acme/shop/OrderRoutingSpec.scala
+@@ -8,4 +8,6 @@ class OrderRoutingSpec extends ScalaCheckSuite:
++  private val genOrderId: Gen[OrderId] =
++    Gen.choose(1, 99999).map(n => OrderId(s"o-$n"))
+=== END
+
+=== TURN
+labels: dup=1
+note: bearer header construction repeated in two API clients
+--- a/web/src/main/scala/com/acme/shop/api/CartApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/CartApiClient.scala
+@@ -10,4 +10,6 @@ final class CartApiClient(session: Var[Option[Session]]):
++  private def headers: Map[String, String] =
++    session.now().map(s => Map("Authorization" -> s"Bearer ${s.token}")).getOrElse(Map.empty)
+--- a/web/src/main/scala/com/acme/shop/api/WishlistApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/WishlistApiClient.scala
+@@ -10,4 +10,6 @@ final class WishlistApiClient(session: Var[Option[Session]]):
++  private def headers: Map[String, String] =
++    session.now().map(s => Map("Authorization" -> s"Bearer ${s.token}")).getOrElse(Map.empty)
+=== END
+
+=== TURN
+labels: dup=1
+note: spinner toggle idiom repeated in two views
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+@@ -16,3 +16,5 @@ object OrderListView:
++      child <-- loading.splitBoolean(
++        whenTrue = _ => div(cls := "spinner"),
++        whenFalse = _ => emptyNode
++      ),
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
+@@ -16,3 +16,5 @@ object ProductListView:
++      child <-- loading.splitBoolean(
++        whenTrue = _ => div(cls := "spinner"),
++        whenFalse = _ => emptyNode
++      ),
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, same-looking duration with different meaning
+--- a/server/src/main/scala/com/acme/shop/http/ShopClient.scala
++++ b/server/src/main/scala/com/acme/shop/http/ShopClient.scala
+@@ -3,4 +3,5 @@ object ShopClient:
++  val RequestTimeout = 30.seconds
+--- a/web/src/main/scala/com/acme/shop/session/IdleTimer.scala
++++ b/web/src/main/scala/com/acme/shop/session/IdleTimer.scala
+@@ -3,4 +3,5 @@ object IdleTimer:
++  val SessionIdleLimit = 30.seconds
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, reuses the existing named page size constant
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+@@ -8,4 +8,4 @@ object OrderListView:
+-    api.list(customer, PageSize(20))
++    api.list(customer, Paging.DefaultPageSize)
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductListView.scala
+@@ -8,4 +8,4 @@ object ProductListView:
+-    api.list(PageSize(20))
++    api.list(Paging.DefaultPageSize)
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, one shared fixture used by two tests
+--- a/web/src/test/scala/com/acme/shop/Fixtures.scala
++++ b/web/src/test/scala/com/acme/shop/Fixtures.scala
+@@ -0,0 +1,5 @@
++package com.acme.shop
++
++object Fixtures:
++  val sampleOrder: Order = Order(OrderId("o-1"), CustomerId("c-1"), Money(1250, Currency.CHF), OrderStatus.Open)
+--- a/web/src/test/scala/com/acme/shop/ui/orders/OrderRowSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/orders/OrderRowSpec.scala
+@@ -6,3 +6,4 @@ class OrderRowSpec extends FunSuite:
++  test("row shows id")(assertEquals(OrderRow.label(Fixtures.sampleOrder), "o-1"))
+--- a/web/src/test/scala/com/acme/shop/ui/orders/OrderDetailSpec.scala
++++ b/web/src/test/scala/com/acme/shop/ui/orders/OrderDetailSpec.scala
+@@ -6,3 +6,4 @@ class OrderDetailSpec extends FunSuite:
++  test("detail shows total")(assertEquals(OrderDetail.total(Fixtures.sampleOrder), "CHF 12.50"))
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, extension method introduced and called twice
+--- a/web/src/main/scala/com/acme/shop/ui/syntax/InputSyntax.scala
++++ b/web/src/main/scala/com/acme/shop/ui/syntax/InputSyntax.scala
+@@ -0,0 +1,5 @@
++package com.acme.shop.ui.syntax
++
++extension (input: EventStream[String])
++  def trimmedNonEmpty: EventStream[String] = input.map(_.trim).filter(_.nonEmpty)
+--- a/web/src/main/scala/com/acme/shop/ui/forms/NameField.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/NameField.scala
+@@ -5,5 +5,5 @@ object NameField:
+-    input(onInput.mapToValue.map(_.trim).filter(_.nonEmpty) --> out)
++    input(onInput.mapToValue.trimmedNonEmpty --> out)
+--- a/web/src/main/scala/com/acme/shop/ui/forms/CityField.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/CityField.scala
+@@ -5,5 +5,5 @@ object CityField:
+-    input(onInput.mapToValue.map(_.trim).filter(_.nonEmpty) --> out)
++    input(onInput.mapToValue.trimmedNonEmpty --> out)
+=== END
+
+=== TURN
+labels: dup=0
+note: hard negative, shared banner component extracted and used in two views
+--- a/web/src/main/scala/com/acme/shop/ui/common/ErrorBanner.scala
++++ b/web/src/main/scala/com/acme/shop/ui/common/ErrorBanner.scala
+@@ -0,0 +1,6 @@
++package com.acme.shop.ui.common
++
++object ErrorBanner:
++  def apply(error: Signal[Option[String]]): Modifier[HtmlElement] =
++    child.maybe <-- error.map(_.map(message => div(cls := "banner banner--error", message)))
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderListView.scala
+@@ -14,6 +14,3 @@ object OrderListView:
+-      child.maybe <-- error.map(_.map(message => div(cls := "banner banner--error", message))),
++      ErrorBanner(error),
+--- a/web/src/main/scala/com/acme/shop/ui/profile/ProfileView.scala
++++ b/web/src/main/scala/com/acme/shop/ui/profile/ProfileView.scala
+@@ -11,6 +11,3 @@ object ProfileView:
+-      child.maybe <-- error.map(_.map(message => div(cls := "banner banner--error", message))),
++      ErrorBanner(error),
+=== END
+
+=== TURN
+labels: dup=0
+note: new page with its own route, nothing repeated
+--- a/web/src/main/scala/com/acme/shop/routing/Page.scala
++++ b/web/src/main/scala/com/acme/shop/routing/Page.scala
+@@ -4,3 +4,4 @@ enum Page:
+   case Home
+   case Orders
++  case Settings
+--- a/web/src/main/scala/com/acme/shop/routing/Pages.scala
++++ b/web/src/main/scala/com/acme/shop/routing/Pages.scala
+@@ -9,3 +9,6 @@ object Pages:
++  val settingsRoute = Route.static(Page.Settings, root / "settings" / endOfSegments, Route.fragmentBasePath)
+=== END
+
+=== TURN
+labels: dup=0
+note: new Laminar component and its test
+--- /dev/null
++++ b/web/src/main/scala/com/acme/shop/ui/common/Avatar.scala
+@@ -0,0 +1,8 @@
++package com.acme.shop.ui.common
++
++object Avatar:
++  def apply(user: User): HtmlElement =
++    img(cls := "avatar", src := user.avatarUrl.value, alt := user.displayName)
+--- /dev/null
++++ b/web/src/test/scala/com/acme/shop/ui/common/AvatarSpec.scala
+@@ -0,0 +1,8 @@
++package com.acme.shop.ui.common
++
++class AvatarSpec extends FunSuite:
++  test("avatar alt text is the display name"):
++    val rendered = Avatar(Fixtures.sampleUser)
++    assertEquals(rendered.ref.getAttribute("alt"), Fixtures.sampleUser.displayName)
+=== END
+
+=== TURN
+labels: dup=0
+note: two similar-looking but different endpoints, different semantics
+--- a/shared/src/main/scala/com/acme/shop/api/Endpoints.scala
++++ b/shared/src/main/scala/com/acme/shop/api/Endpoints.scala
+@@ -8,3 +8,12 @@ object Endpoints:
++  val listOrders: PublicEndpoint[CustomerId, ErrorBody, List[Order], Any] =
++    endpoint.get.in("customers" / path[CustomerId] / "orders").errorOut(jsonBody[ErrorBody]).out(jsonBody[List[Order]])
++
++  val cancelOrder: PublicEndpoint[OrderId, ErrorBody, Unit, Any] =
++    endpoint.delete.in("orders" / path[OrderId]).errorOut(jsonBody[ErrorBody]).out(emptyOutput)
+=== END
+
+=== TURN
+labels: dup=0
+note: form state refactor using a Var and a derived signal
+--- a/web/src/main/scala/com/acme/shop/ui/forms/AddressForm.scala
++++ b/web/src/main/scala/com/acme/shop/ui/forms/AddressForm.scala
+@@ -5,8 +5,10 @@ object AddressForm:
+-    val street = Var("")
+-    val city = Var("")
++    val state = Var(AddressDraft.empty)
++    val street = state.zoom(_.street)((draft, value) => draft.copy(street = value))
++    val city = state.zoom(_.city)((draft, value) => draft.copy(city = value))
++    val complete: Signal[Boolean] = state.signal.map(_.isComplete)
+=== END
+
+=== TURN
+labels: dup=0
+note: new API client method with a single test
+--- a/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
++++ b/web/src/main/scala/com/acme/shop/api/OrderApiClient.scala
+@@ -22,3 +22,8 @@ final class OrderApiClient(backend: SttpBackend[Future, Any], base: Uri):
++  def cancel(id: OrderId): Future[Unit] =
++    basicRequest.delete(base.addPath("orders", id.value)).send(backend).flatMap: response =>
++      response.body.fold(error => Future.failed(ApiError(error)), _ => Future.unit)
+--- a/web/src/test/scala/com/acme/shop/api/OrderApiClientSpec.scala
++++ b/web/src/test/scala/com/acme/shop/api/OrderApiClientSpec.scala
+@@ -12,3 +12,7 @@ class OrderApiClientSpec extends FunSuite:
++  test("cancel surfaces server errors"):
++    val client = OrderApiClient(stubFailing(StatusCode.Conflict), baseUri)
++    interceptFuture[ApiError](client.cancel(Fixtures.sampleOrder.id))
+=== END
+
+=== TURN
+labels: dup=0
+note: different CSS classes per component, not the same thing
+--- a/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/orders/OrderCard.scala
+@@ -4,4 +4,4 @@ object OrderCard:
+-    div(cls := "card", order.id.value)
++    div(cls := "order-card order-card--open", order.id.value)
+--- a/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
++++ b/web/src/main/scala/com/acme/shop/ui/products/ProductCard.scala
+@@ -4,4 +4,4 @@ object ProductCard:
+-    div(cls := "card", product.name)
++    div(cls := "product-card product-card--featured", product.name)
+=== END
+

@@ -1,0 +1,375 @@
+=== EDIT server/src/main/scala/com/acme/routing/ElevationProfileService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: getOrElse(zero) masks missing elevation sample
+@@ -18,6 +18,6 @@ final class ElevationProfileService[F[_]: Sync](samples: ElevationSamples[F]):
+   def elevationAt(point: GeoPoint): F[Elevation] =
+-    samples.lookup(point).flatMap(_.liftTo[F](NoElevationData(point)))
++    samples.lookup(point).map(_.getOrElse(Elevation.SeaLevel))
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TileFetcher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: recover swallows any tile fetch failure as empty tile
+@@ -22,5 +22,8 @@ final class TileFetcher[F[_]: Async](client: TileHttpClient[F]):
+   def fetch(coord: TileCoord): F[Tile] =
+-    client.get(coord)
++    client
++      .get(coord)
++      .handleError(_ => Tile.empty(coord))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackUploadService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: audit side effect runs even after validation failed
+@@ -30,8 +30,9 @@ final class TrackUploadService[F[_]: Sync](tracks: TrackRepository[F], audit: Au
+   def upload(raw: RawTrack): F[Either[TrackError, TrackId]] =
+     for
+       checked <- Sync[F].pure(TrackValidation.validate(raw))
++      _       <- audit.record(AuditEvent.TrackUploaded(raw.ownerId))
+       result  <- checked.traverse(tracks.insert)
+     yield result
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RoutePlannerService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: service holds concrete ElevationProfileService
+@@ -9,7 +9,8 @@ import com.acme.elevation.ElevationProfileService
+ final class RoutePlannerService[F[_]: Sync](
+     graph: RoadGraph[F],
+-    elevations: ElevationSamples[F]
++    elevations: ElevationSamples[F],
++    profiles: ElevationProfileService[F]
+ ):
+   def plan(request: PlanRequest): F[Route] =
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackStatsService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: calls TileService directly
+@@ -14,6 +14,7 @@ final class TrackStatsService[F[_]: Monad](tracks: TrackRepository[F], tileService: TileService[F]):
+   def coverage(id: TrackId): F[Coverage] =
+     tracks.get(id).flatMap: track =>
+-      Coverage.of(track).pure[F]
++      tileService.tilesCovering(track.bounds).map(Coverage.of(track, _))
+=== END
+=== EDIT server/src/main/scala/com/acme/export/GpxExportService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: constructor field of concrete GeocodingService
+@@ -6,6 +6,7 @@ import com.acme.geocoding.GeocodingService
+ final class GpxExportService[F[_]: Sync](
+     tracks: TrackRepository[F],
++    geocoding: GeocodingService[F],
+     writer: GpxWriter[F]
+ ):
+   def export(id: TrackId): F[Array[Byte]] =
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RoutePlannerService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: multi-step splitting logic inlined in Service
+@@ -40,6 +40,15 @@ final class RoutePlannerService[F[_]: Sync](graph: RoadGraph[F]):
++  def splitByDay(route: Route, maxDaily: Distance): F[List[Route]] =
++    Sync[F].delay:
++      val (days, last) = route.legs.foldLeft((List.empty[List[Leg]], List.empty[Leg])):
++        case ((done, current), leg) =>
++          if current.map(_.length).sum + leg.length > maxDaily then (done :+ current, List(leg))
++          else (done, current :+ leg)
++      (days :+ last).filter(_.nonEmpty).map(Route.fromLegs)
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TileCache.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete logic, no trait
+@@ -1,6 +1,12 @@
++package com.acme.tiles
++
++object TileCache:
++  def lookup(store: Ref[IO, Map[TileCoord, Tile]], coord: TileCoord): IO[Option[Tile]] =
++    store.get.map(_.get(coord))
++
++  def put(store: Ref[IO, Map[TileCoord, Tile]], tile: Tile, limit: Int): IO[Unit] =
++    store.update(m => (if m.size >= limit then m.drop(1) else m) + (tile.coord -> tile))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackSummaryService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: pagination plus aggregation inlined in service method
+@@ -21,6 +21,14 @@ final class TrackSummaryService[F[_]: Sync](tracks: TrackRepository[F]):
++  def monthlyTotals(owner: UserId, year: Int): F[List[MonthTotal]] =
++    tracks.byOwner(owner).map: all =>
++      all
++        .filter(_.recordedAt.getYear == year)
++        .groupBy(_.recordedAt.getMonth)
++        .map((month, ts) => MonthTotal(month, ts.map(_.distance).reduce(_ + _), ts.size))
++        .toList
++        .sortBy(_.month)
+=== END
+=== EDIT server/src/main/scala/com/acme/elevation/ProfileBuilder.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: avgElev abbreviation
+@@ -12,4 +12,5 @@ object ProfileBuilder:
+   def summarize(points: List[ProfilePoint]): ProfileSummary =
+-    ProfileSummary(points.size)
++    val avgElev = points.map(_.elevation.value).sum / points.size
++    ProfileSummary(points.size, avgElev)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteRequestHandler.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: reqRt and wpts abbreviations
+@@ -8,5 +8,6 @@ final class RouteRequestHandler[F[_]: Monad](planner: RoutePlanner[F]):
+-  def handle(request: PlanRequest): F[Route] =
+-    planner.plan(request.waypoints)
++  def handle(reqRt: PlanRequest): F[Route] =
++    val wpts = reqRt.waypoints
++    planner.plan(wpts)
+=== END
+=== EDIT server/src/main/scala/com/acme/elevation/ClimbDetector.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder is jargon where climb/segment exists
+@@ -15,5 +15,7 @@ object ClimbDetector:
++  def steepLadder(profile: ElevationProfile, threshold: Grade): List[ProfileSegment] =
++    profile.segments.filter(_.grade >= threshold)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RoutePreviewService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent lookups chained with flatMap, should be mapN
+@@ -19,6 +19,7 @@ final class RoutePreviewService[F[_]: Monad](weather: WeatherAlgebra[F], tiles: TileAlgebra[F]):
+   def preview(route: Route): F[Preview] =
+-    (weather.forecast(route.start), tiles.render(route.bounds)).mapN(Preview.apply)
++    weather.forecast(route.start).flatMap: forecast =>
++      tiles.render(route.bounds).map(image => Preview(forecast, image))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackMetrics.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft accumulator should be foldMap
+@@ -11,6 +11,8 @@ object TrackMetrics:
+   def totalDistance(legs: List[Leg]): Distance =
+-    legs.foldMap(_.length)
++    legs.foldLeft(Distance.Zero): (acc, leg) =>
++      acc + leg.length
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/TilePrefetcher.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: three independent fetches flatMap-chained
+@@ -17,5 +17,8 @@ final class TilePrefetcher[F[_]: Async](tiles: TileAlgebra[F]):
+   def around(center: TileCoord): F[Neighbourhood] =
+-    (tiles.get(center.north), tiles.get(center), tiles.get(center.south)).mapN(Neighbourhood.apply)
++    for
++      north  <- tiles.get(center.north)
++      middle <- tiles.get(center)
++      south  <- tiles.get(center.south)
++    yield Neighbourhood(north, middle, south)
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteImportService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: getOrElse on missing waypoint name and abbreviation rteNm
+@@ -26,4 +26,5 @@ final class RouteImportService[F[_]: Sync](routes: RouteRepository[F]):
+   def rename(id: RouteId, update: RenameRequest): F[Route] =
+-    routes.get(id).flatMap(_.liftTo[F](RouteNotFound(id)))
++    val rteNm = update.name
++    routes.get(id).map(_.getOrElse(Route.placeholder(rteNm)))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/RouteLookup.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: toRight surfaces missing route
+@@ -14,4 +14,4 @@ final class RouteLookup[F[_]: MonadThrow](routes: RouteRepository[F]):
+   def require(id: RouteId): F[Route] =
+-    routes.get(id).map(_.get)
++    routes.get(id).flatMap(_.toRight(RouteNotFound(id)).liftTo[F])
+=== END
+=== EDIT server/src/main/scala/com/acme/tiles/HttpTileClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: transient retry with backoff then re-raise
+@@ -25,6 +25,9 @@ final class HttpTileClient[F[_]: Temporal](client: Client[F], maxAttempts: Int):
+   def get(coord: TileCoord): F[Tile] =
+-    client.expect[Tile](tileUri(coord))
++    retry(client.expect[Tile](tileUri(coord)), attempt = 1)
++
++  private def retry[A](fa: F[A], attempt: Int): F[A] =
++    fa.recoverWith:
++      case e: IOException if attempt < maxAttempts =>
++        Temporal[F].sleep((100 * attempt).millis) *> retry(fa, attempt + 1)
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: Option page size defaults to documented constant
+@@ -18,4 +18,5 @@ final class TrackRoutes[F[_]: Concurrent](service: TrackService[F]):
+   def list(owner: UserId, pageSize: Option[PageSize]): F[Page[Track]] =
+-    service.list(owner, DefaultPageSize)
++    service.list(owner, pageSize.getOrElse(DefaultPageSize))
+=== END
+=== EDIT server/src/main/scala/com/acme/geo/Geodesy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative: plain object of pure helpers, not an algebra
+@@ -1,3 +1,10 @@
++object Geodesy:
++  private val EarthRadius = 6371008.8.meters
++
++  def haversine(from: GeoPoint, to: GeoPoint): Distance =
++    val dLat = (to.lat.radians - from.lat.radians)
++    val dLon = (to.lon.radians - from.lon.radians)
++    val a = math.pow(math.sin(dLat / 2), 2) + math.cos(from.lat.radians) * math.cos(to.lat.radians) * math.pow(math.sin(dLon / 2), 2)
++    EarthRadius * (2 * math.asin(math.sqrt(a)))
+=== END
+=== EDIT server/src/main/scala/com/acme/routing/ElevationProfileService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: swallowed missing data now raised
+@@ -18,4 +18,4 @@ final class ElevationProfileService[F[_]: MonadThrow](samples: ElevationSamples[F]):
+   def elevationAt(point: GeoPoint): F[Elevation] =
+-    samples.lookup(point).map(_.getOrElse(Elevation.SeaLevel))
++    samples.lookup(point).flatMap(_.liftTo[F](NoElevationData(point)))
+=== END
+=== EDIT server/src/main/scala/com/acme/tracks/TrackStatsService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix: concrete service replaced by algebra
+@@ -14,5 +14,5 @@ import com.acme.tiles.TileCoverage
+-final class TrackStatsService[F[_]: Monad](tracks: TrackRepository[F], tileService: TileService[F]):
++final class TrackStatsService[F[_]: Monad](tracks: TrackRepository[F], coverage: TileCoverage[F]):
+   def coverage(id: TrackId): F[Coverage] =
+     tracks.get(id).flatMap: track =>
+-      tileService.tilesCovering(track.bounds).map(Coverage.of(track, _))
++      coverage.tilesCovering(track.bounds).map(Coverage.of(track, _))
+=== END
+=== EDIT server/src/test/scala/com/acme/geo/GeodesySuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: clean property test
+@@ -8,4 +8,6 @@ class GeodesySuite extends ScalaCheckSuite:
++  property("haversine is symmetric"):
++    forAll(genGeoPoint, genGeoPoint): (a, b) =>
++      assertEquals(Geodesy.haversine(a, b), Geodesy.haversine(b, a))
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/ElevationChart.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: clean Laminar component
+@@ -10,5 +10,8 @@ object ElevationChart:
++  def apply(profile: Signal[ElevationProfile]): HtmlElement =
++    svg.svg(
++      svg.polyline(svg.points <-- profile.map(_.toSvgPoints)),
++      svg.className := "elevation-chart"
++    )
+=== END
+=== TURN
+labels: dup=1
+note: same coordinate-bounds literal in two services
+--- a/server/src/main/scala/com/acme/tiles/TileService.scala
++++ b/server/src/main/scala/com/acme/tiles/TileService.scala
+@@ -8,3 +8,4 @@ final class TileService[F[_]: Sync](tiles: TileAlgebra[F]):
++  private val MaxZoom = 18
++  private val TileSize = 256
+--- a/server/src/main/scala/com/acme/tiles/TileRenderer.scala
++++ b/server/src/main/scala/com/acme/tiles/TileRenderer.scala
+@@ -5,3 +5,4 @@ final class TileRenderer[F[_]: Sync]:
++  private val MaxZoom = 18
++  private val TileSize = 256
+=== END
+=== TURN
+labels: dup=1
+note: same fixture built in two tests
+--- a/server/src/test/scala/com/acme/routing/RoutePlannerSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RoutePlannerSuite.scala
+@@ -10,3 +10,5 @@ class RoutePlannerSuite extends CatsEffectSuite:
++  val geneva = GeoPoint(Latitude(46.2044), Longitude(6.1432))
++  val lausanne = GeoPoint(Latitude(46.5197), Longitude(6.6323))
+--- a/server/src/test/scala/com/acme/routing/RouteExportSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RouteExportSuite.scala
+@@ -9,3 +9,5 @@ class RouteExportSuite extends CatsEffectSuite:
++  val geneva = GeoPoint(Latitude(46.2044), Longitude(6.1432))
++  val lausanne = GeoPoint(Latitude(46.5197), Longitude(6.6323))
+=== END
+=== TURN
+labels: dup=1
+note: repeated Option-to-error idiom should be extension method
+--- a/server/src/main/scala/com/acme/tracks/TrackService.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackService.scala
+@@ -20,3 +20,5 @@ final class TrackService[F[_]: MonadThrow](tracks: TrackRepository[F]):
++  def get(id: TrackId): F[Track] =
++    tracks.find(id).flatMap(_.toRight(TrackNotFound(id)).liftTo[F])
+--- a/server/src/main/scala/com/acme/tracks/WaypointService.scala
++++ b/server/src/main/scala/com/acme/tracks/WaypointService.scala
+@@ -15,3 +15,5 @@ final class WaypointService[F[_]: MonadThrow](waypoints: WaypointRepository[F]):
++  def get(id: WaypointId): F[Waypoint] =
++    waypoints.find(id).flatMap(_.toRight(WaypointNotFound(id)).liftTo[F])
+--- a/server/src/main/scala/com/acme/routing/RouteService.scala
++++ b/server/src/main/scala/com/acme/routing/RouteService.scala
+@@ -12,3 +12,5 @@ final class RouteService[F[_]: MonadThrow](routes: RouteRepository[F]):
++  def get(id: RouteId): F[Route] =
++    routes.find(id).flatMap(_.toRight(RouteNotFound(id)).liftTo[F])
+=== END
+=== TURN
+labels: dup=1
+note: same Circe codec boilerplate copied twice
+--- a/server/src/main/scala/com/acme/routing/RouteJson.scala
++++ b/server/src/main/scala/com/acme/routing/RouteJson.scala
+@@ -4,3 +4,5 @@ object RouteJson:
++  given Encoder[Distance] = Encoder[Double].contramap(_.meters)
++  given Decoder[Distance] = Decoder[Double].emap(Distance.fromMeters)
+--- a/server/src/main/scala/com/acme/tracks/TrackJson.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackJson.scala
+@@ -4,3 +4,5 @@ object TrackJson:
++  given Encoder[Distance] = Encoder[Double].contramap(_.meters)
++  given Decoder[Distance] = Decoder[Double].emap(Distance.fromMeters)
+=== END
+=== TURN
+labels: dup=0
+note: look alike but different units, different meaning
+--- a/server/src/main/scala/com/acme/tiles/TileLimits.scala
++++ b/server/src/main/scala/com/acme/tiles/TileLimits.scala
+@@ -3,3 +3,4 @@ object TileLimits:
++  val MaxZoom = 18
+--- a/server/src/main/scala/com/acme/routing/RoutingLimits.scala
++++ b/server/src/main/scala/com/acme/routing/RoutingLimits.scala
+@@ -3,3 +3,4 @@ object RoutingLimits:
++  val MaxWaypoints = 18
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: one shared fixture used by two tests
+--- a/server/src/test/scala/com/acme/fixtures/GeoFixtures.scala
++++ b/server/src/test/scala/com/acme/fixtures/GeoFixtures.scala
+@@ -1,3 +1,5 @@
++object GeoFixtures:
++  val bern = GeoPoint(Latitude(46.9480), Longitude(7.4474))
+--- a/server/src/test/scala/com/acme/routing/RoutePlannerSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RoutePlannerSuite.scala
+@@ -10,3 +10,4 @@ class RoutePlannerSuite extends CatsEffectSuite:
++  test("plans from bern")(planner.plan(GeoFixtures.bern, dest).map(assert(_)))
+--- a/server/src/test/scala/com/acme/routing/RouteExportSuite.scala
++++ b/server/src/test/scala/com/acme/routing/RouteExportSuite.scala
+@@ -9,3 +9,4 @@ class RouteExportSuite extends CatsEffectSuite:
++  test("exports from bern")(exporter.export(GeoFixtures.bern).map(assert(_)))
+=== END
+=== TURN
+labels: dup=0
+note: hard negative: extension introduced and used twice
+--- a/server/src/main/scala/com/acme/common/OptionOps.scala
++++ b/server/src/main/scala/com/acme/common/OptionOps.scala
+@@ -1,3 +1,5 @@
++extension [A](fa: Option[A])
++  def orNotFound[F[_]: ApplicativeThrow](err: => Throwable): F[A] = fa.toRight(err).liftTo[F]
+--- a/server/src/main/scala/com/acme/tracks/TrackService.scala
++++ b/server/src/main/scala/com/acme/tracks/TrackService.scala
+@@ -20,3 +20,3 @@ final class TrackService[F[_]: MonadThrow](tracks: TrackRepository[F]):
+-    tracks.find(id).flatMap(_.toRight(TrackNotFound(id)).liftTo[F])
++    tracks.find(id).flatMap(_.orNotFound(TrackNotFound(id)))
+--- a/server/src/main/scala/com/acme/routing/RouteService.scala
++++ b/server/src/main/scala/com/acme/routing/RouteService.scala
+@@ -12,3 +12,3 @@ final class RouteService[F[_]: MonadThrow](routes: RouteRepository[F]):
+-    routes.find(id).flatMap(_.toRight(RouteNotFound(id)).liftTo[F])
++    routes.find(id).flatMap(_.orNotFound(RouteNotFound(id)))
+=== END
+=== TURN
+labels: dup=0
+note: single new file, nothing repeated
+--- a/server/src/main/scala/com/acme/gpx/GpxParser.scala
++++ b/server/src/main/scala/com/acme/gpx/GpxParser.scala
+@@ -1,3 +1,8 @@
++object GpxParser:
++  def parse(xml: Elem): Either[GpxError, List[Waypoint]] =
++    (xml \\ "wpt").toList.traverse: node =>
++      for
++        lat <- Latitude.either((node \ "@lat").text.toDouble)
++        lon <- Longitude.either((node \ "@lon").text.toDouble)
++      yield Waypoint(GeoPoint(lat, lon))
+=== END
+=== TURN
+labels: dup=0
+note: two tests reuse existing constant
+--- a/server/src/test/scala/com/acme/tiles/TileSuite.scala
++++ b/server/src/test/scala/com/acme/tiles/TileSuite.scala
+@@ -7,3 +7,5 @@ class TileSuite extends FunSuite:
++  test("zoom above max is rejected")(assert(Zoom.either(TileLimits.MaxZoom + 1).isLeft))
++  test("zoom at max is accepted")(assert(Zoom.either(TileLimits.MaxZoom).isRight))
+=== END

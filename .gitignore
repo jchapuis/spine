@@ -1,0 +1,51 @@
+# Project repos live under projects/ — each is an independent git repository.
+projects/
+
+# Tasks are documented in markdown files under tasks/ — these are gitignored
+tasks
+
+# Claude Code — ignore generated/session files, track custom skills and commands.
+.claude/*
+!.claude/skills/
+!.claude/commands/
+
+# Third-party skills installed from elsewhere — only skills written here are tracked.
+# Add a line when you install another one.
+.claude/skills/brandkit/
+.claude/skills/design-taste-frontend/
+.claude/skills/high-end-visual-design/
+.claude/skills/humanizer/
+.claude/skills/imagegen-frontend-mobile/
+.claude/skills/imagegen-frontend-web/
+.claude/skills/redesign-existing-projects/
+
+# The drawing skill is its own repository — github.com/jchapuis/drawing-skill
+.claude/skills/drawing/
+
+# Waitlist exports hold real signup addresses — the Seafile sync is the backup, not git.
+backups/
+
+# Metals writes its lock db here whenever a session indexes the spine itself.
+.metals/
+
+# abide → kev: the compiled rubric (.abide/rubric.json) is tracked; the key/base URL are not.
+.env
+.env.local
+
+# kev itself is cloned here on first `kev-serve` run — its own repo, not ours to track.
+tools/
+
+# abide's runtime log, and the fine-tune pipeline's private and derived files: real/ holds diffs from the projects'
+# own history, runs/ holds checkpoints and logs, and the .jsonl files and splits are rebuilt by assemble.py + split_data.py.
+.abide/*.jsonl
+.abide/finetune/real/
+.abide/finetune/runs/
+.abide/finetune/synthetic/*.jsonl
+.abide/finetune/synthetic/split*/
+__pycache__/
+
+# macOS
+.DS_Store
+
+# Personal Seafile sync config — lives at the library root, not part of the spine.
+seafile-ignore.txt

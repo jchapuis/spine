@@ -1,0 +1,270 @@
+=== EDIT server/src/main/scala/com/acme/db/DatabaseConfig.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required DB_PORT silently defaults to 5432
+@@ -8,7 +8,7 @@ object DatabaseConfig:
+   def fromEnv: IO[DatabaseConfig] = IO:
+     DatabaseConfig(
+       host = sys.env("DB_HOST"),
+-      port = sys.env("DB_PORT").toInt,
++      port = sys.env.getOrElse("DB_PORT", "5432").toInt,
+       name = sys.env("DB_NAME")
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/db/DatabaseConfig.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fixed twin, missing DB_PORT fails startup with a named error
+@@ -8,9 +8,12 @@ object DatabaseConfig:
+   def fromEnv: IO[DatabaseConfig] =
+     for
+       host <- required("DB_HOST")
+-      port <- IO(sys.env.getOrElse("DB_PORT", "5432").toInt)
++      port <- required("DB_PORT").map(_.toInt)
+       name <- required("DB_NAME")
+     yield DatabaseConfig(host, port, name)
++
++  private def required(key: String): IO[String] =
++    sys.env.get(key).toRight(MissingSetting(key)).liftTo[IO]
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/JwtSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: signing secret defaults to a guessable literal
+@@ -5,6 +5,6 @@ import scala.util.Properties
+ final case class JwtSettings(secret: String, issuer: String)
+
+ object JwtSettings:
+-  def load: JwtSettings = JwtSettings(Properties.envOrElse("JWT_SECRET", throw MissingSetting("JWT_SECRET")), "acme")
++  def load: JwtSettings = JwtSettings(Properties.envOrElse("JWT_SECRET", "changeme"), "acme")
+=== END
+=== EDIT server/src/main/scala/com/acme/Main.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: pureconfig loadOrThrow fails at startup
+@@ -14,7 +14,7 @@ object Main extends IOApp.Simple:
+   val run: IO[Unit] =
+     for
+-      config <- IO(AppConfig.default)
++      config <- IO(ConfigSource.default.loadOrThrow[AppConfig])
+       _ <- Server.resource(config).useForever
+     yield ()
+=== END
+=== EDIT server/src/main/scala/com/acme/http/HttpSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: Try swallows a missing/invalid port into 8080
+@@ -10,6 +10,7 @@ object HttpSettings:
+   def from(conf: Config): HttpSettings =
+     HttpSettings(
+       host = conf.getString("http.host"),
+-      port = conf.getInt("http.port")
++      port = Try(conf.getInt("http.port")).getOrElse(8080)
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/orders/OrderRoutes.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional page size defaults to documented constant
+@@ -20,7 +20,7 @@ final class OrderRoutes[F[_]: Concurrent](orders: OrderService[F]) extends Http4
+   object PageSizeParam extends OptionalQueryParamDecoderMatcher[PageSize]("pageSize")
+
+   val routes: HttpRoutes[F] = HttpRoutes.of[F]:
+     case GET -> Root / "orders" :? PageSizeParam(size) =>
+-      orders.list(size.getOrElse(PageSize(20))).flatMap(Ok(_))
++      orders.list(size.getOrElse(PageSize.Default)).flatMap(Ok(_))
+=== END
+=== EDIT server/src/main/scala/com/acme/config/ConfigLoader.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: failed pureconfig load replaced by local defaults
+@@ -6,6 +6,6 @@ import pureconfig.*
+ object ConfigLoader:
+   def load: AppConfig =
+-    ConfigSource.default.loadOrThrow[AppConfig]
++    ConfigSource.default.load[AppConfig].getOrElse(AppConfig.local)
+=== END
+=== EDIT server/src/main/scala/com/acme/mail/SmtpClient.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: bounded retry, re-raises after maxAttempts
+@@ -18,10 +18,13 @@ final class SmtpClient(transport: Transport[IO], maxAttempts: Int):
+-  def send(mail: Mail): IO[Unit] = transport.deliver(mail)
++  def send(mail: Mail): IO[Unit] = attempt(mail, 1)
++
++  private def attempt(mail: Mail, attemptNo: Int): IO[Unit] =
++    transport.deliver(mail).handleErrorWith:
++      case e: IOException if attemptNo < maxAttempts =>
++        IO.sleep(attemptNo.seconds) *> attempt(mail, attemptNo + 1)
++      case e => IO.raiseError(e)
+=== END
+=== EDIT server/src/main/scala/com/acme/mail/SmtpClient.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: retries any error forever with no bound and no log
+@@ -18,6 +18,7 @@ final class SmtpClient(transport: Transport[IO]):
+-  def send(mail: Mail): IO[Unit] = transport.deliver(mail)
++  def send(mail: Mail): IO[Unit] =
++    transport.deliver(mail).handleErrorWith(_ => IO.sleep(2.seconds) *> send(mail))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: zero is the legitimate sum of no lines
+@@ -9,5 +9,5 @@ object InvoiceTotals:
+   def total(invoice: Invoice): Money =
+-    invoice.lines.map(_.amount).reduce(_ + _)
++    invoice.lines.map(_.amount).reduceOption(_ + _).getOrElse(Money.zero)
+=== END
+=== EDIT server/src/main/scala/com/acme/pricing/RateService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: attempt.map getOrElse(Nil) on required rates; rslt is vowel-dropped
+@@ -15,6 +15,8 @@ final class RateService(rates: RateRepository[IO]):
+   def currentRates(tenant: TenantId): IO[List[Rate]] =
+-    rates.forTenant(tenant)
++    rates.forTenant(tenant).attempt.map: rslt =>
++      rslt.getOrElse(Nil)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Settings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: ciris required value fails config load, no default
+@@ -7,6 +7,6 @@ import ciris.*
+ object Settings:
+   val database: ConfigValue[IO, DbSettings] =
+     (
+-      env("DB_HOST").default("localhost"),
++      env("DB_HOST"),
+       env("DB_PORT").as[Int],
+     ).parMapN(DbSettings.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/Settings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: ciris required host defaulted to localhost
+@@ -7,6 +7,6 @@ import ciris.*
+ object Settings:
+   val database: ConfigValue[IO, DbSettings] =
+     (
+-      env("DB_HOST"),
++      env("DB_HOST").default("localhost"),
+       env("DB_PORT").as[Int],
+     ).parMapN(DbSettings.apply)
+=== END
+=== EDIT server/src/main/scala/com/acme/http/ClientSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional timeout defaults to named documented constant
+@@ -4,10 +4,14 @@ import scala.concurrent.duration.*
+ object ClientSettings:
++  /** Applied when `http.request-timeout` is not configured; the key is optional. */
++  val DefaultRequestTimeout: FiniteDuration = 30.seconds
++
+   def requestTimeout(conf: Config): FiniteDuration =
+-    conf.getDuration("http.request-timeout").toScala
++    if conf.hasPath("http.request-timeout") then conf.getDuration("http.request-timeout").toScala
++    else DefaultRequestTimeout
+=== END
+=== EDIT server/src/main/scala/com/acme/tenants/TenantSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: required tenant.id from a settings map defaults to "default"
+@@ -11,6 +11,6 @@ object TenantSettings:
+   def from(settings: Map[String, String]): TenantSettings =
+     TenantSettings(
+-      tenantId = settings("tenant.id"),
++      tenantId = settings.getOrElse("tenant.id", "default"),
+       region = settings("tenant.region")
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/tenants/TenantSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: map settings via toRight with MissingSetting
+@@ -11,8 +11,10 @@ object TenantSettings:
+-  def from(settings: Map[String, String]): TenantSettings =
+-    TenantSettings(settings.getOrElse("tenant.id", "default"), settings("tenant.region"))
++  def from(settings: Map[String, String]): Either[MissingSetting, TenantSettings] =
++    for
++      id <- settings.get("tenant.id").toRight(MissingSetting("tenant.id"))
++      region <- settings.get("tenant.region").toRight(MissingSetting("tenant.region"))
++    yield TenantSettings(id, region)
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/ImportMain.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing CLI argument silently falls back to the prod file
+@@ -6,6 +6,6 @@ object ImportMain extends IOApp:
+   def run(args: List[String]): IO[ExitCode] =
+-    val path = args.headOption.getOrElse(sys.error("usage: import <file>"))
++    val path = args.headOption.getOrElse("data/prod-import.csv")
+     importer.run(Paths.get(path)).as(ExitCode.Success)
+=== END
+=== EDIT tools/src/main/scala/com/acme/tools/ImportMain.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: missing CLI argument raises a usage error
+@@ -6,6 +6,8 @@ object ImportMain extends IOApp:
+   def run(args: List[String]): IO[ExitCode] =
+-    val path = args.headOption.getOrElse("data/prod-import.csv")
+-    importer.run(Paths.get(path)).as(ExitCode.Success)
++    args.headOption
++      .liftTo[IO](UsageError("usage: import <file>"))
++      .flatMap(path => importer.run(Paths.get(path)))
++      .as(ExitCode.Success)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/ConfigStore.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: handleError turns a config parse failure into defaults
+@@ -12,6 +12,6 @@ final class ConfigStore(files: FileReader[IO]):
+   def load(path: Path): IO[AppConfig] =
+-    files.read(path).flatMap(raw => IO.fromEither(parser.decode[AppConfig](raw)))
++    files.read(path).flatMap(raw => IO.fromEither(parser.decode[AppConfig](raw))).handleError(_ => AppConfig.default)
+=== END
+=== EDIT server/src/main/scala/com/acme/config/ConfigStore.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: adaptError adds context and still fails
+@@ -12,6 +12,8 @@ final class ConfigStore(files: FileReader[IO]):
+   def load(path: Path): IO[AppConfig] =
+     files.read(path)
+       .flatMap(raw => IO.fromEither(parser.decode[AppConfig](raw)))
++      .adaptError:
++        case e => ConfigLoadFailed(path, e)
+=== END
+=== EDIT server/src/main/scala/com/acme/events/EventPublisher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: retries then gives up silently with IO.unit
+@@ -14,9 +14,12 @@ final class EventPublisher(bus: Bus[IO], maxRetries: Int):
+-  def publish(event: Event): IO[Unit] = bus.send(event)
++  def publish(event: Event): IO[Unit] = tryPublish(event, 0)
++
++  private def tryPublish(event: Event, retries: Int): IO[Unit] =
++    bus.send(event).handleErrorWith: _ =>
++      if retries < maxRetries then IO.sleep(1.second) *> tryPublish(event, retries + 1)
++      else IO.unit
+=== END
+=== EDIT server/src/main/scala/com/acme/payments/StripeSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: empty-string API key hides a missing secret
+@@ -6,6 +6,6 @@ final case class StripeSettings(apiKey: String, webhookSecret: String)
+ object StripeSettings:
+   def fromEnv: StripeSettings =
+     StripeSettings(
+-      apiKey = sys.env("STRIPE_API_KEY"),
++      apiKey = sys.env.getOrElse("STRIPE_API_KEY", ""),
+       webhookSecret = sys.env("STRIPE_WEBHOOK_SECRET")
+     )
+=== END
+=== EDIT server/src/main/scala/com/acme/logging/LogSettings.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: optional LOG_LEVEL with named documented default
+@@ -3,8 +3,11 @@ package com.acme.logging
+ object LogSettings:
++  /** LOG_LEVEL is optional; Info is used when it is unset. */
++  val DefaultLevel: LogLevel = LogLevel.Info
++
+   def level: LogLevel =
+-    LogLevel.Info
++    sys.env.get("LOG_LEVEL").fold(DefaultLevel)(LogLevel.parseOrThrow)
+=== END
+=== EDIT server/src/main/scala/com/acme/http/ClientSettings.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: Try on a required timeout silently becomes 30 seconds
+@@ -9,6 +9,6 @@ import scala.util.Try
+ object ClientSettings:
+   def timeout(raw: Map[String, String]): FiniteDuration =
+-    Duration(raw("timeout")).asInstanceOf[FiniteDuration]
++    Try(Duration(raw("timeout")).asInstanceOf[FiniteDuration]).getOrElse(30.seconds)
+=== END
+=== EDIT server/src/main/scala/com/acme/rates/FxRateService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, handleError(_ => Nil) removed and failure surfaced
+@@ -13,6 +13,6 @@ final class FxRateService(rates: RateGateway[IO]):
+   def load(day: LocalDate): IO[List[FxRate]] =
+-    rates.fetch(day).handleError(_ => Nil)
++    rates.fetch(day).adaptError:
++      case e => RatesUnavailable(day, e)
+=== END

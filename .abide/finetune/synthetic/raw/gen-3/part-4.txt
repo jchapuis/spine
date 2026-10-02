@@ -1,0 +1,366 @@
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/FirmwareRolloutService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: rollout service holds the concrete ProvisioningService
+@@ -4,10 +4,12 @@ import cats.effect.Async
+-final class FirmwareRolloutService[F[_]: Async](devices: DeviceRepository[F]):
++final class FirmwareRolloutService[F[_]: Async](devices: DeviceRepository[F], provisioning: ProvisioningService[F]):
+
+   def rollout(model: DeviceModel, version: FirmwareVersion): F[Int] =
+-    devices.setTargetVersion(model, version)
++    devices.setTargetVersion(model, version).flatTap: _ =>
++      provisioning.refreshConfigs(model)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/billing/UsageBillingService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: billing depends on concrete UsageMeteringService
+@@ -2,9 +2,11 @@ package com.acme.telemetry.billing
+
+ final class UsageBillingService[F[_]: Monad](
+-    invoices: InvoiceRepository[F]
++    invoices: InvoiceRepository[F],
++    metering: UsageMeteringService[F]
+ ):
+
+   def invoiceFor(owner: OwnerId, month: YearMonth): F[Invoice] =
+-    invoices.draft(owner, month)
++    metering.readingsIn(owner, month).flatMap(count => invoices.draft(owner, month, count))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/AlertAckService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: two concrete services as constructor fields
+@@ -5,8 +5,11 @@ import com.acme.telemetry.devices.DeviceService
+
+-final class AlertAckService[F[_]: Monad](alerts: AlertRepository[F]):
++final class AlertAckService[F[_]: Monad](
++    alerts: AlertRepository[F],
++    deviceService: DeviceService[F],
++    escalationService: AlertEscalationService[F]
++):
+
+   def ack(id: AlertId, by: UserId): F[Unit] =
+-    alerts.markAcked(id, by)
++    alerts.markAcked(id, by) *> escalationService.cancel(id)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/RawReadingParser.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing device timestamp replaced by server clock
+@@ -10,5 +10,6 @@ object RawReadingParser:
+   def toReading(raw: RawReading, receivedAt: Instant): Reading =
+-    raw.measuredAt.fold(throw MissingTimestamp(raw.deviceId))(Reading.at(raw, _))
++    Reading.at(raw, raw.measuredAt.getOrElse(Instant.now()))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingFlushJob.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: attempt.void discards flush failures
+@@ -16,6 +16,6 @@ final class ReadingFlushJob[F[_]: Async](writer: ReadingWriter[F], buffer: BatchBuffer[F]):
+   def tick: F[Unit] =
+     buffer.drain.flatMap: batch =>
+-      writer.flush(batch)
++      writer.flush(batch).attempt.void
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/gateway/GatewayService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: device-set diff and multi-repo sync inlined in service
+@@ -14,6 +14,14 @@ final class GatewayService[F[_]: Monad](gateways: GatewayRepository[F], devices: DeviceRepository[F]):
+   def sync(id: GatewayId, reported: Set[DeviceId]): F[SyncResult] =
+-    logic.sync(id, reported)
++    for
++      known <- devices.idsFor(id)
++      added = reported -- known
++      removed = known -- reported
++      _ <- devices.attach(id, added.toList)
++      _ <- devices.detach(id, removed.toList)
++      _ <- gateways.touch(id)
++    yield SyncResult(added.size, removed.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/ThresholdRepository.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: repository algebra turned into object with concrete skunk code, no trait
+@@ -1,6 +1,12 @@
+ package com.acme.telemetry.alerts
+
+-trait ThresholdRepository[F[_]]:
+-  def forDevice(id: DeviceId): F[List[Threshold]]
++object ThresholdRepository:
++  def forDevice(pool: Resource[IO, Session[IO]], id: DeviceId): IO[List[Threshold]] =
++    pool.use(_.execute(Sql.forDevice)(id))
++
++  def replace(pool: Resource[IO, Session[IO]], id: DeviceId, next: List[Threshold]): IO[Unit] =
++    pool.use: session =>
++      session.transaction.use: _ =>
++        session.execute(Sql.deleteAll)(id) *> next.traverse_(t => session.execute(Sql.insert)((id, t)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/BatchTiming.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: cfgTtl / rdgBuf abbreviations
+@@ -6,6 +6,8 @@ final class BatchTiming[F[_]: Clock: Monad](metrics: Metrics[F]):
++  private val cfgTtl = 5.minutes
++  private val rdgBuf = Ref.unsafe[F, List[FiniteDuration]](Nil)
+
+   def record(took: FiniteDuration): F[Unit] =
+-    metrics.observe("batch_flush", took)
++    rdgBuf.update(took :: _) *> metrics.observe("batch_flush", took)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/alerts/EscalationPolicy.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung metaphor for escalation level
+@@ -4,8 +4,8 @@ object EscalationPolicy:
+-  def levelFor(age: FiniteDuration): EscalationLevel =
+-    if age > 2.hours then EscalationLevel.Page
+-    else if age > 30.minutes then EscalationLevel.Email
+-    else EscalationLevel.Dashboard
++  def rungFor(age: FiniteDuration): EscalationRung =
++    if age > 2.hours then EscalationRung.Page
++    else if age > 30.minutes then EscalationRung.Email
++    else EscalationRung.Dashboard
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingReplay.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft sequencing effects instead of traverse_/foldMap
+@@ -9,6 +9,8 @@ final class ReadingReplay[F[_]: Monad](writer: ReadingWriter[F]):
+   def replay(batches: List[Chunk[Reading]]): F[Unit] =
+-    batches.traverse_(writer.flush)
++    batches.foldLeft(Monad[F].unit): (acc, batch) =>
++      acc.flatMap(_ => writer.flush(batch))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/OverviewService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: three independent repository calls nested via flatMap
+@@ -11,7 +11,10 @@ final class OverviewService[F[_]: Monad](devices: DeviceRepository[F], alerts: AlertRepository[F], readings: ReadingRepository[F]):
+   def overview: F[Overview] =
+-    (devices.count, alerts.openCount, readings.countToday).mapN(Overview.apply)
++    devices.count.flatMap: deviceCount =>
++      alerts.openCount.flatMap: openAlerts =>
++        readings.countToday.map: today =>
++          Overview(deviceCount, openAlerts, today)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/DeviceCleanupService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: calls concrete ReadingQueryService plus inlined cleanup steps
+@@ -8,9 +8,17 @@ final class DeviceCleanupService[F[_]: Monad](
+-    devices: DeviceRepository[F]
++    devices: DeviceRepository[F],
++    queryService: ReadingQueryService[F]
+ ):
+
+-  def cleanup(id: DeviceId): F[Unit] = logic.cleanup(id)
++  def cleanup(id: DeviceId): F[Unit] =
++    for
++      recent <- queryService.window(id, now.minus(30, ChronoUnit.DAYS), now)
++      _ <- if recent.isEmpty then devices.markDecommissioned(id) else Monad[F].unit
++      _ <- devices.clearTags(id)
++      _ <- devices.releaseSlot(id)
++    yield ()
+=== END
+
+=== EDIT app/src/main/scala/com/acme/telemetry/ui/AlertPanel.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: independent effects chained with flatMap and abbreviated names
+@@ -18,8 +18,10 @@ object AlertPanel:
+-  def load(api: Api): IO[PanelState] =
+-    (api.alerts, api.devices).parMapN(PanelState.apply)
++  def load(api: Api): IO[PanelState] =
++    api.alerts.flatMap: alrts =>
++      api.devices.map: devs =>
++        PanelState(alrts, devs)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stream/RetryingSubscriber.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: transient retry with backoff, gives up and re-raises
+@@ -12,6 +12,9 @@ final class RetryingSubscriber[F[_]: Temporal](broker: Broker[F]):
+   def subscribe(topic: Topic): Stream[F, Reading] =
+-    broker.stream(topic)
++    Stream.eval(Temporal[F].unit) >> broker.stream(topic).attempts(Stream.iterate(1.second)(_ * 2).take(5)).flatMap:
++      case Right(reading) => Stream.emit(reading)
++      case Left(e) => Stream.raiseError[F](BrokerUnavailable(topic, e))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/devices/DeviceDirectory.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: trait with implementation in companion apply
+@@ -1,8 +1,14 @@
+ package com.acme.telemetry.devices
+
+ trait DeviceDirectory[F[_]]:
+   def get(id: DeviceId): F[Device]
++
++object DeviceDirectory:
++  def apply[F[_]: MonadThrow](devices: DeviceRepository[F]): DeviceDirectory[F] =
++    new DeviceDirectory[F]:
++      def get(id: DeviceId): F[Device] =
++        devices.find(id).flatMap(_.liftTo[F](DeviceNotFound(id)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/Totals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: combineAll and foldMap are the right combinators
+@@ -5,6 +5,8 @@ object Totals:
++  def merge(parts: List[Totals]): Totals = parts.combineAll
++
++  def of(results: List[WriteResult]): Totals = results.foldMap(r => Totals(r.inserted, r.rejected))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/gateway/GatewayId.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: standard abbreviations and idiomatic lambdas
+@@ -3,5 +3,7 @@ package com.acme.telemetry.gateway
++  def fromUuid(uuid: UUID): GatewayId = GatewayId(uuid.toString)
++  def fromJson(json: Json): Option[GatewayId] = json.asString.map(GatewayId(_))
++  def parse(urlSegment: String): Option[GatewayId] = Option.when(urlSegment.nonEmpty)(GatewayId(urlSegment))
++  def merge(ids: List[GatewayId]): Set[GatewayId] = ids.foldLeft(Set.empty[GatewayId])((a, b) => a + b)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingFlushJob.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, swallowed failure now logged and re-raised
+@@ -16,6 +16,8 @@ final class ReadingFlushJob[F[_]: Async: Logger](writer: ReadingWriter[F], buffer: BatchBuffer[F]):
+   def tick: F[Unit] =
+     buffer.drain.flatMap: batch =>
+-      writer.flush(batch).attempt.void
++      writer.flush(batch).onError: e =>
++        Logger[F].error(e)(s"flush of ${batch.size} readings failed")
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/stats/Downsampler.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix, jargon names replaced by plain domain names
+@@ -7,6 +7,6 @@ object Downsampler:
+-  def ask(readings: List[Reading], filler: Reading): List[Reading] =
+-    if readings.isEmpty then List(filler) else readings
++  def withPlaceholder(readings: List[Reading], placeholder: Reading): List[Reading] =
++    if readings.isEmpty then List(placeholder) else readings
+=== END
+
+=== EDIT app/src/main/scala/com/acme/telemetry/ui/ReadingChart.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Laminar component with split and domain names
+@@ -10,4 +10,9 @@ object ReadingChart:
++  def apply(readings: Signal[List[Reading]]): HtmlElement =
++    ul(
++      children <-- readings.split(_.measuredAt): (_, _, reading) =>
++        li(child.text <-- reading.map(r => f"${r.value}%.1f °C"))
++    )
+=== END
+
+=== EDIT server/src/main/scala/com/acme/telemetry/ingest/ReadingWriter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: Resource-managed writer with release, no violation
+@@ -30,4 +30,9 @@ object ReadingWriter:
++  def resource[F[_]: Async](pool: Resource[F, Session[F]]): Resource[F, ReadingWriter[F]] =
++    Resource.make(buffer.empty[F])(_.drain.flatMap(flushRemaining)).map: buf =>
++      new ReadingWriter[F](pool, buf)
+=== END
+
+=== TURN
+labels: dup=1
+note: same retention constant redefined in two files
+--- a/server/src/main/scala/com/acme/telemetry/retention/RetentionPolicy.scala
++++ b/server/src/main/scala/com/acme/telemetry/retention/RetentionPolicy.scala
+@@ -4,3 +4,4 @@ object RetentionPolicy:
++  val RawReadingTtl = 7.days
+--- a/server/src/main/scala/com/acme/telemetry/stats/CompactionJob.scala
++++ b/server/src/main/scala/com/acme/telemetry/stats/CompactionJob.scala
+@@ -4,3 +4,4 @@ object CompactionJob:
++  val RawReadingTtl = 7.days
+=== END
+
+=== TURN
+labels: dup=1
+note: same error-logging block repeated in three handlers
+--- a/server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/http/ReadingRoutes.scala
+@@ -20,3 +20,6 @@ final class ReadingRoutes(service: ReadingQueryService[IO]) extends Http4sDsl[IO]:
++      .handleErrorWith: e =>
++        logger.error(e)("request failed") *>
++          InternalServerError(ErrorBody("internal error"))
+--- a/server/src/main/scala/com/acme/telemetry/http/AlertRoutes.scala
++++ b/server/src/main/scala/com/acme/telemetry/http/AlertRoutes.scala
+@@ -20,3 +20,6 @@ final class AlertRoutes(service: AlertService[IO]) extends Http4sDsl[IO]:
++      .handleErrorWith: e =>
++        logger.error(e)("request failed") *>
++          InternalServerError(ErrorBody("internal error"))
+=== END
+
+=== TURN
+labels: dup=1
+note: expected alert fixture built twice in same suite
+--- a/app/src/test/scala/com/acme/telemetry/alerts/AlertServiceSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/alerts/AlertServiceSuite.scala
+@@ -10,3 +10,12 @@ class AlertServiceSuite extends CatsEffectSuite:
++  test("raise stores alert"):
++    val expected = Alert(AlertId(1), DeviceId("dev-7"), AlertKind.TooHot, Severity.High, Instant.parse("2025-05-01T08:00:00Z"))
++    service.raise(DeviceId("dev-7"), AlertKind.TooHot).assertEquals(expected)
++
++  test("raise notifies owner"):
++    val expected = Alert(AlertId(1), DeviceId("dev-7"), AlertKind.TooHot, Severity.High, Instant.parse("2025-05-01T08:00:00Z"))
++    service.raise(DeviceId("dev-7"), AlertKind.TooHot) *> notifier.sent.assertEquals(List(expected))
+=== END
+
+=== TURN
+labels: dup=0
+note: shared extension used in several files, defined once
+--- a/server/src/main/scala/com/acme/telemetry/util/TimeSyntax.scala
++++ b/server/src/main/scala/com/acme/telemetry/util/TimeSyntax.scala
+@@ -1,3 +1,4 @@
++extension (instant: Instant)
++  def minusDuration(d: FiniteDuration): Instant = instant.minusMillis(d.toMillis)
+--- a/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
++++ b/server/src/main/scala/com/acme/telemetry/retention/RetentionJob.scala
+@@ -9,3 +9,3 @@ final class RetentionJob[F[_]: Temporal](service: RetentionService[F]):
++    service.compact(now.minusDuration(RetentionPolicy.RawReadingTtl))
+--- a/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
++++ b/server/src/main/scala/com/acme/telemetry/stats/ArchiveExporter.scala
+@@ -9,3 +9,3 @@ final class ArchiveExporter[F[_]: Temporal](readings: ReadingRepository[F]):
++    readings.olderThan(now.minusDuration(RetentionPolicy.RawReadingTtl))
+=== END
+
+=== TURN
+labels: dup=0
+note: same literal in different domains meaning different things
+--- a/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/IngestConfig.scala
+@@ -3,3 +3,4 @@ object IngestConfig:
++  val MaxPayloadBytes = 1024
+--- a/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
++++ b/server/src/main/scala/com/acme/telemetry/devices/DeviceLimits.scala
+@@ -3,3 +3,4 @@ object DeviceLimits:
++  val MaxNameLength = 1024
+=== END
+
+=== TURN
+labels: dup=0
+note: two tests share one Fixtures value
+--- a/app/src/test/scala/com/acme/telemetry/Fixtures.scala
++++ b/app/src/test/scala/com/acme/telemetry/Fixtures.scala
+@@ -3,3 +3,4 @@ object Fixtures:
++  val hotAlert = Alert(AlertId(1), DeviceId("dev-7"), AlertKind.TooHot, Severity.High, t0)
+--- a/app/src/test/scala/com/acme/telemetry/alerts/AlertServiceSuite.scala
++++ b/app/src/test/scala/com/acme/telemetry/alerts/AlertServiceSuite.scala
+@@ -10,3 +10,6 @@ class AlertServiceSuite extends CatsEffectSuite:
++  test("raise stores alert")(service.raise(DeviceId("dev-7"), AlertKind.TooHot).assertEquals(Fixtures.hotAlert))
++  test("raise notifies owner")(service.raise(DeviceId("dev-7"), AlertKind.TooHot) *> notifier.sent.assertEquals(List(Fixtures.hotAlert)))
+=== END
+
+=== TURN
+labels: dup=0
+note: single new helper, no repetition
+--- a/server/src/main/scala/com/acme/telemetry/ingest/ReadingEncoder.scala
++++ b/server/src/main/scala/com/acme/telemetry/ingest/ReadingEncoder.scala
+@@ -1,3 +1,8 @@
++object ReadingEncoder:
++  given Encoder[Reading] = Encoder.forProduct3("device", "at", "value")(r => (r.deviceId, r.measuredAt, r.value))
++
++  def encodeBatch(batch: Chunk[Reading]): Json = batch.toList.asJson
+=== END

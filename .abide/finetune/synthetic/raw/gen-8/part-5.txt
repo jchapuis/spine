@@ -1,0 +1,151 @@
+=== EDIT server/src/main/scala/com/acme/billing/PriceService.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: missing price list falls back to zero
+@@ -15,5 +15,5 @@ final class PriceService[F[_]: Functor](prices: PriceRepository[F]):
+   def priceOf(plan: PlanId, region: Region): F[Money] =
+-    prices.find(plan, region).map(_.toRight(PriceMissing(plan, region))).rethrow
++    prices.find(plan, region).map(_.getOrElse(Money.zero))
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/ApiKeyRoutes.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: key revocation failure returns 204 anyway
+@@ -18,5 +18,6 @@ final class ApiKeyRoutes[F[_]: Concurrent](keys: ApiKeyService[F]) extends Http4sDsl[F]:
+     case DELETE -> Root / "keys" / UUIDVar(id) =>
+-      keys.revoke(ApiKeyId(id)) *> NoContent()
++      keys.revoke(ApiKeyId(id)).attempt *> NoContent()
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceExporter.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: exporter service holds concrete ReportService
+@@ -4,8 +4,9 @@ import cats.effect.Sync
+-final class InvoiceExporter[F[_]: Sync](invoices: InvoiceRepository[F]):
++final class InvoiceExporter[F[_]: Sync](invoices: InvoiceRepository[F], reports: ReportService[F]):
+   def csv(owner: UserId): F[String] =
+-    invoices.all(owner).map(Csv.render)
++    reports.monthly(owner).map(_.invoices).map(Csv.render)
+=== END
+=== EDIT server/src/main/scala/com/acme/users/OnboardingService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: constructor takes concrete MailService and BillingService
+@@ -6,8 +6,9 @@ final class OnboardingService[F[_]: Sync](
+-  users: UserRepository[F]
++  users: UserRepository[F],
++  mail: MailService[F],
++  billing: BillingService[F]
+ ):
+   def welcome(id: UserId): F[Unit] =
+-    users.markWelcomed(id)
++    users.markWelcomed(id) *> mail.sendWelcome(id) *> billing.startTrial(id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/TaxService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: tax computation steps inlined in service method
+@@ -12,6 +12,11 @@ final class TaxService[F[_]: Sync](rates: TaxRateRepository[F]):
++  def taxFor(invoice: Invoice, country: Country): F[Money] =
++    rates.forCountry(country).map: rate =>
++      val exempt  = invoice.lines.filter(_.exempt).map(_.amount).combineAll
++      val taxable = invoice.total - exempt
++      val gross   = taxable * rate.value
++      if country.reverseCharge then Money.zero else gross.rounded
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CardAlgebra.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra shipped as object with logic, no trait
+@@ -1,2 +1,9 @@
++object CardAlgebra:
++  def validate(card: CardInput, today: LocalDate): Either[CardError, Card] =
++    for
++      number <- Luhn.check(card.number).toRight(CardError.BadNumber)
++      expiry <- Either.cond(card.expiry.isAfter(today), card.expiry, CardError.Expired)
++    yield Card(number, expiry)
+=== END
+=== EDIT server/src/main/scala/com/acme/users/UserDeletion.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: GDPR deletion workflow inlined in Service
+@@ -10,6 +10,12 @@ final class UserDeletion[F[_]: Sync](users: UserRepository[F], sessions: SessionRepository[F], invoices: InvoiceRepository[F]):
++  def delete(id: UserId): F[Unit] =
++    for
++      open <- invoices.openFor(id)
++      _    <- Sync[F].raiseWhen(open.nonEmpty)(OpenInvoices(id))
++      _    <- sessions.revokeAll(id)
++      _    <- invoices.anonymise(id)
++      _    <- users.delete(id)
++    yield ()
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PlanLabels.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: prm and dsc abbreviations
+@@ -5,4 +5,5 @@ object PlanLabels:
++  def label(prm: Plan, dsc: Option[Discount]): String =
++    dsc.fold(prm.name)(d => s"${prm.name} (-${d.percent}%)")
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/PlanFixtures.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ladder metaphor name in fixtures
+@@ -3,4 +3,5 @@ object PlanFixtures:
++  val ladder: List[Plan] = List(Plan.Free, Plan.Pro, Plan.Team)
++  val topRung: Plan = ladder.last
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/StatementService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: three independent fetches chained with flatMap
+@@ -14,6 +14,9 @@ final class StatementService[F[_]: Monad](users: UserRepository[F], invoices: InvoiceRepository[F], credits: CreditRepository[F]):
++  def statement(id: UserId): F[Statement] =
++    users.get(id).flatMap: user =>
++      invoices.recent(id).flatMap: recent =>
++        credits.balance(id).map(balance => Statement(user, recent, balance))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/RevenueLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: manual foldLeft sum of Money should be foldMap
+@@ -8,4 +8,6 @@ object RevenueLogic:
+   def monthlyRecurring(subs: List[Subscription]): Money =
+-    subs.foldMap(_.plan.price)
++    subs.foldLeft(Money.zero): (acc, sub) =>
++      acc + sub.plan.price
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/BillingFlowSuite.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: sequential setup of independent stores in test
+@@ -10,6 +10,8 @@ class BillingFlowSuite extends CatsEffectSuite:
++  private val fixture = ResourceFunFixture(
++    createUsers.flatMap: users =>
++      createInvoices.map(invoices => Env(users, invoices))
++  )
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/WelcomeService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=1
+note: calls concrete MailService; independent effects chained
+@@ -11,6 +11,8 @@ final class WelcomeService[F[_]: Monad](users: UserRepository[F], mail: MailService[F]):
++  def run(id: UserId): F[Unit] =
++    users.count.flatMap: count =>
++      mail.queueLength.flatMap: queued =>
++        mail.sendDigest(count, queued)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/DiscountLogic.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: dependent flatMap is correct
+@@ -6,6 +6,8 @@ trait DiscountLogic[F[_]: Monad]:
++  def effectivePrice(plan: PlanId, code: CouponCode): F[Money] =
++    prices.get(plan).flatMap: price =>
++      coupons.percentOff(code).map(pct => price - price * pct / 100)
+=== END
+=== EDIT server/src/test/scala/com/acme/users/UserGenerators.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: separate constants meaning different things
+@@ -4,4 +4,6 @@ object UserGenerators:
++  val MaxEmailLength = 254
++  val MaxDisplayNameLength = 254
++  val email: Gen[Email] = Gen.alphaStr.map(s => Email.unsafe(s.take(MaxEmailLength) + "@acme.test"))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/UpgradeService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: calls concrete SubscriptionService and inlines upgrade rules
+@@ -9,6 +9,12 @@ final class UpgradeService[F[_]: Monad](plans: PlanRepository[F], subs: SubscriptionService[F]):
++  def upgrade(owner: UserId, target: PlanId): F[Subscription] =
++    subs.activeFor(owner).flatMap: current =>
++      plans.get(target).flatMap: plan =>
++        val allowed = plan.price > current.plan.price && !current.pendingCancel
++        if allowed then subs.changePlan(current.id, plan)
++        else UpgradeRejected(current.id).raiseError[F, Subscription]
+=== END

@@ -1,0 +1,80 @@
+#!/bin/sh
+# Re-running reinstalls cleanly; existing non-spine hooks are backed up
+# to pre-commit.bak.<timestamp> before being replaced.
+set -e
+
+if [ $# -lt 1 ]; then
+  echo "install-gate: usage: install-gate <project> [--uninstall|--dry-run]" >&2
+  exit 1
+fi
+
+PROJECT_NAME="$1"
+MODE="install"
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --uninstall) MODE="uninstall" ;;
+    --dry-run)   MODE="dry-run" ;;
+    *) echo "install-gate: unknown flag $1" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SPINE_ROOT="$(cd "$SKILL_DIR/../../.." && pwd)"
+TEMPLATE="$SKILL_DIR/templates/pre-commit.sh"
+if [ "$PROJECT_NAME" = "spine" ]; then
+  TARGET_PROJECT="$SPINE_ROOT"
+else
+  TARGET_PROJECT="$SPINE_ROOT/projects/$PROJECT_NAME"
+fi
+
+if [ ! -d "$TARGET_PROJECT" ]; then
+  echo "install-gate: project not found at $TARGET_PROJECT" >&2
+  exit 1
+fi
+
+if [ ! -d "$TARGET_PROJECT/.git" ]; then
+  echo "install-gate: $TARGET_PROJECT is not a git repo" >&2
+  exit 1
+fi
+
+HOOK_DIR="$TARGET_PROJECT/.git/hooks"
+HOOK_PATH="$HOOK_DIR/pre-commit"
+MARKER="# Installed by compliance-gate/bin/install-gate."
+
+mkdir -p "$HOOK_DIR"
+
+case "$MODE" in
+  uninstall)
+    if [ ! -f "$HOOK_PATH" ]; then
+      echo "install-gate: no hook at $HOOK_PATH; nothing to remove"
+      exit 0
+    fi
+    if ! grep -q "$MARKER" "$HOOK_PATH" 2>/dev/null; then
+      echo "install-gate: $HOOK_PATH was not installed by this script — leaving it alone" >&2
+      exit 1
+    fi
+    rm -f "$HOOK_PATH"
+    echo "install-gate: removed $HOOK_PATH"
+    ;;
+  install|dry-run)
+    if [ -f "$HOOK_PATH" ] && ! grep -q "$MARKER" "$HOOK_PATH" 2>/dev/null; then
+      BACKUP="$HOOK_PATH.bak.$(date +%s)"
+      if [ "$MODE" = "dry-run" ]; then
+        echo "install-gate: would back up existing hook to $BACKUP"
+      else
+        mv "$HOOK_PATH" "$BACKUP"
+        echo "install-gate: backed up existing hook to $BACKUP"
+      fi
+    fi
+    if [ "$MODE" = "dry-run" ]; then
+      echo "install-gate: would write $HOOK_PATH (SPINE_ROOT=$SPINE_ROOT)"
+      exit 0
+    fi
+    sed "s|__SPINE_ROOT__|$SPINE_ROOT|g" "$TEMPLATE" > "$HOOK_PATH"
+    chmod +x "$HOOK_PATH"
+    echo "install-gate: installed $HOOK_PATH (SPINE_ROOT=$SPINE_ROOT)"
+    ;;
+esac

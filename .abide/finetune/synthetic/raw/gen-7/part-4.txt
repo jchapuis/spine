@@ -1,0 +1,305 @@
+=== EDIT web/src/main/scala/com/acme/shop/api/TapirClients.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: tapir client error mapped to empty list
+@@ -14,7 +14,7 @@ final class TapirClients(interpreter: SttpClientInterpreter, backend: SttpBackend[Future, Any]):
+   def products(): Future[List[Product]] =
+     interpreter
+       .toRequestThrowDecodeFailures(Endpoints.listProducts, Some(base))
+       .apply(())
+       .send(backend)
+-      .map(_.body.fold(err => throw ApiError(err), identity))
++      .map(_.body.toOption.getOrElse(Nil))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/live/LiveSocket.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: malformed websocket frame silently replaced by an empty object
+@@ -9,6 +9,6 @@ object LiveSocket:
+   def parse(raw: String): js.Dynamic =
+-    Try(js.JSON.parse(raw).asInstanceOf[js.Dynamic]).fold(e => throw MalformedFrame(raw, e), identity)
++    Try(js.JSON.parse(raw).asInstanceOf[js.Dynamic]).getOrElse(js.Dynamic.literal())
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/stock/StockQueries.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: database error reported as out of stock
+@@ -12,5 +12,5 @@ final class StockQueries[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def inStock(sku: Sku): F[Boolean] =
+-    pool.use(_.unique(selectStock)(sku)).map(_ > 0)
++    pool.use(_.unique(selectStock)(sku)).map(_ > 0).handleError(_ => false)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/subscriptions/SubscriptionService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: injects InvoiceService
+@@ -3,9 +3,10 @@ package com.acme.shop.subscriptions
+-final class SubscriptionService[F[_]: Monad](subs: SubscriptionRepository[F], clock: Clock[F]):
++final class SubscriptionService[F[_]: Monad](subs: SubscriptionRepository[F], invoices: InvoiceService[F]):
+   def renew(sub: SubscriptionId): F[Invoice] =
+-    subs.get(sub).flatMap(s => subs.extend(s))
++    subs.get(sub).flatMap(s => subs.extend(s) *> invoices.issue(s.order))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/recommend/RecommendationService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: two concrete services as constructor fields
+@@ -2,7 +2,7 @@ package com.acme.shop.recommend
+-final class RecommendationService[F[_]: Monad](history: HistoryRepository[F]):
++final class RecommendationService[F[_]: Monad](products: ProductService[F], orders: OrderService[F]):
+   def forUser(user: UserId): F[List[Product]] =
+-    history.bought(user).flatMap(_.traverse(history.related))
++    orders.recent(user).flatMap(_.traverse(o => products.related(o.product)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/digest/DigestService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: digest service delegates to NotificationService
+@@ -4,8 +4,10 @@ import com.acme.shop.notify.NotificationService
+-final class DigestService[F[_]: Monad](digests: DigestRepository[F]):
++final class DigestService[F[_]: Monad](digests: DigestRepository[F], notifications: NotificationService[F]):
+   def send(user: UserId): F[Unit] =
+-    digests.build(user).void
++    digests.build(user).flatMap(notifications.push(user, _))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/imports/ImportService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: ImportService calls CatalogService
+@@ -5,6 +5,8 @@ final class ImportService[F[_]: Monad](parser: CsvParser[F], catalog: CatalogService[F]):
++  def importAll(rows: List[RawProduct]): F[Int] =
++    rows.traverse(catalog.register).map(_.size)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/pricing/PricingService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: tiered pricing computed inline in service
+@@ -9,6 +9,13 @@ final class PricingService[F[_]: Monad](rates: RateRepository[F]):
++  def quote(items: List[CartItem], customer: CustomerId): F[Money] =
++    rates.forCustomer(customer).map: rate =>
++      val gross = items.map(i => i.price * i.quantity).foldMap(identity)
++      val volume = items.map(_.quantity).sum
++      val tier = if volume > 100 then BigDecimal("0.85") else if volume > 20 then BigDecimal("0.95") else BigDecimal(1)
++      (gross * tier * rate.factor).setScale(2, RoundingMode.HALF_EVEN)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/users/UserDirectory.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: repository algebra as object with concrete skunk logic and no trait
+@@ -0,0 +1,12 @@
++package com.acme.shop.users
++
++object UserDirectory:
++  private val byId: Query[UserId, User] =
++    sql"SELECT id, name, email FROM users WHERE id = $userId".query(user)
++
++  def find(pool: Resource[IO, Session[IO]], id: UserId): IO[Option[User]] =
++    pool.use(_.option(byId)(id))
++
++  def all(pool: Resource[IO, Session[IO]]): IO[List[User]] =
++    pool.use(_.execute(sql"SELECT id, name, email FROM users".query(user)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/billing/InvoiceService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: rendering workflow inlined in service
+@@ -12,6 +12,13 @@ final class InvoiceService[F[_]: Monad](invoices: InvoiceRepository[F], pdf: PdfRenderer[F], store: BlobStore[F]):
++  def render(id: InvoiceId): F[Url] =
++    for
++      invoice <- invoices.get(id)
++      lines    = invoice.lines.filter(_.amount.nonZero).sortBy(_.position)
++      bytes   <- pdf.render(invoice.copy(lines = lines))
++      url     <- store.put(s"invoices/${id.value}.pdf", bytes)
++      _       <- invoices.attachDocument(id, url)
++    yield url
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/telemetry/TelemetrySink.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra implemented directly as an object
+@@ -0,0 +1,10 @@
++package com.acme.shop.telemetry
++
++object TelemetrySink:
++  def report(event: UiEvent)(using backend: SttpBackend[Future, Any]): Future[Unit] =
++    basicRequest
++      .post(uri"/telemetry")
++      .body(event.asJson.noSpaces)
++      .send(backend)
++      .map(_ => ())
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dialogs/Confirm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: ask is jargon for confirm
+@@ -4,6 +4,7 @@ object Confirm:
++  def ask(message: String): IO[Boolean] =
++    IO(dom.window.confirm(message))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/profile/ProfileView.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: usrPrefs and fmtDt abbreviations
+@@ -8,6 +8,8 @@ object ProfileView:
++  private def fmtDt(at: Instant): String = at.toString.take(10)
++  private def render(usrPrefs: Prefs, joined: Instant): HtmlElement =
++    div(p(usrPrefs.locale.value), p(fmtDt(joined)))
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/layout/Split.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: glue is a metaphor for combined signal
+@@ -6,6 +6,7 @@ object Split:
+   def apply(left: Signal[Int], right: Signal[Int]): HtmlElement =
++    val glue = left.combineWith(right).map((l, r) => l + r)
+     div(
+-      child.text <-- left.combineWith(right).map((l, r) => (l + r).toString)
++      child.text <-- glue.map(_.toString)
+     )
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/money/Totals.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: manual foldLeft over a monoid
+@@ -4,5 +4,5 @@ object Totals:
+   def sum(prices: List[Money]): Money =
+-    prices.combineAll
++    prices.foldLeft(Money.zero)(_ + _)
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/forms/ContactForm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent parsers chained with flatMap
+@@ -6,5 +6,5 @@ object ContactForm:
+   def parse(raw: RawContact): Either[FieldError, Contact] =
+-    (parseName(raw.name), parseEmail(raw.email)).mapN(Contact.apply)
++    parseName(raw.name).flatMap(name => parseEmail(raw.email).map(email => Contact(name, email)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/dashboard/DashboardQueries.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: independent queries sequenced in a for instead of parMapN
+@@ -10,5 +10,8 @@ final class DashboardQueries[F[_]: Parallel: Monad](users: UserQueries[F], orders: OrderQueries[F]):
+   def summary: F[Summary] =
+-    (users.activeCount, orders.openCount).parMapN(Summary.apply)
++    for
++      active <- users.activeCount
++      open   <- orders.openCount
++    yield Summary(active, open)
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/events/SessionStats.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: foldLeft with combine should be foldMap
+@@ -4,5 +4,5 @@ object SessionStats:
+   def of(events: List[UiEvent]): Stats =
+-    events.foldMap(Stats.of)
++    events.foldLeft(Stats.empty)((stats, event) => stats.combine(Stats.of(event)))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/catalog/CatalogService.scala
+labels: fail-loud=1 service-dep=1 logic=0 names=0 cats=0
+note: concrete PricingService field and recover swallows lookup errors
+@@ -6,8 +6,10 @@ final class CatalogService[F[_]: Sync](items: ItemRepository[F], pricing: PricingService[F]):
++  def priced(sku: Sku): F[Option[Money]] =
++    pricing.quote(List(CartItem(sku, 1))).map(Option(_)).recover { case _ => None }
+=== END
+
+=== EDIT shared/src/main/scala/com/acme/shop/config/Cfg.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=1 cats=0
+note: object algebra with concrete logic and abbreviated identifiers
+@@ -0,0 +1,9 @@
++package com.acme.shop.config
++
++object RemoteCfg:
++  def fetchCfg(using backend: SttpBackend[IO, Any]): IO[AppCfg] =
++    basicRequest.get(uri"/config.json").response(asJson[AppCfg]).send(backend)
++      .flatMap(rsp => rsp.body.liftTo[IO])
++      .map(cfg => cfg.copy(apiUrl = cfg.apiUrl.stripSuffix("/")))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/admin/AdminReport.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=1
+note: independent for steps with abbreviated names
+@@ -8,5 +8,9 @@ final class AdminReport[F[_]: Monad](repo: ReportRepository[F]):
++  def build: F[Report] =
++    for
++      usrs   <- repo.users
++      ordrs  <- repo.orders
++    yield Report(usrs, ordrs)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/api/OrderEndpoints.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: neutral tapir endpoint definition
+@@ -5,6 +5,10 @@ object OrderEndpoints:
++  val getOrder: PublicEndpoint[OrderId, ErrorBody, Order, Any] =
++    endpoint.get
++      .in("orders" / path[OrderId]("id"))
++      .errorOut(statusCode(StatusCode.NotFound).and(jsonBody[ErrorBody]))
++      .out(jsonBody[Order])
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/routing/AppRouter.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: neutral waypoint router setup
+@@ -6,6 +6,10 @@ object AppRouter:
++  val router = Router[Page](
++    routes = List(homeRoute, ordersRoute, orderRoute),
++    getPageTitle = _.title,
++    serializePage = pg => pg.toJson,
++    deserializePage = raw => decode[Page](raw).fold(e => throw RouterError(e), identity)
++  )(popStateEvents = windowEvents(_.onPopState), owner = unsafeWindowOwner)
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/stock/StockQueries.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, database error no longer reported as out of stock
+@@ -12,5 +12,5 @@ final class StockQueries[F[_]: MonadCancelThrow](pool: Resource[F, Session[F]]):
+   def inStock(sku: Sku): F[Boolean] =
+-    pool.use(_.unique(selectStock)(sku)).map(_ > 0).handleError(_ => false)
++    pool.use(_.unique(selectStock)(sku)).map(_ > 0)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/dialogs/Confirm.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, ask renamed to confirm
+@@ -4,7 +4,7 @@ object Confirm:
+-  def ask(message: String): IO[Boolean] =
++  def confirm(message: String): IO[Boolean] =
+     IO(dom.window.confirm(message))
+=== END
+
+=== EDIT server/src/main/scala/com/acme/shop/mail/DigestMailer.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, service holds repository and HTTP client traits
+@@ -3,9 +3,12 @@ package com.acme.shop.mail
+-final class DigestMailer[F[_]: Monad](digests: DigestRepository[F]):
++final class DigestMailer[F[_]: Monad](digests: DigestRepository[F], http: HttpClient[F], users: UserLookup[F]):
++  def deliver(user: UserId): F[Unit] =
++    (digests.build(user), users.email(user)).mapN((digest, email) => (email, digest)).flatMap: (email, digest) =>
++      http.post(Uri.unsafeFromString("/mail"), MailRequest(email, digest).asJson).void
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/users/UserLoader.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, manual accumulator replaced by traverse
+@@ -6,8 +6,6 @@ final class UserLoader(api: UserApi[IO]):
+   def loadAll(ids: List[UserId]): IO[List[User]] =
+-    ids.foldLeft(IO.pure(List.empty[User])): (acc, id) =>
+-      acc.flatMap(users => api.user(id).map(_ :: users))
++    ids.parTraverse(api.user)
+=== END
+
+=== EDIT web/src/main/scala/com/acme/shop/ui/orders/OrderDetailView.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: hard negative, missing order is rendered as an explicit not-found view
+@@ -9,7 +9,9 @@ object OrderDetailView:
+   def apply(order: Signal[Option[Order]]): HtmlElement =
+     div(
+-      child <-- order.map(o => OrderBody(o.getOrElse(Order.empty)))
++      child <-- order.map:
++        case Some(found) => OrderBody(found)
++        case None        => NotFoundView("Order not found")
+     )
+=== END
+

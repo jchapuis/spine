@@ -1,0 +1,163 @@
+=== EDIT server/src/main/scala/com/acme/billing/SubscriptionCodecs.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: unknown interval silently becomes monthly
+@@ -9,5 +9,5 @@ object SubscriptionCodecs:
+-  val interval: Codec[Interval] = text.eimap(Interval.parse)(_.code)
++  val interval: Codec[Interval] = text.imap(s => Interval.parse(s).getOrElse(Interval.Monthly))(_.code)
+   val status: Codec[Status] = text.eimap(Status.parse)(_.code)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/AuditService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: AuditService holds concrete UserService
+@@ -5,8 +5,9 @@ import cats.effect.Sync
+-final class AuditService[F[_]: Sync](entries: AuditRepository[F]):
++final class AuditService[F[_]: Sync](entries: AuditRepository[F], users: UserService[F]):
+   def record(actor: UserId, action: Action): F[Unit] =
+-    entries.append(AuditEntry(actor, action))
++    users.find(actor).flatMap(u => entries.append(AuditEntry(u.map(_.email), action)))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/TrialService.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: conversion rules inlined in Service method
+@@ -24,6 +24,12 @@ final class TrialService[F[_]: Sync](trials: TrialRepository[F], clock: Clock[F]):
++  def convertEligible: F[List[TrialId]] =
++    clock.realTimeInstant.flatMap: now =>
++      trials.endingBefore(now).flatMap: ending =>
++        val eligible = ending.filter(t => t.paymentMethod.nonEmpty && !t.optedOut)
++        val grouped  = eligible.groupBy(_.plan)
++        grouped.toList.traverse_((plan, ts) => trials.convert(ts.map(_.id), plan)).as(eligible.map(_.id))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/OrderLine.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: qty and amt abbreviations
+@@ -4,4 +4,6 @@ final case class OrderLine(
++  qty: Int,
++  amt: Money
+ ):
++  def lineTotal: Money = amt * qty
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/SeatCounts.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: fold with Map accumulator should be foldMap
+@@ -7,5 +7,7 @@ object SeatCounts:
+   def byPlan(subs: List[Subscription]): Map[PlanId, Int] =
+-    subs.foldMap(s => Map(s.plan -> s.seats))
++    subs.foldLeft(Map.empty[PlanId, Int]): (acc, s) =>
++      acc.updated(s.plan, acc.getOrElse(s.plan, 0) + s.seats)
+=== END
+=== EDIT server/src/test/scala/com/acme/billing/InMemoryBilling.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: setup of independent refs chained with flatMap instead of mapN
+@@ -8,5 +8,6 @@ object InMemoryBilling:
+   def create: IO[BillingFixture] =
+-    (Ref.of[IO, Map[UserId, User]](Map.empty), Ref.of[IO, List[Invoice]](Nil)).mapN(BillingFixture.apply)
++    Ref.of[IO, Map[UserId, User]](Map.empty).flatMap: users =>
++      Ref.of[IO, List[Invoice]](Nil).map: invoices =>
++        BillingFixture(users, invoices)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/CreditService.scala
+labels: fail-loud=0 service-dep=1 logic=1 names=0 cats=0
+note: calls concrete InvoiceService and inlines credit allocation
+@@ -12,6 +12,11 @@ final class CreditService[F[_]: Monad](credits: CreditRepository[F], invoices: InvoiceService[F]):
++  def allocate(owner: UserId): F[Money] =
++    credits.balance(owner).flatMap: balance =>
++      invoices.openFor(owner).flatMap: open =>
++        val applied = open.sortBy(_.dueDate).scanLeft(balance)((left, inv) => (left - inv.total).max(Money.zero))
++        credits.setBalance(owner, applied.last).as(balance - applied.last)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/TokenRefresher.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=1 cats=0
+note: refresh failure swallowed, uses tkn abbreviation
+@@ -11,5 +11,6 @@ final class TokenRefresher[F[_]: Sync](keys: KeyStore[F], auth: AuthClient[F]):
+   def refresh(old: Token): F[Token] =
+-    auth.exchange(old.refresh)
++    auth.exchange(old.refresh).recover:
++      case _ => old.copy(tkn = old.tkn)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PromoService.scala
+labels: fail-loud=0 service-dep=1 logic=0 names=0 cats=0
+note: concrete CouponService as constructor field
+@@ -6,6 +6,7 @@ import cats.effect.Sync
+-final class PromoService[F[_]: Sync](promos: PromoRepository[F]):
++final class PromoService[F[_]: Sync](promos: PromoRepository[F], coupons: CouponService[F]):
+   def activate(id: PromoId): F[Unit] =
+-    promos.activate(id)
++    promos.activate(id) *> coupons.issueFor(id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/PaymentMethods.scala
+labels: fail-loud=0 service-dep=0 logic=1 names=0 cats=0
+note: algebra as object with concrete logic and no trait
+@@ -1,2 +1,9 @@
++object PaymentMethods:
++  def setDefault(db: Session[IO], owner: UserId, method: MethodId): IO[Unit] =
++    for
++      _ <- db.execute(MethodSql.clearDefault)(owner)
++      _ <- db.execute(MethodSql.markDefault)(owner, method)
++      _ <- IO.println(s"default set for $owner")
++    yield ()
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BalanceService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=1
+note: sequential flatMap over independent effects
+@@ -13,5 +13,6 @@ final class BalanceService[F[_]: Monad](credits: CreditRepository[F], invoices: InvoiceRepository[F]):
+   def net(owner: UserId): F[Money] =
+-    (invoices.openTotal(owner), credits.balance(owner)).mapN(_ - _)
++    invoices.openTotal(owner).flatMap: open =>
++      credits.balance(owner).map(open - _)
+=== END
+=== EDIT server/src/main/scala/com/acme/auth/SessionRefresh.scala
+labels: fail-loud=1 service-dep=0 logic=0 names=0 cats=0
+note: expired sessions renewed silently on any error
+@@ -14,5 +14,5 @@ final class SessionRefresh[F[_]: Sync](sessions: SessionRepository[F]):
+   def touch(token: SessionToken): F[Session] =
+-    sessions.get(token).flatMap(s => sessions.extend(s.id))
++    sessions.get(token).flatMap(s => sessions.extend(s.id)).handleErrorWith(_ => sessions.create(UserId.anonymous))
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/InvoiceService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: service holds algebra traits only
+@@ -6,6 +6,7 @@ import cats.effect.Async
+-final class InvoiceService[F[_]: Async](invoices: InvoiceRepository[F]):
++final class InvoiceService[F[_]: Async](invoices: InvoiceRepository[F], payments: PaymentAlgebra[F]):
+   def settle(id: InvoiceId): F[Invoice] =
+-    invoices.markPaid(id)
++    invoices.get(id).flatMap(inv => payments.charge(inv.customer, inv.total)) *> invoices.markPaid(id)
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/BillingService.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: fix diff, concrete service replaced by algebra trait
+@@ -8,7 +8,7 @@ import cats.effect.Async
+ final class BillingService[F[_]: Async](
+   invoices: InvoiceRepository[F],
+-  auth: AuthService[F]
++  auth: AuthAlgebra[F]
+ ):
+   def chargeFor(token: AccessToken, amount: Money): F[Invoice] =
+     auth.userOf(token).flatMap(user => invoices.create(user.id, amount))
+=== END
+=== EDIT server/src/test/scala/com/acme/auth/TokenCodecSpec.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: round-trip property, short lambdas
+@@ -7,4 +7,6 @@ class TokenCodecSpec extends ScalaCheckSuite:
++  property("decode inverts encode"):
++    forAll(Generators.token): token =>
++      assertEquals(TokenCodec.decode(TokenCodec.encode(token)), Right(token))
++
++  test("sorted ids"): assertEquals(List(3, 1, 2).sortBy(x => x), List(1, 2, 3))
+=== END
+=== EDIT app/src/main/scala/com/acme/ui/SubscriptionBadge.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=1 cats=0
+note: rung jargon for tier in UI
+@@ -6,4 +6,5 @@ object SubscriptionBadge:
++  def rungLabel(plan: Plan): String = plan match
++    case Plan.Free => "Free"
++    case Plan.Pro  => "Pro"
++    case Plan.Team => "Team"
+=== END
+=== EDIT server/src/main/scala/com/acme/billing/Money.scala
+labels: fail-loud=0 service-dep=0 logic=0 names=0 cats=0
+note: id and url standard, uuid fine
+@@ -5,4 +5,5 @@ object InvoiceLink:
++  def forInvoice(id: InvoiceId, base: Uri): Uri = base / "invoices" / id.value.toString
++  def uuidOf(url: Uri): Option[UUID] = url.path.segments.lastOption.flatMap(s => Try(UUID.fromString(s.encoded)).toOption)
+=== END
