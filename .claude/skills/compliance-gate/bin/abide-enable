@@ -1,0 +1,65 @@
+#!/bin/sh
+# Turn on abide's per-edit rule checks in one project, against the shared spine rubric and the local kev server.
+#
+#   abide-enable <project-dir>               link the rubric, add abide's checking hooks, point abide at kev
+#   abide-enable --uninstall <project-dir>   remove the hooks and the rubric link
+#
+# Why not `abide init`: init also installs a SessionStart hook that asks the agent to recompile the rubric whenever
+# the project's CLAUDE.md / AGENTS.md are not listed in it with matching hashes. Our rubric is hand-written and shared
+# by every project, so that recompile would overwrite it. This installs only the three checking hooks (turn start,
+# after each edit, end of turn), in the project's personal .claude/settings.local.json, and keeps both that file and
+# the rubric link out of the project's git status via .git/info/exclude.
+set -eu
+
+UNINSTALL=0
+if [ "${1:-}" = "--uninstall" ]; then UNINSTALL=1; shift; fi
+PROJECT=$(cd -- "${1:?usage: abide-enable [--uninstall] <project-dir>}" && pwd -P)
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SPINE_ROOT=$(cd -- "$SCRIPT_DIR/../../../.." && pwd -P)
+
+command -v jq >/dev/null 2>&1 || { echo "abide-enable: needs jq" >&2; exit 1; }
+command -v abide >/dev/null 2>&1 || { echo "abide-enable: install abide first: npm install -g @coldtea/abide" >&2; exit 1; }
+HOOK="$(npm root -g)/@coldtea/abide/dist/abide-hook.js"
+[ -f "$HOOK" ] || { echo "abide-enable: abide's hook script is not at $HOOK" >&2; exit 1; }
+
+SETTINGS="$PROJECT/.claude/settings.local.json"
+mkdir -p "$PROJECT/.claude"
+[ -s "$SETTINGS" ] || echo '{}' > "$SETTINGS"
+
+# Every abide entry out, whichever event it sits under; other hooks stay.
+STRIP='if .hooks then .hooks |= (with_entries(.value |= (map(.hooks |= map(select((.command // "") | contains("abide-hook.js") | not))) | map(select(.hooks | length > 0)))) | with_entries(select(.value | length > 0))) else . end
+  | if .hooks == {} then del(.hooks) else . end'
+ADD='.hooks.UserPromptSubmit += [{hooks: [{type: "command", command: ($cmd + " turn-start"), timeout: 10}]}]
+  | .hooks.PostToolUse += [{matcher: "Edit|Write|MultiEdit|apply_patch", hooks: [{type: "command", command: ($cmd + " post-tool-use"), timeout: 20}]}]
+  | .hooks.Stop += [{hooks: [{type: "command", command: ($cmd + " stop"), timeout: 30}]}]'
+
+TMP="$SETTINGS.tmp"
+if [ "$UNINSTALL" = 1 ]; then
+  jq "$STRIP" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+  [ -L "$PROJECT/.abide/rubric.json" ] && rm "$PROJECT/.abide/rubric.json"
+  echo "abide-enable: removed abide hooks and the rubric link from $PROJECT"
+  exit 0
+fi
+jq --arg cmd "node \"$HOOK\"" "$STRIP | $ADD" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+
+# The shared rubric (/projects-update makes the same link; an existing file or link is left alone).
+mkdir -p "$PROJECT/.abide"
+[ -e "$PROJECT/.abide/rubric.json" ] || ln -s "$SPINE_ROOT/.abide/rubric.json" "$PROJECT/.abide/rubric.json"
+
+# Keep both out of the project's git status, locally only.
+if git -C "$PROJECT" rev-parse --git-dir >/dev/null 2>&1; then
+  EXCLUDE="$(git -C "$PROJECT" rev-parse --absolute-git-dir)/info/exclude"
+  mkdir -p "$(dirname "$EXCLUDE")"
+  for p in .abide/ .claude/settings.local.json; do
+    git -C "$PROJECT" check-ignore -q "$p" 2>/dev/null || echo "$p" >> "$EXCLUDE"
+  done
+fi
+
+# Machine-wide: point abide at the local kev server (abide reads ~/.abide/.env from any repo).
+ENV_FILE="${ABIDE_HOME_DIR:-$HOME/.abide}/.env"
+mkdir -p "$(dirname "$ENV_FILE")"
+grep -q '^TYPESAFE_AI_BASE_URL=' "$ENV_FILE" 2>/dev/null || echo "TYPESAFE_AI_BASE_URL=http://127.0.0.1:${KEV_PORT:-8009}/v1" >> "$ENV_FILE"
+grep -q '^TYPESAFE_AI_API_KEY=' "$ENV_FILE" 2>/dev/null || echo "TYPESAFE_AI_API_KEY=local" >> "$ENV_FILE"
+chmod 600 "$ENV_FILE"
+
+echo "abide-enable: $PROJECT checks every edit against $(jq '.rules | length' "$SPINE_ROOT/.abide/rubric.json") rules; start kev-serve, then a new agent session"

@@ -14,6 +14,7 @@ compliance-gate/
     compliance-gate                     # Scala-CLI wrapper, called by hook and in-session
     install-gate                        # POSIX shell, installs the hook shim into a project
     kev-serve                           # POSIX shell, serves the local kev model abide queries
+    abide-enable                        # POSIX shell, turns abide's per-edit checks on in a project
   src/                                  # Scala-CLI source
     ComplianceGate.scala                # main + @main entry (mainargs)
     Diff.scala                          # git diff parsing
@@ -194,19 +195,37 @@ When you change a §6 rule that abide carries, edit the rubric to match.
 
 ### Enabling it on a checkout
 
-Needs Node ≥ 22 and [uv](https://docs.astral.sh/uv/). Once per machine/repo:
+Needs Node ≥ 22, [uv](https://docs.astral.sh/uv/) and `jq`. Once per machine:
 
 ```sh
-cp .env.example .env                                  # TYPESAFE_AI_BASE_URL + a throwaway key
-.claude/skills/compliance-gate/bin/kev-serve          # serves the fine-tuned Kev-4B on :8009 (first run downloads it)
-npx @coldtea/abide login                              # paste the throwaway key (or reuse .env)
-npx @coldtea/abide init --project                     # installs the agent hooks into this repo
+npm install -g @coldtea/abide                         # a stable path for the hook script
+.claude/skills/compliance-gate/bin/kev-serve          # keep it running; first run clones kev and downloads the model
 ```
 
-Then code as usual — a rule-breaking edit gets a repair request in the same turn. Serving Kev-4B needs about 32 GB of
-RAM. On a smaller machine, `KEV_MODEL=jaredpalmer/kev-0.8b` serves the stock 0.8B model, which is not fine-tuned and
-is far noisier. Check what *would* fire without an agent:
-`abide check <paths>` (reads the working-tree diff and prints a verdict per rule).
+Once per project:
+
+```sh
+.claude/skills/compliance-gate/bin/abide-enable projects/<name>
+```
+
+`abide-enable` does three things:
+- links the shared rubric into the project
+- adds abide's three checking hooks to the project's personal `.claude/settings.local.json`, and keeps that file and
+  the link out of its `git status`
+- points abide at kev in `~/.abide/.env`, with a placeholder key, because kev needs none
+
+**Do not run `abide init` or `abide login`.** Besides the hooks above, `init` installs a SessionStart hook that asks
+the agent to recompile the rubric from the project's `CLAUDE.md`, which would overwrite the shared rubric. `login` is
+only for abide's hosted model. To switch it off again: `abide-enable --uninstall projects/<name>`.
+
+Then start a new agent session and code as usual. A rule-breaking edit gets a repair request in the same turn,
+unless you explicitly asked for that behaviour; the agent then says so and leaves it.
+
+Serving Kev-4B needs about 32 GB of RAM. On a smaller machine, `KEV_MODEL=jaredpalmer/kev-0.8b` serves the stock
+0.8B model, which is not fine-tuned and is far noisier.
+
+To see what *would* fire without an agent, run `abide check <paths>` in the project. It reads the working-tree diff
+and prints a verdict per rule. `.abide/events.jsonl` logs every verdict the hooks produced.
 
 ### The model
 
