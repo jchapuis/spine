@@ -4,6 +4,10 @@
 #   abide-enable <project-dir>               link the rubric, add abide's checking hooks, point abide at kev
 #   abide-enable --uninstall <project-dir>   remove the hooks and the rubric link
 #
+# abide reads the rubric from the root of the checkout that holds the edited file, so a git worktree with no
+# .abide/rubric.json link gets no checks at all. Enabling a checkout therefore also installs a post-checkout git
+# hook (shared by every worktree of the repository) that re-runs this script on each `git worktree add`.
+#
 # Why not `abide init`: init also installs a SessionStart hook that asks the agent to recompile the rubric whenever
 # the project's CLAUDE.md / AGENTS.md are not listed in it with matching hashes. Our rubric is hand-written and shared
 # by every project, so that recompile would overwrite it. This installs only the three checking hooks (turn start,
@@ -34,8 +38,15 @@ ADD='.hooks.UserPromptSubmit += [{hooks: [{type: "command", command: ($cmd + " t
   | .hooks.Stop += [{hooks: [{type: "command", command: ($cmd + " stop"), timeout: 30}]}]'
 
 TMP="$SETTINGS.tmp"
+IS_GIT=0
+git -C "$PROJECT" rev-parse --git-dir >/dev/null 2>&1 && IS_GIT=1
+WORKTREE_HOOK_MARKER="# Installed by compliance-gate/bin/abide-enable."
+WORKTREE_HOOK=""
+[ "$IS_GIT" = 1 ] && WORKTREE_HOOK="$(git -C "$PROJECT" rev-parse --path-format=absolute --git-path hooks)/post-checkout"
+
 if [ "$UNINSTALL" = 1 ]; then
   jq "$STRIP" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+  if [ -n "$WORKTREE_HOOK" ] && grep -q "$WORKTREE_HOOK_MARKER" "$WORKTREE_HOOK" 2>/dev/null; then rm "$WORKTREE_HOOK"; fi
   [ -L "$PROJECT/.abide/rubric.json" ] && rm "$PROJECT/.abide/rubric.json"
   echo "abide-enable: removed abide hooks and the rubric link from $PROJECT"
   exit 0
@@ -47,12 +58,31 @@ mkdir -p "$PROJECT/.abide"
 [ -e "$PROJECT/.abide/rubric.json" ] || ln -s "$SPINE_ROOT/.abide/rubric.json" "$PROJECT/.abide/rubric.json"
 
 # Keep both out of the project's git status, locally only.
-if git -C "$PROJECT" rev-parse --git-dir >/dev/null 2>&1; then
-  EXCLUDE="$(git -C "$PROJECT" rev-parse --absolute-git-dir)/info/exclude"
+# info/exclude is read from the common git dir only, so a worktree must write there, not to its own git dir.
+if [ "$IS_GIT" = 1 ]; then
+  EXCLUDE="$(git -C "$PROJECT" rev-parse --path-format=absolute --git-path info/exclude)"
   mkdir -p "$(dirname "$EXCLUDE")"
   for p in .abide/ .claude/settings.local.json; do
     git -C "$PROJECT" check-ignore -q "$p" 2>/dev/null || echo "$p" >> "$EXCLUDE"
   done
+fi
+
+# Every new worktree of this repository gets the same setup.
+if [ -n "$WORKTREE_HOOK" ]; then
+  if [ -e "$WORKTREE_HOOK" ] && ! grep -q "$WORKTREE_HOOK_MARKER" "$WORKTREE_HOOK"; then
+    echo "abide-enable: $WORKTREE_HOOK exists and is not ours; new worktrees will need abide-enable by hand" >&2
+  else
+    mkdir -p "$(dirname "$WORKTREE_HOOK")"
+    cat > "$WORKTREE_HOOK" <<HOOK
+#!/bin/sh
+$WORKTREE_HOOK_MARKER
+# A new worktree checks out from the null revision; give it abide's rubric link and checking hooks.
+[ "\$1" = "0000000000000000000000000000000000000000" ] || exit 0
+"$SCRIPT_DIR/abide-enable" "\$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
+exit 0
+HOOK
+    chmod +x "$WORKTREE_HOOK"
+  fi
 fi
 
 # Machine-wide: point abide at the local kev server (abide reads ~/.abide/.env from any repo).

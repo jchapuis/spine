@@ -208,11 +208,17 @@ Once per project:
 .claude/skills/compliance-gate/bin/abide-enable projects/<name>
 ```
 
-`abide-enable` does three things:
+`abide-enable` does four things:
 - links the shared rubric into the project
 - adds abide's three checking hooks to the project's personal `.claude/settings.local.json`, and keeps that file and
   the link out of its `git status`
 - points abide at kev in `~/.abide/.env`, with a placeholder key, because kev needs none
+- installs a `post-checkout` git hook that runs `abide-enable` on every new `git worktree add` of that repository
+
+abide reads the rubric from the root of the checkout that holds the edited file, so a worktree without the rubric
+link is silently unchecked. The `post-checkout` hook covers worktrees created after enabling; for ones that already
+exist, run `abide-enable` on each (`git worktree list`). Edits made through a shell command rather than the agent's
+edit tools never reach the per-edit hook — only the pre-commit gate sees them.
 
 **Do not run `abide init` or `abide login`.** Besides the hooks above, `init` installs a SessionStart hook that asks
 the agent to recompile the rubric from the project's `CLAUDE.md`, which would overwrite the shared rubric. `login` is
