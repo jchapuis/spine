@@ -11,7 +11,8 @@
 # Why not `abide init`: init also installs a SessionStart hook that asks the agent to recompile the rubric whenever
 # the project's CLAUDE.md / AGENTS.md are not listed in it with matching hashes. Our rubric is hand-written and shared
 # by every project, so that recompile would overwrite it. This installs only the three checking hooks (turn start,
-# after each edit, end of turn), in the project's personal .claude/settings.local.json, and keeps both that file and
+# after each edit, end of turn), plus the abide-serena shim so edits made through serena are checked too, in the
+# project's personal .claude/settings.local.json, and keeps both that file and
 # the rubric link out of the project's git status via .git/info/exclude.
 set -eu
 
@@ -30,11 +31,15 @@ SETTINGS="$PROJECT/.claude/settings.local.json"
 mkdir -p "$PROJECT/.claude"
 [ -s "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 
-# Every abide entry out, whichever event it sits under; other hooks stay.
-STRIP='if .hooks then .hooks |= (with_entries(.value |= (map(.hooks |= map(select((.command // "") | contains("abide-hook.js") | not))) | map(select(.hooks | length > 0)))) | with_entries(select(.value | length > 0))) else . end
+# Every abide entry out (its own hooks and the serena shim), whichever event it sits under; other hooks stay.
+STRIP='if .hooks then .hooks |= (with_entries(.value |= (map(.hooks |= map(select((.command // "") | test("abide-hook\\.js|abide-serena") | not))) | map(select(.hooks | length > 0)))) | with_entries(select(.value | length > 0))) else . end
   | if .hooks == {} then del(.hooks) else . end'
+# Serena's edit tools go through abide-serena, which replays each change to abide as a Write.
+SERENA_EDITS="mcp__serena__(replace_content|replace_symbol_body|insert_after_symbol|insert_before_symbol|rename_symbol|safe_delete_symbol)"
 ADD='.hooks.UserPromptSubmit += [{hooks: [{type: "command", command: ($cmd + " turn-start"), timeout: 10}]}]
   | .hooks.PostToolUse += [{matcher: "Edit|Write|MultiEdit|apply_patch", hooks: [{type: "command", command: ($cmd + " post-tool-use"), timeout: 20}]}]
+  | .hooks.PreToolUse += [{matcher: $serena, hooks: [{type: "command", command: ($shim + " pre " + $hook), timeout: 10}]}]
+  | .hooks.PostToolUse += [{matcher: $serena, hooks: [{type: "command", command: ($shim + " post " + $hook), timeout: 60}]}]
   | .hooks.Stop += [{hooks: [{type: "command", command: ($cmd + " stop"), timeout: 30}]}]'
 
 TMP="$SETTINGS.tmp"
@@ -51,7 +56,8 @@ if [ "$UNINSTALL" = 1 ]; then
   echo "abide-enable: removed abide hooks and the rubric link from $PROJECT"
   exit 0
 fi
-jq --arg cmd "node \"$HOOK\"" "$STRIP | $ADD" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
+jq --arg cmd "node \"$HOOK\"" --arg hook "\"$HOOK\"" --arg shim "node \"$SCRIPT_DIR/abide-serena\"" \
+  --arg serena "$SERENA_EDITS" "$STRIP | $ADD" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
 
 # The shared rubric (/projects-update makes the same link; an existing file or link is left alone).
 mkdir -p "$PROJECT/.abide"

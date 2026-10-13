@@ -15,6 +15,7 @@ compliance-gate/
     install-gate                        # POSIX shell, installs the hook shim into a project
     kev-serve                           # POSIX shell, serves the local kev model abide queries
     abide-enable                        # POSIX shell, turns abide's per-edit checks on in a project
+    abide-serena                        # Node, replays serena MCP edits to abide as Write calls
   src/                                  # Scala-CLI source
     ComplianceGate.scala                # main + @main entry (mainargs)
     Diff.scala                          # git diff parsing
@@ -208,10 +209,14 @@ Once per project:
 .claude/skills/compliance-gate/bin/abide-enable projects/<name>
 ```
 
-`abide-enable` does four things:
+`abide-enable` does five things:
 - links the shared rubric into the project
 - adds abide's three checking hooks to the project's personal `.claude/settings.local.json`, and keeps that file and
   the link out of its `git status`
+- adds `abide-serena` around serena's edit tools (`replace_content`, `replace_symbol_body`, `insert_*_symbol`,
+  `rename_symbol`, `safe_delete_symbol`). abide reads only Claude Code's own edit tools, so without it most edits in a
+  `/go` session, which edits through serena, would get no per-edit check. The shim saves each file before the edit
+  and hands the change to abide as a `Write`; a rename's other files come from a `git stash create` snapshot
 - points abide at kev in `~/.abide/.env`, with a placeholder key, because kev needs none
 - installs a `post-checkout` git hook that runs `abide-enable` on every new `git worktree add` of that repository
 

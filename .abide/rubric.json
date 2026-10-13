@@ -32,7 +32,7 @@
       "id": "server-architecture-service-depends-on-service",
       "text": "A Service must not depend on another Service directly; it depends on an algebra (trait) the other service implements.",
       "source": { "path": ".claude/skills/server-architecture/SKILL.md" },
-      "scope": ["**/*.scala"],
+      "scope": ["**/server/src/main/**/*.scala", "**/infra/**/src/main/**/*.scala", "**/src/main/**/*Service.scala", "**/src/main/**/*Algebra.scala", "**/src/main/**/*Alg.scala", "**/src/main/**/*Logic.scala", "**/src/main/**/*Repository.scala"],
       "when": "edit",
       "check": {
         "type": "model",
@@ -50,7 +50,7 @@
       "id": "server-architecture-logic-placement",
       "text": "Orchestration/business logic belongs in a Logic trait behind an algebra; an algebra ships as a trait, not an object with concrete logic.",
       "source": { "path": ".claude/skills/server-architecture/SKILL.md" },
-      "scope": ["**/*.scala"],
+      "scope": ["**/server/src/main/**/*.scala", "**/infra/**/src/main/**/*.scala", "**/src/main/**/*Service.scala", "**/src/main/**/*Algebra.scala", "**/src/main/**/*Alg.scala", "**/src/main/**/*Logic.scala", "**/src/main/**/*Repository.scala"],
       "when": "edit",
       "check": {
         "type": "model",
