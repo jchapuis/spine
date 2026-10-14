@@ -1,0 +1,90 @@
+=== EDIT
+note: finalize used for cleanup
+--- file: server/src/main/scala/com/rentwise/leases/LeaseExport.scala
+--- before
+package com.rentwise.leases
+
+import cats.effect.{IO, Resource}
+
+class LeaseExport(path: String):
+  def open: IO[Unit] = IO.unit
+
+--- after
+package com.rentwise.leases
+
+import cats.effect.{IO, Resource}
+
+class LeaseExport(path: String):
+  def open: IO[Unit] = IO.unit
+  override def finalize(): Unit =
+    println(s"closing $path")
+
+=== END
+=== EDIT
+note: protected finalize override
+--- file: server/src/main/scala/com/greenleaf/sensors/SensorLog.scala
+--- before
+package com.greenleaf.sensors
+
+import cats.effect.{IO, Resource}
+
+class SensorLog(path: String):
+  def open: IO[Unit] = IO.unit
+
+--- after
+package com.greenleaf.sensors
+
+import cats.effect.{IO, Resource}
+
+class SensorLog(path: String):
+  def open: IO[Unit] = IO.unit
+  override protected def finalize(): Unit =
+    open.unsafeRunAndForget()
+
+=== END
+=== EDIT
+note: fix: replace finalize with Resource
+--- file: server/src/main/scala/com/fleetio/trips/TripArchive.scala
+--- before
+package com.fleetio.trips
+
+import cats.effect.{IO, Resource}
+
+class TripArchive(path: String):
+  def open: IO[Unit] = IO.unit
+  override def finalize(): Unit =
+    println("bye")
+
+--- after
+package com.fleetio.trips
+
+import cats.effect.{IO, Resource}
+
+class TripArchive(path: String):
+  def open: IO[Unit] = IO.unit
+  def resource: Resource[IO, Unit] =
+    Resource.make(open)(_ => IO.unit)
+
+=== END
+=== EDIT
+note: finalizeReport is just a name
+--- file: server/src/main/scala/com/parkr/gates/GateLog.scala
+--- before
+package com.parkr.gates
+
+import cats.effect.{IO, Resource}
+
+class GateLog(path: String):
+  def open: IO[Unit] = IO.unit
+
+--- after
+package com.parkr.gates
+
+import cats.effect.{IO, Resource}
+
+class GateLog(path: String):
+  def open: IO[Unit] = IO.unit
+  def finalizeReport: IO[String] =
+    IO.pure(s"report for $path")
+
+=== END

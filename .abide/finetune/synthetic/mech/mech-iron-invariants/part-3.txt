@@ -1,0 +1,588 @@
+=== EDIT
+note: correlation id alias with uppercase ID suffix over Long
+--- file: server/src/main/scala/com/relay/messaging/Envelope.scala
+--- before
+package com.relay.messaging
+
+import java.time.Instant
+
+case class Envelope(topic: Topic, payload: Array[Byte], sentAt: Instant)
+--- after
+package com.relay.messaging
+
+import java.time.Instant
+
+type CorrelationID = Long
+
+case class Envelope(topic: Topic, correlation: CorrelationID, payload: Array[Byte], sentAt: Instant)
+=== END
+
+=== EDIT
+note: correlation id as an iron refined subtype over Long
+--- file: server/src/main/scala/com/relay/messaging/Correlation.scala
+--- before
+--- after
+package com.relay.messaging
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+type CorrelationKey = CorrelationKey.T
+object CorrelationKey extends RefinedSubtype[Long, Positive]
+=== END
+
+=== EDIT
+note: require inside a lambda when partitioning messages
+--- file: server/src/main/scala/com/relay/messaging/Partitioner.scala
+--- before
+package com.relay.messaging
+
+class Partitioner(partitions: Int):
+
+  def assign(envelopes: List[Envelope]): Map[Int, List[Envelope]] =
+    envelopes.groupBy(e => Math.floorMod(e.topic.hashCode, partitions))
+--- after
+package com.relay.messaging
+
+class Partitioner(partitions: Int):
+
+  def assign(envelopes: List[Envelope]): Map[Int, List[Envelope]] =
+    envelopes.groupBy: e =>
+      require(e.payload.nonEmpty, s"empty payload on ${e.topic}")
+      Math.floorMod(e.topic.hashCode, partitions)
+=== END
+
+=== EDIT
+note: partition count as a refined positive parameter instead of a runtime check
+--- file: server/src/main/scala/com/relay/messaging/Router.scala
+--- before
+package com.relay.messaging
+
+class Router(partitions: Int):
+  def route(envelope: Envelope): Int =
+    Math.floorMod(envelope.topic.hashCode, partitions)
+--- after
+package com.relay.messaging
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+class Router(partitions: Int :| Positive):
+  def route(envelope: Envelope): Int =
+    Math.floorMod(envelope.topic.hashCode, partitions)
+=== END
+
+=== EDIT
+note: refineUnsafe inside a test generator object (excluded path)
+--- file: server/src/test/scala/com/relay/messaging/MessagingGenerators.scala
+--- before
+package com.relay.messaging
+
+import org.scalacheck.Gen
+
+object MessagingGenerators:
+  val topicName: Gen[String] = Gen.alphaLowerStr.suchThat(_.nonEmpty)
+--- after
+package com.relay.messaging
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+import org.scalacheck.Gen
+
+object MessagingGenerators:
+  val topicName: Gen[String] = Gen.alphaLowerStr.suchThat(_.nonEmpty)
+  val correlation: Gen[Long :| Positive] = Gen.posNum[Long].map(_.refineUnsafe[Positive])
+=== END
+
+=== EDIT
+note: refineUnsafe in a regular test suite (not a generators file)
+--- file: server/src/test/scala/com/relay/messaging/RouterSuite.scala
+--- before
+package com.relay.messaging
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class RouterSuite extends ScalaCheckSuite:
+
+  property("routes inside the partition range"):
+    forAll(MessagingGenerators.envelope): envelope =>
+      val slot = Router(Partitions.eight).route(envelope)
+      slot >= 0 && slot < 8
+--- after
+package com.relay.messaging
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class RouterSuite extends ScalaCheckSuite:
+
+  property("routes inside the partition range"):
+    forAll(MessagingGenerators.envelope): envelope =>
+      val slot = Router(8.refineUnsafe[Positive]).route(envelope)
+      slot >= 0 && slot < 8
+=== END
+
+=== EDIT
+note: interpolated literal assumed into a refined route path in a laminar page
+--- file: app/src/main/scala/com/relay/ui/TopicPage.scala
+--- before
+package com.relay.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object TopicPage:
+  def apply(topic: TopicName): HtmlElement =
+    div(h2(topic.value))
+--- after
+package com.relay.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object TopicPage:
+  def apply(topic: TopicName): HtmlElement =
+    div(
+      h2(topic.value),
+      a(href := "/topics/archive".assume[UrlPath].value, "Archive")
+    )
+=== END
+
+=== EDIT
+note: laminar page with a literal built through the refined constructor
+--- file: app/src/main/scala/com/relay/ui/QueuePage.scala
+--- before
+package com.relay.ui
+
+import com.raquo.laminar.api.L.*
+
+object QueuePage:
+  def apply(queue: QueueName): HtmlElement =
+    div(h2(queue.value))
+--- after
+package com.relay.ui
+
+import com.raquo.laminar.api.L.*
+
+object QueuePage:
+  def apply(queue: QueueName): HtmlElement =
+    div(
+      h2(queue.value),
+      a(href := UrlPath("/queues/dead-letter").value, "Dead letters")
+    )
+=== END
+
+=== EDIT
+note: add a method to a class whose constructor already has a require
+--- file: server/src/main/scala/com/cartograph/maps/BoundingBox.scala
+--- before
+package com.cartograph.maps
+
+case class BoundingBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double):
+  require(minLat <= maxLat && minLon <= maxLon)
+
+  def width: Double = maxLon - minLon
+--- after
+package com.cartograph.maps
+
+case class BoundingBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double):
+  require(minLat <= maxLat && minLon <= maxLon)
+
+  def width: Double = maxLon - minLon
+  def height: Double = maxLat - minLat
+  def contains(c: Coordinate): Boolean =
+    c.lat >= minLat && c.lat <= maxLat && c.lon >= minLon && c.lon <= maxLon
+=== END
+
+=== EDIT
+note: tighten an existing require's condition (edits the require line)
+--- file: server/src/main/scala/com/cartograph/maps/Viewport.scala
+--- before
+package com.cartograph.maps
+
+case class Viewport(width: Int, height: Int):
+  require(width > 0)
+
+  def aspect: Double = width.toDouble / height
+--- after
+package com.cartograph.maps
+
+case class Viewport(width: Int, height: Int):
+  require(width > 0 && height > 0, s"viewport must be non-empty: ${width}x$height")
+
+  def aspect: Double = width.toDouble / height
+=== END
+
+=== EDIT
+note: viewport dimensions as refined positives, removing the require
+--- file: server/src/main/scala/com/cartograph/maps/Canvas.scala
+--- before
+package com.cartograph.maps
+
+case class Canvas(width: Int, height: Int):
+  require(width > 0 && height > 0)
+
+  def pixels: Long = width.toLong * height
+--- after
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+case class Canvas(width: Int :| Positive, height: Int :| Positive):
+  def pixels: Long = width.toLong * height
+=== END
+
+=== EDIT
+note: build a refined id from a validated path variable in http4s
+--- file: server/src/main/scala/com/tempo/scheduling/api/SlotRoutes.scala
+--- before
+package com.tempo.scheduling.api
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class SlotRoutes(slots: Slots):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "slots" => slots.all.flatMap(Ok(_))
+--- after
+package com.tempo.scheduling.api
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class SlotRoutes(slots: Slots):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "slots" => slots.all.flatMap(Ok(_))
+    case GET -> Root / "slots" / UUIDVar(raw) =>
+      slots.find(SlotKey(raw)).flatMap(_.fold(NotFound())(Ok(_)))
+=== END
+
+=== EDIT
+note: route uses applyUnsafe on an int path var for the page size
+--- file: server/src/main/scala/com/tempo/scheduling/api/AgendaRoutes.scala
+--- before
+package com.tempo.scheduling.api
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class AgendaRoutes(agenda: Agenda):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "agenda" => agenda.today.flatMap(Ok(_))
+--- after
+package com.tempo.scheduling.api
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class AgendaRoutes(agenda: Agenda):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "agenda" => agenda.today.flatMap(Ok(_))
+    case GET -> Root / "agenda" / IntVar(days) =>
+      agenda.next(
+        HorizonDays
+          .applyUnsafe(days)
+      ).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: bump a dependency version in a scala-cli build script, no domain checks
+--- file: scripts/seed.sc
+--- before
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.4
+
+import cats.effect.IO
+
+@main def seed(): Unit = println("seeding")
+--- after
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.7
+
+import cats.effect.IO
+
+@main def seed(): Unit = println("seeding")
+=== END
+
+=== EDIT
+note: inventory sku alias as String in a scala-cli import script
+--- file: scripts/ImportSkus.scala
+--- before
+//> using scala 3.5.2
+
+import scala.io.Source
+
+@main def importSkus(path: String): Unit =
+  Source.fromFile(path).getLines().foreach(println)
+--- after
+//> using scala 3.5.2
+
+import scala.io.Source
+
+type SkuId = String
+
+@main def importSkus(path: String): Unit =
+  Source.fromFile(path).getLines().foreach(println)
+=== END
+
+=== EDIT
+note: require with a space before the paren in a matrix helper
+--- file: server/src/main/scala/com/gridline/energy/LoadMatrix.scala
+--- before
+package com.gridline.energy
+
+case class LoadMatrix(rows: Vector[Vector[Double]]):
+  def total: Double = rows.map(_.sum).sum
+--- after
+package com.gridline.energy
+
+case class LoadMatrix(rows: Vector[Vector[Double]]):
+  def total: Double = rows.map(_.sum).sum
+
+  def add(other: LoadMatrix): LoadMatrix =
+    require (rows.size == other.rows.size)
+    LoadMatrix(rows.zip(other.rows).map((a, b) => a.zip(b).map(_ + _)))
+=== END
+
+=== EDIT
+note: rename a field in a case class, unrelated to invariants
+--- file: server/src/main/scala/com/gridline/energy/Substation.scala
+--- before
+package com.gridline.energy
+
+case class Substation(code: String, capacityKw: Double, region: Region)
+--- after
+package com.gridline.energy
+
+case class Substation(code: String, ratedCapacityKw: Double, region: Region)
+=== END
+
+=== EDIT
+note: refineUnsafe two fields while mapping a domain event from a DTO
+--- file: server/src/main/scala/com/payroll/hr/EmployeeMapper.scala
+--- before
+package com.payroll.hr
+
+import io.github.iltotore.iron.*
+
+object EmployeeMapper:
+  def toDomain(dto: EmployeeDto): Employee =
+    Employee(dto.name, dto.salary, dto.weeklyHours)
+--- after
+package com.payroll.hr
+
+import io.github.iltotore.iron.*
+
+object EmployeeMapper:
+  def toDomain(dto: EmployeeDto): Employee =
+    Employee(
+      dto.name,
+      dto.salary.refineUnsafe[SalaryRule],
+      dto.weeklyHours.refineUnsafe[HoursRule]
+    )
+=== END
+
+=== EDIT
+note: map employee DTO with accumulated refined validation
+--- file: server/src/main/scala/com/payroll/hr/ContractMapper.scala
+--- before
+package com.payroll.hr
+
+import io.github.iltotore.iron.*
+
+object ContractMapper:
+  def toDomain(dto: ContractDto): Contract =
+    Contract(dto.title, dto.rate)
+--- after
+package com.payroll.hr
+
+import cats.data.ValidatedNel
+import cats.syntax.apply.*
+import cats.syntax.either.*
+import io.github.iltotore.iron.*
+
+object ContractMapper:
+  def toDomain(dto: ContractDto): ValidatedNel[String, Contract] =
+    (
+      dto.title.refineEither[TitleRule].toValidatedNel,
+      dto.rate.refineEither[RateRule].toValidatedNel
+    ).mapN(Contract.apply)
+=== END
+
+=== EDIT
+note: employee id alias over Int in payroll
+--- file: server/src/main/scala/com/payroll/hr/Payslip.scala
+--- before
+package com.payroll.hr
+
+import java.time.YearMonth
+
+case class Payslip(employee: Int, period: YearMonth, gross: Money)
+--- after
+package com.payroll.hr
+
+import java.time.YearMonth
+
+type EmployeeId = Int
+
+case class Payslip(employee: EmployeeId, period: YearMonth, gross: Money)
+=== END
+
+=== EDIT
+note: payroll period alias over YearMonth, not a primitive id
+--- file: server/src/main/scala/com/payroll/hr/Periods.scala
+--- before
+package com.payroll.hr
+
+import java.time.YearMonth
+
+object Periods:
+  def current: YearMonth = YearMonth.of(2025, 1)
+--- after
+package com.payroll.hr
+
+import java.time.YearMonth
+
+type PeriodKey = YearMonth
+
+object Periods:
+  def current: PeriodKey = YearMonth.of(2025, 1)
+=== END
+
+=== EDIT
+note: require inside a match case in a tax bracket lookup
+--- file: server/src/main/scala/com/payroll/tax/Brackets.scala
+--- before
+package com.payroll.tax
+
+object Brackets:
+  def rateFor(income: BigDecimal, brackets: List[Bracket]): BigDecimal =
+    brackets.find(_.covers(income)) match
+      case Some(bracket) => bracket.rate
+      case None => BigDecimal(0)
+--- after
+package com.payroll.tax
+
+object Brackets:
+  def rateFor(income: BigDecimal, brackets: List[Bracket]): BigDecimal =
+    brackets.find(_.covers(income)) match
+      case Some(bracket) =>
+        require(bracket.rate <= 1, s"bracket rate above 100%: ${bracket.rate}")
+        bracket.rate
+      case None => BigDecimal(0)
+=== END
+
+=== EDIT
+note: tax rate as an iron Interval type in the bracket model
+--- file: server/src/main/scala/com/payroll/tax/Bracket.scala
+--- before
+package com.payroll.tax
+
+case class Bracket(from: BigDecimal, to: BigDecimal, rate: BigDecimal):
+  def covers(income: BigDecimal): Boolean = income >= from && income < to
+--- after
+package com.payroll.tax
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type TaxRate = BigDecimal :| Interval.Closed[0, 1]
+
+case class Bracket(from: BigDecimal, to: BigDecimal, rate: TaxRate):
+  def covers(income: BigDecimal): Boolean = income >= from && income < to
+=== END
+
+=== EDIT
+note: comment-free doc string mentions applyUnsafe in a message string only
+--- file: server/src/main/scala/com/payroll/tax/TaxErrors.scala
+--- before
+package com.payroll.tax
+
+enum TaxError:
+  case UnknownRegion(code: String)
+
+  def message: String = this match
+    case UnknownRegion(code) => s"no tax table for $code"
+--- after
+package com.payroll.tax
+
+enum TaxError:
+  case UnknownRegion(code: String)
+  case InvalidRate(raw: BigDecimal)
+
+  def message: String = this match
+    case UnknownRegion(code) => s"no tax table for $code"
+    case InvalidRate(raw) => s"rate $raw is outside the refined range, refused instead of forced"
+=== END
+
+=== EDIT
+note: drop applyUnsafe in favour of the literal constructor
+--- file: server/src/main/scala/com/hivemind/ratelimit/Tiers.scala
+--- before
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+
+object Tiers:
+  val free: RequestsPerMinute = RequestsPerMinute.applyUnsafe(60)
+  val pro: RequestsPerMinute = RequestsPerMinute.applyUnsafe(600)
+--- after
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+
+object Tiers:
+  val free: RequestsPerMinute = RequestsPerMinute(60)
+  val pro: RequestsPerMinute = RequestsPerMinute(600)
+=== END
+
+=== EDIT
+note: new enterprise tier added via applyUnsafe next to constructor tiers
+--- file: server/src/main/scala/com/hivemind/ratelimit/Plans.scala
+--- before
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+
+object Plans:
+  val starter: RequestsPerMinute = RequestsPerMinute(120)
+--- after
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+
+object Plans:
+  val starter: RequestsPerMinute = RequestsPerMinute(120)
+  val enterprise: RequestsPerMinute = RequestsPerMinute.applyUnsafe(6000)
+=== END
+
+=== EDIT
+note: s-interpolated literal assumed as a refined path
+--- file: server/src/main/scala/com/cartograph/maps/TileUrls.scala
+--- before
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+
+object TileUrls:
+  def base(style: StyleName): String = s"/tiles/${style.value}"
+--- after
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+
+object TileUrls:
+  def base(style: StyleName): String = s"/tiles/${style.value}"
+
+  def satellite: TilePath = "/tiles/satellite/{z}/{x}/{y}.png".assume[TilePathRule]
+=== END

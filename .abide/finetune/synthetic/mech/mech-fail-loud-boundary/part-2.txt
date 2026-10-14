@@ -1,0 +1,692 @@
+=== EDIT
+note: csv export writes empty cells for missing optional fields
+--- file: server/src/main/scala/com/acme/orders/OrderCsv.scala
+--- before
+package com.acme.orders
+
+object OrderCsv:
+
+  val header: String = "id,customer,total"
+
+  def row(order: Order): String =
+    List(order.id.value, order.customer.value, order.total.show).mkString(",")
+--- after
+package com.acme.orders
+
+object OrderCsv:
+
+  val header: String = "id,customer,total,coupon"
+
+  def row(order: Order): String =
+    List(order.id.value, order.customer.value, order.total.show, order.coupon.map(_.code).getOrElse("")).mkString(",")
+=== END
+
+=== EDIT
+note: map a JS dynamic payload's labels with braceless collect
+--- file: app/src/main/scala/com/metricly/analytics/ui/ChartInterop.scala
+--- before
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ChartInterop:
+
+  def render(container: HtmlElement, series: List[SeriesView]): Unit =
+    ChartJs.draw(container.ref, js.Array(series.map(_.toJs)*))
+--- after
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ChartInterop:
+
+  def render(container: HtmlElement, series: List[SeriesView]): Unit =
+    ChartJs.draw(container.ref, js.Array(series.map(_.toJs)*))
+
+  def legendLabels(payload: js.Array[Any]): List[String] =
+    payload.toList.collect:
+      case label: String => label.trim
+=== END
+
+=== EDIT
+note: shift duration in hours with toUnit for the payroll export
+--- file: server/src/main/scala/com/planwise/scheduling/PayrollExport.scala
+--- before
+package com.planwise.scheduling
+
+object PayrollExport:
+
+  def row(shift: Shift): List[String] =
+    List(shift.employee.value, shift.start.toString, shift.end.toString)
+--- after
+package com.planwise.scheduling
+
+import java.util.concurrent.TimeUnit.HOURS
+
+object PayrollExport:
+
+  def row(shift: Shift): List[String] =
+    List(shift.employee.value, shift.start.toString, shift.end.toString, f"${shift.length.toUnit(HOURS)}%.2f")
+=== END
+
+=== EDIT
+note: payroll export uses the inHours accessor extension
+--- file: server/src/main/scala/com/planwise/scheduling/OvertimeExport.scala
+--- before
+package com.planwise.scheduling
+
+object OvertimeExport:
+
+  def row(shift: Shift): List[String] =
+    List(shift.employee.value, shift.start.toString)
+--- after
+package com.planwise.scheduling
+
+import com.planwise.scheduling.DurationSyntax.*
+
+object OvertimeExport:
+
+  def row(shift: Shift): List[String] =
+    List(shift.employee.value, shift.start.toString, f"${shift.overtime.inHours}%.2f")
+=== END
+
+=== EDIT
+note: csv export keeps empty cells explicit via a renderer for Option
+--- file: server/src/main/scala/com/acme/orders/RefundCsv.scala
+--- before
+package com.acme.orders
+
+object RefundCsv:
+
+  def row(refund: Refund): String =
+    List(refund.id.value, refund.amount.show).mkString(",")
+--- after
+package com.acme.orders
+
+object RefundCsv:
+
+  def row(refund: Refund): String =
+    List(refund.id.value, refund.amount.show, CsvCell.optional(refund.reason.map(_.value))).mkString(",")
+=== END
+
+=== EDIT
+note: getOrElse("") on a skunk optional column
+--- file: server/src/main/scala/com/stockly/inventory/SupplierRepository.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+import skunk.Session
+
+class SupplierRepository(session: Session[IO]):
+
+  def find(id: SupplierId): IO[Option[Supplier]] =
+    session.option(SupplierSql.byId)(id)
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+import skunk.Session
+
+class SupplierRepository(session: Session[IO]):
+
+  def find(id: SupplierId): IO[Option[Supplier]] =
+    session.option(SupplierSql.byId)(id)
+
+  def contactEmail(id: SupplierId): IO[String] =
+    session.option(SupplierSql.contactEmail)(id).map(_.flatten.getOrElse(""))
+=== END
+
+=== EDIT
+note: env lookup with getOrElse empty in a config loader
+--- file: server/src/main/scala/com/orbital/config/SmtpConfig.scala
+--- before
+package com.orbital.config
+
+case class SmtpConfig(host: String, port: Int, username: String, password: String)
+--- after
+package com.orbital.config
+
+import cats.effect.IO
+
+case class SmtpConfig(host: String, port: Int, username: String, password: String)
+
+object SmtpConfig:
+
+  def fromEnv: IO[SmtpConfig] =
+    IO:
+      SmtpConfig(
+        sys.env.getOrElse("SMTP_HOST", "localhost"),
+        sys.env.get("SMTP_PORT").flatMap(_.toIntOption).getOrElse(25),
+        sys.env.get("SMTP_USER").getOrElse(""),
+        sys.env.get("SMTP_PASSWORD").getOrElse("")
+      )
+=== END
+
+=== EDIT
+note: config loader fails loudly with ciris on missing secrets
+--- file: server/src/main/scala/com/orbital/config/S3Config.scala
+--- before
+package com.orbital.config
+
+case class S3Config(bucket: String, accessKey: String, secretKey: String)
+--- after
+package com.orbital.config
+
+import cats.effect.IO
+import cats.syntax.parallel.*
+import ciris.*
+
+case class S3Config(bucket: String, accessKey: String, secretKey: Secret[String])
+
+object S3Config:
+
+  val load: ConfigValue[IO, S3Config] =
+    (env("S3_BUCKET"), env("S3_ACCESS_KEY"), env("S3_SECRET_KEY").secret).parMapN(S3Config.apply)
+=== END
+
+=== EDIT
+note: collect narrows untyped event properties
+--- file: server/src/main/scala/com/metricly/analytics/EventProperties.scala
+--- before
+package com.metricly.analytics
+
+case class EventProperties(raw: Map[String, Any]):
+
+  def has(key: String): Boolean =
+    raw.contains(key)
+--- after
+package com.metricly.analytics
+
+case class EventProperties(raw: Map[String, Any]):
+
+  def has(key: String): Boolean =
+    raw.contains(key)
+
+  def referrer: Option[String] =
+    raw.get("referrer").collect { case url: String => url }
+=== END
+
+=== EDIT
+note: collect with a String case guarded by nonEmpty
+--- file: server/src/main/scala/com/metricly/analytics/UtmParams.scala
+--- before
+package com.metricly.analytics
+
+case class UtmParams(raw: Map[String, Any])
+--- after
+package com.metricly.analytics
+
+case class UtmParams(raw: Map[String, Any]):
+
+  def campaign: Option[String] =
+    raw.get("utm_campaign").collect:
+      case campaign: String if campaign.nonEmpty => campaign
+=== END
+
+=== EDIT
+note: typed decoding of event properties with an explicit mismatch
+--- file: server/src/main/scala/com/metricly/analytics/EventAttributes.scala
+--- before
+package com.metricly.analytics
+
+case class EventAttributes(raw: Map[String, Any])
+--- after
+package com.metricly.analytics
+
+case class EventAttributes(raw: Map[String, Any]):
+
+  def text(key: String): Either[AttributeError, Option[String]] =
+    raw.get(key) match
+      case None                => Right(None)
+      case Some(value: String) => Right(Some(value))
+      case Some(other)         => Left(AttributeError.WrongType(key, "String", other.getClass.getSimpleName))
+=== END
+
+=== EDIT
+note: toUnit at two call sites for an SLA breach check
+--- file: server/src/main/scala/com/freightly/routing/SlaChecker.scala
+--- before
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object SlaChecker:
+
+  def breached(actual: FiniteDuration, promised: FiniteDuration): Boolean =
+    actual > promised
+--- after
+package com.freightly.routing
+
+import java.util.concurrent.TimeUnit.MINUTES
+import scala.concurrent.duration.FiniteDuration
+
+object SlaChecker:
+
+  def breached(actual: FiniteDuration, promised: FiniteDuration): Boolean =
+    actual > promised
+
+  def overrunRatio(actual: FiniteDuration, promised: FiniteDuration): Double =
+    actual.toUnit(MINUTES) / promised.toUnit(MINUTES)
+=== END
+
+=== EDIT
+note: ratio of durations computed from nanos without toUnit
+--- file: server/src/main/scala/com/freightly/routing/DwellChecker.scala
+--- before
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object DwellChecker:
+
+  def exceeded(actual: FiniteDuration, allowed: FiniteDuration): Boolean =
+    actual > allowed
+--- after
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object DwellChecker:
+
+  def exceeded(actual: FiniteDuration, allowed: FiniteDuration): Boolean =
+    actual > allowed
+
+  def ratio(actual: FiniteDuration, allowed: FiniteDuration): Double =
+    actual.toNanos.toDouble / allowed.toNanos
+=== END
+
+=== EDIT
+note: toUnit DAYS is not one of the matched units
+--- file: server/src/main/scala/com/ledgerly/billing/InterestAccrual.scala
+--- before
+package com.ledgerly.billing
+
+import scala.concurrent.duration.FiniteDuration
+
+object InterestAccrual:
+
+  def daily(balance: Amount, rate: AnnualRate): Amount =
+    balance * rate.daily
+--- after
+package com.ledgerly.billing
+
+import java.util.concurrent.TimeUnit.DAYS
+import scala.concurrent.duration.FiniteDuration
+
+object InterestAccrual:
+
+  def daily(balance: Amount, rate: AnnualRate): Amount =
+    balance * rate.daily
+
+  def over(balance: Amount, rate: AnnualRate, period: FiniteDuration): Amount =
+    balance * (rate.daily * period.toUnit(DAYS))
+=== END
+
+=== EDIT
+note: existing toUnit stays, edit changes the formatting
+--- file: server/src/main/scala/com/skyline/weather/StormDuration.scala
+--- before
+package com.skyline.weather
+
+import java.util.concurrent.TimeUnit.HOURS
+import scala.concurrent.duration.FiniteDuration
+
+object StormDuration:
+
+  def describe(duration: FiniteDuration): String =
+    val hours = duration.toUnit(HOURS)
+    s"$hours h"
+--- after
+package com.skyline.weather
+
+import java.util.concurrent.TimeUnit.HOURS
+import scala.concurrent.duration.FiniteDuration
+
+object StormDuration:
+
+  def describe(duration: FiniteDuration): String =
+    val hours = duration.toUnit(HOURS)
+    f"$hours%.1f h"
+=== END
+
+=== EDIT
+note: sweep toUnit out of the storm duration in favour of inHours
+--- file: server/src/main/scala/com/skyline/weather/FrostDuration.scala
+--- before
+package com.skyline.weather
+
+import java.util.concurrent.TimeUnit.HOURS
+import scala.concurrent.duration.FiniteDuration
+
+object FrostDuration:
+
+  def describe(duration: FiniteDuration): String =
+    f"${duration.toUnit(HOURS)}%.1f h"
+--- after
+package com.skyline.weather
+
+import com.skyline.weather.DurationSyntax.*
+import scala.concurrent.duration.FiniteDuration
+
+object FrostDuration:
+
+  def describe(duration: FiniteDuration): String =
+    f"${duration.inHours}%.1f h"
+=== END
+
+=== EDIT
+note: add a Laminar badge for the station status
+--- file: app/src/main/scala/com/skyline/weather/ui/StatusBadge.scala
+--- before
+--- after
+package com.skyline.weather.ui
+
+import com.raquo.laminar.api.L.*
+
+object StatusBadge:
+
+  def apply(status: Signal[StationStatus]): HtmlElement =
+    span(
+      cls := "status-badge",
+      cls <-- status.map(_.cssClass),
+      child.text <-- status.map(_.label)
+    )
+=== END
+
+=== EDIT
+note: Laminar tooltip text defaults to empty string
+--- file: app/src/main/scala/com/skyline/weather/ui/StationMarker.scala
+--- before
+package com.skyline.weather.ui
+
+import com.raquo.laminar.api.L.*
+
+object StationMarker:
+
+  def apply(station: Signal[StationView]): HtmlElement =
+    div(
+      cls := "station-marker",
+      child.text <-- station.map(_.code)
+    )
+--- after
+package com.skyline.weather.ui
+
+import com.raquo.laminar.api.L.*
+
+object StationMarker:
+
+  def apply(station: Signal[StationView]): HtmlElement =
+    div(
+      cls := "station-marker",
+      title <-- station.map(_.description.getOrElse("")),
+      child.text <-- station.map(_.code)
+    )
+=== END
+
+=== EDIT
+note: Laminar tooltip only set when description is present
+--- file: app/src/main/scala/com/skyline/weather/ui/RadarMarker.scala
+--- before
+package com.skyline.weather.ui
+
+import com.raquo.laminar.api.L.*
+
+object RadarMarker:
+
+  def apply(radar: Signal[RadarView]): HtmlElement =
+    div(
+      cls := "radar-marker",
+      child.text <-- radar.map(_.code)
+    )
+--- after
+package com.skyline.weather.ui
+
+import com.raquo.laminar.api.L.*
+
+object RadarMarker:
+
+  def apply(radar: Signal[RadarView]): HtmlElement =
+    div(
+      cls := "radar-marker",
+      child.maybe <-- radar.map(_.description.map(text => span(cls := "tooltip", text))),
+      child.text <-- radar.map(_.code)
+    )
+=== END
+
+=== EDIT
+note: fold to empty string instead of getOrElse
+--- file: server/src/main/scala/com/acme/billing/CustomerLabel.scala
+--- before
+package com.acme.billing
+
+object CustomerLabel:
+
+  def name(customer: Customer): String =
+    customer.legalName.value
+--- after
+package com.acme.billing
+
+object CustomerLabel:
+
+  def name(customer: Customer): String =
+    customer.legalName.value
+
+  def withTradingName(customer: Customer): String =
+    customer.legalName.value + customer.tradingName.fold("")(trading => s" ($trading)")
+=== END
+
+=== EDIT
+note: getOrElse("") on a regex group lookup
+--- file: server/src/main/scala/com/payflow/payments/IbanParser.scala
+--- before
+package com.payflow.payments
+
+object IbanParser:
+
+  private val Pattern = "([A-Z]{2})(\\d{2})([A-Z0-9]{11,30})".r
+
+  def country(raw: String): Option[String] =
+    Pattern.findFirstMatchIn(raw).map(_.group(1))
+--- after
+package com.payflow.payments
+
+object IbanParser:
+
+  private val Pattern = "([A-Z]{2})(\\d{2})([A-Z0-9]{11,30})".r
+
+  def country(raw: String): Option[String] =
+    Pattern.findFirstMatchIn(raw).map(_.group(1))
+
+  def checkDigits(raw: String): String =
+    Pattern.findFirstMatchIn(raw).map(_.group(2)).getOrElse("")
+=== END
+
+=== EDIT
+note: http4s header value defaults to empty when absent
+--- file: server/src/main/scala/com/gatekeep/auth/CorrelationMiddleware.scala
+--- before
+package com.gatekeep.auth
+
+import cats.data.Kleisli
+import cats.effect.IO
+import org.http4s.{HttpRoutes, Request}
+import org.typelevel.ci.*
+
+object CorrelationMiddleware:
+
+  def apply(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+    Kleisli((request: Request[IO]) => routes(request))
+--- after
+package com.gatekeep.auth
+
+import cats.data.Kleisli
+import cats.effect.IO
+import org.http4s.{HttpRoutes, Request}
+import org.typelevel.ci.*
+
+object CorrelationMiddleware:
+
+  def apply(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+    Kleisli: (request: Request[IO]) =>
+      val correlation = request.headers.get(ci"X-Correlation-Id").map(_.head.value).getOrElse("")
+      routes(request).map(_.putHeaders("X-Correlation-Id" -> correlation))
+=== END
+
+=== EDIT
+note: generate a correlation id when the header is absent
+--- file: server/src/main/scala/com/gatekeep/auth/RequestIdMiddleware.scala
+--- before
+package com.gatekeep.auth
+
+import cats.data.Kleisli
+import cats.effect.IO
+import org.http4s.{HttpRoutes, Request}
+
+object RequestIdMiddleware:
+
+  def apply(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+    Kleisli((request: Request[IO]) => routes(request))
+--- after
+package com.gatekeep.auth
+
+import cats.data.{Kleisli, OptionT}
+import cats.effect.IO
+import cats.effect.std.UUIDGen
+import org.http4s.{HttpRoutes, Request}
+import org.typelevel.ci.*
+
+object RequestIdMiddleware:
+
+  def apply(routes: HttpRoutes[IO]): HttpRoutes[IO] =
+    Kleisli: (request: Request[IO]) =>
+      val existing = request.headers.get(ci"X-Request-Id").map(_.head.value)
+      OptionT.liftF(existing.fold(UUIDGen[IO].randomUUID.map(_.toString))(IO.pure)).flatMap: id =>
+        routes(request).map(_.putHeaders("X-Request-Id" -> id))
+=== END
+
+=== EDIT
+note: add a munit test for the iban parser
+--- file: server/src/test/scala/com/payflow/payments/IbanParserSuite.scala
+--- before
+--- after
+package com.payflow.payments
+
+import munit.FunSuite
+
+class IbanParserSuite extends FunSuite:
+
+  test("country reads the two-letter prefix"):
+    assertEquals(IbanParser.country(IbanFixtures.swiss), Some("CH"))
+=== END
+
+=== EDIT
+note: collect on a Map[String, String] by pattern on key
+--- file: server/src/main/scala/com/telio/messaging/RoutingKeys.scala
+--- before
+package com.telio.messaging
+
+object RoutingKeys:
+
+  def all(headers: Map[String, String]): List[String] =
+    headers.values.toList
+--- after
+package com.telio.messaging
+
+object RoutingKeys:
+
+  def all(headers: Map[String, String]): List[String] =
+    headers.values.toList
+
+  def prefixed(headers: Map[String, String]): List[String] =
+    headers.toList.collect:
+      case (key, value) if key.startsWith("x-route-") => value
+=== END
+
+=== EDIT
+note: fs2 stream drops non-string records with collect
+--- file: server/src/main/scala/com/telio/messaging/LegacyTopicReader.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class LegacyTopicReader(consumer: RawConsumer[IO]):
+
+  def records: Stream[IO, Any] =
+    consumer.stream.map(_.value)
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class LegacyTopicReader(consumer: RawConsumer[IO]):
+
+  def records: Stream[IO, Any] =
+    consumer.stream.map(_.value)
+
+  def textRecords: Stream[IO, String] =
+    records.collect { case text: String => text }
+=== END
+
+=== EDIT
+note: fs2 stream raises on a non-string record
+--- file: server/src/main/scala/com/telio/messaging/AuditTopicReader.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class AuditTopicReader(consumer: RawConsumer[IO]):
+
+  def records: Stream[IO, Any] =
+    consumer.stream.map(_.value)
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class AuditTopicReader(consumer: RawConsumer[IO]):
+
+  def records: Stream[IO, Any] =
+    consumer.stream.map(_.value)
+
+  def textRecords: Stream[IO, String] =
+    records.evalMap:
+      case text: String => IO.pure(text)
+      case other        => IO.raiseError(MessagingError.UnexpectedRecord(other.getClass.getName))
+=== END
+
+=== EDIT
+note: toUnit with HOURS in a test assertion
+--- file: server/src/test/scala/com/metricly/analytics/JobReportSuite.scala
+--- before
+package com.metricly.analytics
+
+import munit.FunSuite
+
+class JobReportSuite extends FunSuite:
+
+  test("rowsPerHour divides rows by runtime"):
+    assertEquals(JobReportFixtures.twoHourJob.rowsPerHour, 500.0)
+--- after
+package com.metricly.analytics
+
+import java.util.concurrent.TimeUnit.HOURS
+import munit.FunSuite
+
+class JobReportSuite extends FunSuite:
+
+  test("rowsPerHour divides rows by runtime"):
+    assertEquals(JobReportFixtures.twoHourJob.rowsPerHour, 500.0)
+
+  test("rowsPerHour matches rows over the runtime in hours"):
+    val report = JobReportFixtures.twoHourJob
+    assertEquals(report.rowsPerHour, report.rows / report.runtime.toUnit(HOURS))
+=== END

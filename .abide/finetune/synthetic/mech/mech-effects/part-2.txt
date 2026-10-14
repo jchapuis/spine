@@ -1,0 +1,713 @@
+=== EDIT
+note: import global runtime in a service so a helper can unsafeRunSync
+--- file: server/src/main/scala/com/tempo/scheduling/Calendars.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+
+class Calendars(store: CalendarStore):
+
+  def busy(person: PersonRef, day: Day): IO[List[Slot]] =
+    store.busy(person, day)
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+
+class Calendars(store: CalendarStore):
+
+  def busy(person: PersonRef, day: Day): IO[List[Slot]] =
+    store.busy(person, day)
+
+  def isFree(person: PersonRef, day: Day, slot: Slot): Boolean =
+    !busy(person, day).unsafeRunSync().contains(slot)
+=== END
+
+=== EDIT
+note: isFree returns IO instead of running the effect
+--- file: server/src/main/scala/com/tempo/scheduling/Rooms.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+
+class Rooms(store: RoomStore):
+
+  def bookings(room: RoomRef, day: Day): IO[List[Slot]] =
+    store.bookings(room, day)
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+
+class Rooms(store: RoomStore):
+
+  def bookings(room: RoomRef, day: Day): IO[List[Slot]] =
+    store.bookings(room, day)
+
+  def isFree(room: RoomRef, day: Day, slot: Slot): IO[Boolean] =
+    bookings(room, day).map(!_.contains(slot))
+=== END
+
+=== EDIT
+note: reminder scheduler checks due time against Instant.now
+--- file: server/src/main/scala/com/tempo/scheduling/Reminders.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class Reminders(store: ReminderStore, sender: Sender):
+
+  def loop: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](1.minute).evalMap(_ => store.all.flatMap(sender.sendAll))
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import fs2.Stream
+import java.time.Instant
+import scala.concurrent.duration.*
+
+class Reminders(store: ReminderStore, sender: Sender):
+
+  def loop: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](1.minute).evalMap: _ =>
+      store.all.map(_.filter(_.due.isBefore(Instant.now))).flatMap(sender.sendAll)
+=== END
+
+=== EDIT
+note: reminder scheduler reads the time through the stream clock
+--- file: server/src/main/scala/com/tempo/scheduling/Digests.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class Digests(store: DigestStore, sender: Sender):
+
+  def loop: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](1.hour).evalMap(_ => store.all.flatMap(sender.sendAll))
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class Digests(store: DigestStore, sender: Sender):
+
+  def loop: Stream[IO, Unit] =
+    Stream.awakeEvery[IO](1.hour).evalMap: _ =>
+      IO.realTimeInstant.flatMap: now =>
+        store.all.map(_.filter(_.due.isBefore(now))).flatMap(sender.sendAll)
+=== END
+
+=== EDIT
+note: parEvalMapUnbounded over a fan-out of geocoding calls with multi-line lambda
+--- file: server/src/main/scala/com/cartograph/geo/BatchGeocoder.scala
+--- before
+package com.cartograph.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+class BatchGeocoder(geocoder: Geocoder):
+
+  def geocode(addresses: Stream[IO, Address]): Stream[IO, Located] =
+    addresses.evalMap: address =>
+      geocoder.lookup(address).map(Located(address, _))
+--- after
+package com.cartograph.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+class BatchGeocoder(geocoder: Geocoder):
+
+  def geocode(addresses: Stream[IO, Address]): Stream[IO, Located] =
+    addresses.parEvalMapUnbounded: address =>
+      geocoder.lookup(address).map(Located(address, _))
+=== END
+
+=== EDIT
+note: bounded parEvalMap with a configured concurrency for reverse geocoding
+--- file: server/src/main/scala/com/cartograph/geo/ReverseGeocoder.scala
+--- before
+package com.cartograph.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+class ReverseGeocoder(geocoder: Geocoder):
+
+  def resolve(points: Stream[IO, Coordinate]): Stream[IO, Located] =
+    points.evalMap(p => geocoder.reverse(p))
+--- after
+package com.cartograph.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+class ReverseGeocoder(geocoder: Geocoder, settings: GeoSettings):
+
+  def resolve(points: Stream[IO, Coordinate]): Stream[IO, Located] =
+    points.parEvalMap(settings.concurrency)(p => geocoder.reverse(p))
+=== END
+
+=== EDIT
+note: change a bounded parEvalMap into the unbounded variant
+--- file: server/src/main/scala/com/sensora/iot/Enricher.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Stream
+
+class Enricher(devices: DeviceCatalog):
+
+  def enrich(readings: Stream[IO, Reading]): Stream[IO, Enriched] =
+    readings.parEvalMap(16)(r => devices.lookup(r.device).map(Enriched(r, _)))
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Stream
+
+class Enricher(devices: DeviceCatalog):
+
+  def enrich(readings: Stream[IO, Reading]): Stream[IO, Enriched] =
+    readings.parEvalMapUnbounded(r => devices.lookup(r.device).map(Enriched(r, _)))
+=== END
+
+=== EDIT
+note: bounded parEvalMap on a pipeline alias with configurable parallelism
+--- file: server/src/main/scala/com/sensora/iot/Fanout.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+import com.sensora.iot.streams.Pipeline
+
+class Fanout(sink: ReadingSink):
+
+  def run(in: Pipeline[Reading]): Pipeline[Unit] =
+    in.evalMap(sink.write)
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+import com.sensora.iot.streams.Pipeline
+
+class Fanout(sink: ReadingSink, parallelism: Int):
+
+  def run(in: Pipeline[Reading]): Pipeline[Unit] =
+    in.parEvalMap(parallelism)(sink.write)
+=== END
+
+=== EDIT
+note: resolve a session from cache then store, raising a typed error without IO-level recovery
+--- file: server/src/main/scala/com/keystone/auth/SessionLookup.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class SessionLookup(cache: SessionCache, store: SessionStore):
+
+  def find(token: Token)(using Raise[IO, AuthError]): IO[Session] =
+    store.find(token).flatMap(IO.fromOption(_)(AuthError.Expired).flatMap(identity).pure[IO].flatten)
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class SessionLookup(cache: SessionCache, store: SessionStore):
+
+  def find(token: Token)(using Raise[IO, AuthError]): IO[Session] =
+    cache.get(token).flatMap:
+      case Some(session) => IO.pure(session)
+      case None => store.find(token).flatMap(_.fold(Raise[IO, AuthError].raise(AuthError.Expired))(IO.pure))
+=== END
+
+=== EDIT
+note: recover inside Handle.allow on a login flow
+--- file: server/src/main/scala/com/keystone/auth/LoginFlow.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class LoginFlow(users: Users, passwords: Passwords):
+
+  def login(name: Username, secret: Secret): IO[Either[AuthError, Token]] =
+    Handle.allow[AuthError]:
+      users.find(name).flatMap(passwords.verify(_, secret))
+    .rescue(e => IO.pure(Left(e)))
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class LoginFlow(users: Users, passwords: Passwords):
+
+  def login(name: Username, secret: Secret): IO[Either[AuthError, Token]] =
+    Handle.allow[AuthError]:
+      users.find(name).flatMap(passwords.verify(_, secret)).recover:
+        case _: java.util.concurrent.TimeoutException => Token.guest
+    .rescue(e => IO.pure(Left(e)))
+=== END
+
+=== EDIT
+note: move the timeout recovery outside the mtl scope into a separate non-mtl client
+--- file: server/src/main/scala/com/keystone/auth/PasswordClient.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+
+class PasswordClient(remote: RemoteVerifier):
+
+  def verify(user: User, secret: Secret): IO[Token] =
+    remote.verify(user, secret)
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class PasswordClient(remote: RemoteVerifier):
+
+  def verify(user: User, secret: Secret): IO[Token] =
+    remote.verify(user, secret).timeout(5.seconds).recover:
+      case _: java.util.concurrent.TimeoutException => Token.guest
+=== END
+
+=== EDIT
+note: attempt in an mtl test suite (excluded path)
+--- file: server/src/test/scala/com/keystone/auth/LoginFlowSuite.scala
+--- before
+package com.keystone.auth
+
+import cats.mtl.Handle
+import munit.CatsEffectSuite
+
+class LoginFlowSuite extends CatsEffectSuite:
+
+  test("unknown user is rejected"):
+    assertIO(Fixtures.flow.login(Fixtures.unknown, Fixtures.secret), Left(AuthError.UnknownUser))
+--- after
+package com.keystone.auth
+
+import cats.mtl.Handle
+import munit.CatsEffectSuite
+
+class LoginFlowSuite extends CatsEffectSuite:
+
+  test("unknown user is rejected"):
+    assertIO(Fixtures.flow.login(Fixtures.unknown, Fixtures.secret), Left(AuthError.UnknownUser))
+
+  test("store outage surfaces as a failed IO"):
+    Fixtures.brokenFlow.login(Fixtures.alice, Fixtures.secret).attempt.map(r => assert(r.isLeft))
+=== END
+
+=== EDIT
+note: laminar clock widget uses System.currentTimeMillis
+--- file: app/src/main/scala/com/tempo/ui/Countdown.scala
+--- before
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object Countdown:
+  def apply(deadlineMillis: Long): HtmlElement =
+    div(cls := "countdown", "starting soon")
+--- after
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object Countdown:
+  def apply(deadlineMillis: Long): HtmlElement =
+    div(
+      cls := "countdown",
+      child.text <-- EventStream.periodic(1000).map(_ => s"${(deadlineMillis - System.currentTimeMillis()) / 1000}s")
+    )
+=== END
+
+=== EDIT
+note: laminar countdown takes time from the app clock service
+--- file: app/src/main/scala/com/tempo/ui/SessionTimer.scala
+--- before
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object SessionTimer:
+  def apply(expiresAt: Long): HtmlElement =
+    div(cls := "session-timer")
+--- after
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object SessionTimer:
+  def apply(expiresAt: Long, clock: UiClock): HtmlElement =
+    div(
+      cls := "session-timer",
+      child.text <-- clock.ticks.map(now => s"${(expiresAt - now) / 1000}s left")
+    )
+=== END
+
+=== EDIT
+note: add a filter dropdown to a laminar page, effects-neutral
+--- file: app/src/main/scala/com/tempo/ui/AgendaFilters.scala
+--- before
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object AgendaFilters:
+  def apply(selected: Var[String]): HtmlElement =
+    select(controlled(value <-- selected, onChange.mapToValue --> selected), option("all"))
+--- after
+package com.tempo.ui
+
+import com.raquo.laminar.api.L.*
+
+object AgendaFilters:
+  def apply(selected: Var[String]): HtmlElement =
+    select(
+      controlled(value <-- selected, onChange.mapToValue --> selected),
+      option("all"),
+      option("mine"),
+      option("shared")
+    )
+=== END
+
+=== EDIT
+note: unsafeRunTimed in an integration test helper
+--- file: server/src/it/scala/com/ledgerly/payments/GatewayIt.scala
+--- before
+package com.ledgerly.payments
+
+import munit.FunSuite
+
+class GatewayIt extends FunSuite:
+
+  test("sandbox gateway is reachable"):
+    assert(Sandbox.url.nonEmpty)
+--- after
+package com.ledgerly.payments
+
+import cats.effect.unsafe.implicits.global
+import munit.FunSuite
+import scala.concurrent.duration.*
+
+class GatewayIt extends FunSuite:
+
+  test("sandbox gateway is reachable"):
+    assert(Sandbox.client.ping.unsafeRunTimed(10.seconds).contains(true))
+=== END
+
+=== EDIT
+note: IOApp entry point file runs unsafeRunSync for a CLI (excluded IOApp path)
+--- file: server/src/main/scala/com/ledgerly/tools/IOAppReconcile.scala
+--- before
+package com.ledgerly.tools
+
+import cats.effect.IO
+
+object IOAppReconcile:
+  def main(args: Array[String]): Unit = println("reconcile")
+--- after
+package com.ledgerly.tools
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+
+object IOAppReconcile:
+  def main(args: Array[String]): Unit =
+    given IORuntime = IORuntime.global
+    Reconciler.run(args.toList).unsafeRunSync()
+=== END
+
+=== EDIT
+note: proper IOApp for the reconcile CLI
+--- file: server/src/main/scala/com/ledgerly/tools/Reconcile.scala
+--- before
+package com.ledgerly.tools
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object Reconcile extends IOApp.Simple:
+  def run: IO[Unit] = IO.println("reconcile")
+--- after
+package com.ledgerly.tools
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object Reconcile extends IOApp.Simple:
+  def run: IO[Unit] = Reconciler.resource.use(_.reconcileAll).void
+=== END
+
+=== EDIT
+note: unsafeRunAsync callback in a JS interop bridge
+--- file: app/src/main/scala/com/acme/ui/Bridge.scala
+--- before
+package com.acme.ui
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import com.raquo.laminar.api.L.*
+
+class Bridge(api: InvoiceApi)(using IORuntime):
+
+  def load(into: Var[List[Invoice]]): Unit = ()
+--- after
+package com.acme.ui
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import com.raquo.laminar.api.L.*
+
+class Bridge(api: InvoiceApi)(using IORuntime):
+
+  def load(into: Var[List[Invoice]]): Unit =
+    api.list.unsafeRunAsync:
+      case Right(invoices) => into.set(invoices)
+      case Left(_) => into.set(Nil)
+=== END
+
+=== EDIT
+note: laminar loads invoices through an EventStream.fromFuture of an http call, no IO running
+--- file: app/src/main/scala/com/acme/ui/InvoiceList.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceList:
+  def apply(api: InvoiceFetch): HtmlElement =
+    ul(cls := "invoices")
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceList:
+  def apply(api: InvoiceFetch): HtmlElement =
+    ul(
+      cls := "invoices",
+      children <-- EventStream.fromFuture(api.list()).map(_.map(i => li(i.number)))
+    )
+=== END
+
+=== EDIT
+note: add a warn-level diagnostics log line
+--- file: server/src/main/scala/com/acme/audit/Diagnostics.scala
+--- before
+package com.acme.audit
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Diagnostics(using Logger[IO]):
+  def report: IO[Unit] = Logger[IO].info("diagnostics ok")
+--- after
+package com.acme.audit
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Diagnostics(using Logger[IO]):
+  def report: IO[Unit] = Logger[IO].info("diagnostics ok")
+  def blocked: IO[Unit] = Logger[IO].warn("a caller blocked on the runtime, check for stray runs")
+=== END
+
+=== EDIT
+note: Session.single for a read replica in a reporting service
+--- file: server/src/main/scala/com/pulse/analytics/ReplicaReader.scala
+--- before
+package com.pulse.analytics
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+class ReplicaReader(config: ReplicaConfig):
+  def daily(day: Day): IO[List[PageView]] = IO.pure(Nil)
+--- after
+package com.pulse.analytics
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+class ReplicaReader(config: ReplicaConfig):
+  def daily(day: Day): IO[List[PageView]] =
+    Session.single[IO](config.host, config.port, config.user, config.db).use(_.execute(Queries.daily)(day))
+=== END
+
+=== EDIT
+note: reporting service takes a pooled session resource
+--- file: server/src/main/scala/com/pulse/analytics/WeeklyReader.scala
+--- before
+package com.pulse.analytics
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+
+class WeeklyReader(sessions: Resource[IO, Session[IO]]):
+  def weekly(week: Week): IO[List[PageView]] = IO.pure(Nil)
+--- after
+package com.pulse.analytics
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+
+class WeeklyReader(sessions: Resource[IO, Session[IO]]):
+  def weekly(week: Week): IO[List[PageView]] =
+    sessions.use(_.execute(Queries.weekly)(week))
+=== END
+
+=== EDIT
+note: change pool size in a file whose Session.single sits untouched elsewhere
+--- file: server/src/main/scala/com/pulse/analytics/db/Connections.scala
+--- before
+package com.pulse.analytics.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Connections:
+  val poolSize: Int = 4
+
+  def admin(cfg: DbConfig): Resource[IO, Session[IO]] =
+    Session.single[IO](cfg.host, cfg.port, cfg.adminUser, cfg.db)
+--- after
+package com.pulse.analytics.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Connections:
+  val poolSize: Int = 12
+
+  def admin(cfg: DbConfig): Resource[IO, Session[IO]] =
+    Session.single[IO](cfg.host, cfg.port, cfg.adminUser, cfg.db)
+=== END
+
+=== EDIT
+note: replace Session.single by Session.pooled for the admin connection (fix)
+--- file: server/src/main/scala/com/pulse/analytics/db/AdminConnections.scala
+--- before
+package com.pulse.analytics.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object AdminConnections:
+  def admin(cfg: DbConfig): Resource[IO, Session[IO]] =
+    Session.single[IO](cfg.host, cfg.port, cfg.adminUser, cfg.db)
+--- after
+package com.pulse.analytics.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object AdminConnections:
+  def admin(cfg: DbConfig): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](cfg.host, cfg.port, cfg.adminUser, cfg.db, max = 2)
+=== END
+
+=== EDIT
+note: compute an elapsed retry backoff with System.nanoTime in a helper object
+--- file: server/src/main/scala/com/relay/messaging/Backoff.scala
+--- before
+package com.relay.messaging
+
+import scala.concurrent.duration.*
+
+object Backoff:
+  def next(attempt: Int): FiniteDuration = (100 * math.pow(2, attempt)).toLong.millis
+--- after
+package com.relay.messaging
+
+import scala.concurrent.duration.*
+
+object Backoff:
+  def next(attempt: Int): FiniteDuration = (100 * math.pow(2, attempt)).toLong.millis
+
+  def jitter: FiniteDuration = (System.nanoTime % 50).millis
+=== END
+
+=== EDIT
+note: jitter drawn from Random[IO]
+--- file: server/src/main/scala/com/relay/messaging/Jitter.scala
+--- before
+package com.relay.messaging
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+object Jitter:
+  val maxMillis: Int = 50
+--- after
+package com.relay.messaging
+
+import cats.effect.IO
+import cats.effect.std.Random
+import scala.concurrent.duration.*
+
+object Jitter:
+  val maxMillis: Int = 50
+
+  def draw(using Random[IO]): IO[FiniteDuration] =
+    Random[IO].nextIntBounded(maxMillis).map(_.millis)
+=== END
+
+=== EDIT
+note: add a topic filter in a consumer, unrelated
+--- file: server/src/main/scala/com/relay/messaging/Consumer.scala
+--- before
+package com.relay.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class Consumer(source: Stream[IO, Envelope], handler: Handler):
+  def run: Stream[IO, Unit] = source.evalMap(handler.handle)
+--- after
+package com.relay.messaging
+
+import cats.effect.IO
+import fs2.Stream
+
+class Consumer(source: Stream[IO, Envelope], handler: Handler, topics: Set[Topic]):
+  def run: Stream[IO, Unit] = source.filter(e => topics.contains(e.topic)).evalMap(handler.handle)
+=== END

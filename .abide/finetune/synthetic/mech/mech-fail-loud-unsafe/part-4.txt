@@ -1,0 +1,808 @@
+=== EDIT
+note: finalize releases a pooled connection back to the pool
+--- file: server/src/main/scala/com/ledgerly/billing/PooledStatement.scala
+--- before
+package com.ledgerly.billing
+
+import java.sql.{Connection, PreparedStatement}
+
+class PooledStatement(connection: Connection, sql: String):
+
+  private val statement: PreparedStatement = connection.prepareStatement(sql)
+
+  def executeUpdate(): Int =
+    statement.executeUpdate()
+--- after
+package com.ledgerly.billing
+
+import java.sql.{Connection, PreparedStatement}
+
+class PooledStatement(connection: Connection, sql: String):
+
+  private val statement: PreparedStatement = connection.prepareStatement(sql)
+
+  def executeUpdate(): Int =
+    statement.executeUpdate()
+
+  override def finalize(): Unit =
+    statement.close()
+    connection.close()
+=== END
+
+=== EDIT
+note: finalize decrements a live-instance gauge
+--- file: server/src/main/scala/com/metricly/analytics/TrackedBuffer.scala
+--- before
+package com.metricly.analytics
+
+import java.util.concurrent.atomic.AtomicLong
+
+class TrackedBuffer(capacity: Int, live: AtomicLong):
+
+  private val buffer = Array.ofDim[Double](capacity)
+
+  def at(index: Int): Double =
+    buffer(index)
+--- after
+package com.metricly.analytics
+
+import java.util.concurrent.atomic.AtomicLong
+
+class TrackedBuffer(capacity: Int, live: AtomicLong):
+
+  private val buffer = Array.ofDim[Double](capacity)
+
+  live.incrementAndGet()
+
+  def at(index: Int): Double =
+    buffer(index)
+
+  override def finalize(): Unit =
+    live.decrementAndGet()
+=== END
+
+=== EDIT
+note: finalize on a temp-file holder deletes the file
+--- file: server/src/main/scala/com/cartograph/maps/TempTileFile.scala
+--- before
+package com.cartograph.maps
+
+import java.nio.file.{Files, Path}
+
+class TempTileFile(prefix: String):
+
+  val path: Path = Files.createTempFile(prefix, ".png")
+
+  def write(bytes: Array[Byte]): Unit =
+    Files.write(path, bytes)
+--- after
+package com.cartograph.maps
+
+import java.nio.file.{Files, Path}
+
+class TempTileFile(prefix: String):
+
+  val path: Path = Files.createTempFile(prefix, ".png")
+
+  def write(bytes: Array[Byte]): Unit =
+    Files.write(path, bytes)
+
+  override def finalize(): Unit =
+    Files.deleteIfExists(path)
+=== END
+
+=== EDIT
+note: temp file managed with Resource.make and deleted on release
+--- file: server/src/main/scala/com/cartograph/maps/TempGeoJsonFile.scala
+--- before
+--- after
+package com.cartograph.maps
+
+import cats.effect.{IO, Resource}
+import java.nio.file.{Files, Path}
+
+object TempGeoJsonFile:
+
+  def make(prefix: String): Resource[IO, Path] =
+    Resource.make(IO.blocking(Files.createTempFile(prefix, ".geojson"))): path =>
+      IO.blocking(Files.deleteIfExists(path)).void
+=== END
+
+=== EDIT
+note: call a domain method named finalize on a draft, no override
+--- file: server/src/main/scala/com/acme/billing/IssueInvoice.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+
+class IssueInvoice(drafts: DraftInvoices):
+
+  def run(id: InvoiceId): IO[Invoice] =
+    drafts.finalizeDraft(id)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+
+class IssueInvoice(drafts: DraftInvoices, numbering: InvoiceNumbering[IO]):
+
+  def run(id: InvoiceId): IO[Invoice] =
+    numbering.next.flatMap(number => drafts.finalizeDraft(id).map(_.withNumber(number)))
+=== END
+
+=== EDIT
+note: existing finalize stays, edit only adds a size accessor
+--- file: server/src/main/scala/com/telio/messaging/FrameBuffer.scala
+--- before
+package com.telio.messaging
+
+import java.nio.ByteBuffer
+
+class FrameBuffer(direct: ByteBuffer):
+
+  def remaining: Int =
+    direct.remaining
+
+  override def finalize(): Unit =
+    direct.clear()
+--- after
+package com.telio.messaging
+
+import java.nio.ByteBuffer
+
+class FrameBuffer(direct: ByteBuffer):
+
+  def remaining: Int =
+    direct.remaining
+
+  def capacity: Int =
+    direct.capacity
+
+  override def finalize(): Unit =
+    direct.clear()
+=== END
+
+=== EDIT
+note: fromListUnsafe on the result of a filter in a service
+--- file: server/src/main/scala/com/payflow/payments/PayoutService.scala
+--- before
+package com.payflow.payments
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class PayoutService(bank: BankGateway[IO], merchants: MerchantRepository[IO]):
+
+  def payout(day: BusinessDay): IO[Unit] =
+    merchants.withBalance(day).flatMap(bank.transferAll)
+--- after
+package com.payflow.payments
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class PayoutService(bank: BankGateway[IO], merchants: MerchantRepository[IO]):
+
+  def payout(day: BusinessDay): IO[Unit] =
+    merchants.withBalance(day).flatMap(bank.transferAll)
+
+  def payoutVerified(day: BusinessDay): IO[Unit] =
+    merchants.all.flatMap: all =>
+      bank.transferAll(NonEmptyList.fromListUnsafe(all.filter(_.kycVerified)))
+=== END
+
+=== EDIT
+note: fromListUnsafe in a for-comprehension binding
+--- file: server/src/main/scala/com/skyline/weather/StationBatchJob.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+class StationBatchJob(stations: StationRepository[IO], ingest: ReadingIngest[IO]):
+
+  def run: IO[Unit] =
+    stations.active.flatMap(ingest.pullAll)
+--- after
+package com.skyline.weather
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class StationBatchJob(stations: StationRepository[IO], ingest: ReadingIngest[IO]):
+
+  def run: IO[Unit] =
+    for
+      active <- stations.active
+      batch   = NonEmptyList.fromListUnsafe(active.sortBy(_.priority))
+      _      <- ingest.pullBatch(batch)
+    yield ()
+=== END
+
+=== EDIT
+note: fromListUnsafe inside a Laminar signal map
+--- file: app/src/main/scala/com/planwise/scheduling/ui/WeekStrip.scala
+--- before
+package com.planwise.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+object WeekStrip:
+
+  def apply(days: Signal[List[DaySummary]]): HtmlElement =
+    div(
+      cls := "week-strip",
+      children <-- days.map(_.map(DayCell(_)))
+    )
+--- after
+package com.planwise.scheduling.ui
+
+import cats.data.NonEmptyList
+import com.raquo.laminar.api.L.*
+
+object WeekStrip:
+
+  def apply(days: Signal[List[DaySummary]]): HtmlElement =
+    div(
+      cls := "week-strip",
+      child <-- days.map(all => WeekHeader(NonEmptyList.fromListUnsafe(all).head)),
+      children <-- days.map(_.map(DayCell(_)))
+    )
+=== END
+
+=== EDIT
+note: Laminar header uses headOption and renders nothing for an empty week
+--- file: app/src/main/scala/com/planwise/scheduling/ui/MonthStrip.scala
+--- before
+package com.planwise.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+object MonthStrip:
+
+  def apply(weeks: Signal[List[WeekSummary]]): HtmlElement =
+    div(
+      cls := "month-strip",
+      children <-- weeks.map(_.map(WeekCell(_)))
+    )
+--- after
+package com.planwise.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+object MonthStrip:
+
+  def apply(weeks: Signal[List[WeekSummary]]): HtmlElement =
+    div(
+      cls := "month-strip",
+      child.maybe <-- weeks.map(_.headOption.map(MonthHeader(_))),
+      children <-- weeks.map(_.map(WeekCell(_)))
+    )
+=== END
+
+=== EDIT
+note: existing fromListUnsafe kept, edit renames the method
+--- file: server/src/main/scala/com/stockly/inventory/CycleCount.scala
+--- before
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+
+object CycleCount:
+
+  def plan(bins: List[BinId]): NonEmptyList[BinId] =
+    NonEmptyList.fromListUnsafe(bins.distinct)
+--- after
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+
+object CycleCount:
+
+  def countPlan(bins: List[BinId]): NonEmptyList[BinId] =
+    NonEmptyList.fromListUnsafe(bins.distinct)
+=== END
+
+=== EDIT
+note: remove fromListUnsafe from the cycle count plan
+--- file: server/src/main/scala/com/stockly/inventory/SpotCheck.scala
+--- before
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+
+object SpotCheck:
+
+  def plan(bins: List[BinId]): NonEmptyList[BinId] =
+    NonEmptyList.fromListUnsafe(bins.distinct)
+--- after
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+
+object SpotCheck:
+
+  def plan(bins: List[BinId]): Option[NonEmptyList[BinId]] =
+    NonEmptyList.fromList(bins.distinct)
+=== END
+
+=== EDIT
+note: null as an Option default inside a copy
+--- file: server/src/main/scala/com/gatekeep/auth/PasswordReset.scala
+--- before
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class PasswordReset(users: UserRepository[IO], tokens: ResetTokens[IO]):
+
+  def request(email: Email): IO[Unit] =
+    users.byEmail(email).flatMap(_.traverse_(user => tokens.issue(user.id)))
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class PasswordReset(users: UserRepository[IO], tokens: ResetTokens[IO]):
+
+  def request(email: Email): IO[Unit] =
+    users.byEmail(email).flatMap(_.traverse_(user => tokens.issue(user.id)))
+
+  def complete(user: User, password: PasswordHash): IO[Unit] =
+    users.save(user.copy(passwordHash = password, resetToken = null))
+=== END
+
+=== EDIT
+note: nullable java field checked with ne null
+--- file: server/src/main/scala/com/orbital/telemetry/GpsFixAdapter.scala
+--- before
+package com.orbital.telemetry
+
+object GpsFixAdapter:
+
+  def altitude(fix: NativeGpsFix): Meters =
+    Meters(fix.altitude)
+--- after
+package com.orbital.telemetry
+
+object GpsFixAdapter:
+
+  def altitude(fix: NativeGpsFix): Meters =
+    Meters(fix.altitude)
+
+  def satellites(fix: NativeGpsFix): List[SatelliteId] =
+    if fix.satellites ne null then fix.satellites.toList.map(SatelliteId(_))
+    else List.empty
+=== END
+
+=== EDIT
+note: wrap the nullable java array with Option before mapping
+--- file: server/src/main/scala/com/orbital/telemetry/ImuAdapter.scala
+--- before
+package com.orbital.telemetry
+
+object ImuAdapter:
+
+  def heading(sample: NativeImuSample): Degrees =
+    Degrees(sample.heading)
+--- after
+package com.orbital.telemetry
+
+object ImuAdapter:
+
+  def heading(sample: NativeImuSample): Degrees =
+    Degrees(sample.heading)
+
+  def axes(sample: NativeImuSample): Option[List[Acceleration]] =
+    Option(sample.axes).map(_.toList.map(Acceleration(_)))
+=== END
+
+=== EDIT
+note: throw in a default case of a match on a string code
+--- file: server/src/main/scala/com/payflow/payments/CardBrand.scala
+--- before
+package com.payflow.payments
+
+enum CardBrand:
+  case Visa, Mastercard, Amex
+--- after
+package com.payflow.payments
+
+enum CardBrand:
+  case Visa, Mastercard, Amex
+
+object CardBrand:
+
+  def fromCode(code: String): CardBrand =
+    code match
+      case "VI" => Visa
+      case "MC" => Mastercard
+      case "AX" => Amex
+      case other => throw new MatchError(s"unknown card brand $other")
+=== END
+
+=== EDIT
+note: card brand lookup returns Either
+--- file: server/src/main/scala/com/payflow/payments/WalletKind.scala
+--- before
+package com.payflow.payments
+
+enum WalletKind:
+  case ApplePay, GooglePay
+--- after
+package com.payflow.payments
+
+enum WalletKind:
+  case ApplePay, GooglePay
+
+object WalletKind:
+
+  def fromCode(code: String): Either[PaymentError, WalletKind] =
+    code match
+      case "AP"  => Right(ApplePay)
+      case "GP"  => Right(GooglePay)
+      case other => Left(PaymentError.UnknownWallet(other))
+=== END
+
+=== EDIT
+note: throw inside an fs2 evalMap
+--- file: server/src/main/scala/com/stockly/inventory/PriceFeed.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+import fs2.Stream
+
+class PriceFeed(source: PriceSource[IO]):
+
+  def updates: Stream[IO, PriceUpdate] =
+    source.stream.map(PriceUpdate.fromRaw)
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+import fs2.Stream
+
+class PriceFeed(source: PriceSource[IO]):
+
+  def updates: Stream[IO, PriceUpdate] =
+    source.stream.map(PriceUpdate.fromRaw).evalMap: update =>
+      IO:
+        if update.price.isNegative then throw InventoryError.NegativePrice(update.sku)
+        update
+=== END
+
+=== EDIT
+note: asInstanceOf on an Akka-style message in a receive helper
+--- file: server/src/main/scala/com/telio/messaging/LegacyBridge.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import cats.effect.std.Queue
+
+class LegacyBridge(queue: Queue[IO, Message]):
+
+  def offer(message: Message): IO[Unit] =
+    queue.offer(message)
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import cats.effect.std.Queue
+
+class LegacyBridge(queue: Queue[IO, Message]):
+
+  def offer(message: Message): IO[Unit] =
+    queue.offer(message)
+
+  def onLegacy(payload: AnyRef): IO[Unit] =
+    offer(Message.fromLegacy(payload.asInstanceOf[LegacyEnvelope]))
+=== END
+
+=== EDIT
+note: legacy payload matched by type and unknown ones raised
+--- file: server/src/main/scala/com/telio/messaging/LegacyIngress.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import cats.effect.std.Queue
+
+class LegacyIngress(queue: Queue[IO, Message]):
+
+  def offer(message: Message): IO[Unit] =
+    queue.offer(message)
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import cats.effect.std.Queue
+
+class LegacyIngress(queue: Queue[IO, Message]):
+
+  def offer(message: Message): IO[Unit] =
+    queue.offer(message)
+
+  def onLegacy(payload: AnyRef): IO[Unit] =
+    payload match
+      case envelope: LegacyEnvelope => offer(Message.fromLegacy(envelope))
+      case other                    => IO.raiseError(MessagingError.UnknownPayload(other.getClass.getName))
+=== END
+
+=== EDIT
+note: isInstanceOf used in exists over a list of errors
+--- file: server/src/main/scala/com/acme/orders/OrderValidation.scala
+--- before
+package com.acme.orders
+
+import cats.data.NonEmptyChain
+
+object OrderValidation:
+
+  def summary(errors: NonEmptyChain[OrderError]): String =
+    errors.map(_.message).toChain.toList.mkString("; ")
+--- after
+package com.acme.orders
+
+import cats.data.NonEmptyChain
+
+object OrderValidation:
+
+  def summary(errors: NonEmptyChain[OrderError]): String =
+    errors.map(_.message).toChain.toList.mkString("; ")
+
+  def blocksCheckout(errors: NonEmptyChain[OrderError]): Boolean =
+    errors.exists(_.isInstanceOf[OrderError.OutOfStock])
+=== END
+
+=== EDIT
+note: isInstanceOf on a Throwable in a retry predicate
+--- file: server/src/main/scala/com/skyline/weather/ObservationUploader.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+class ObservationUploader(client: ObservationClient[IO]):
+
+  def upload(batch: ObservationBatch): IO[Unit] =
+    client.upload(batch)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import java.net.SocketTimeoutException
+
+class ObservationUploader(client: ObservationClient[IO]):
+
+  def upload(batch: ObservationBatch): IO[Unit] =
+    client.upload(batch).handleErrorWith: error =>
+      if error.isInstanceOf[SocketTimeoutException] then client.upload(batch)
+      else IO.raiseError(error)
+=== END
+
+=== EDIT
+note: retry only on timeouts via recoverWith pattern
+--- file: server/src/main/scala/com/skyline/weather/ForecastUploader.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+class ForecastUploader(client: ForecastSink[IO]):
+
+  def upload(batch: ForecastBatch): IO[Unit] =
+    client.upload(batch)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import java.net.SocketTimeoutException
+
+class ForecastUploader(client: ForecastSink[IO]):
+
+  def upload(batch: ForecastBatch): IO[Unit] =
+    client.upload(batch).recoverWith:
+      case _: SocketTimeoutException => client.upload(batch)
+=== END
+
+=== EDIT
+note: add a ScalaCheck property for the route planner
+--- file: server/src/test/scala/com/northwind/routing/RoutePlannerSuite.scala
+--- before
+package com.northwind.routing
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class RoutePlannerSuite extends ScalaCheckSuite:
+
+  property("total distance is never negative"):
+    forAll(RouteGenerators.route)(route => RoutePlanner.totalDistance(route).value >= 0)
+--- after
+package com.northwind.routing
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class RoutePlannerSuite extends ScalaCheckSuite:
+
+  property("total distance is never negative"):
+    forAll(RouteGenerators.route)(route => RoutePlanner.totalDistance(route).value >= 0)
+
+  property("total distance equals the sum of leg distances"):
+    forAll(RouteGenerators.route): route =>
+      assertEquals(RoutePlanner.totalDistance(route), route.legs.map(_.distance).fold(Kilometers.zero)(_ + _))
+=== END
+
+=== EDIT
+note: rename the http4s server port setting
+--- file: server/src/main/scala/com/freightly/routing/ServerConfig.scala
+--- before
+package com.freightly.routing
+
+import com.comcast.ip4s.Port
+
+case class ServerConfig(httpPort: Port, adminPort: Port)
+--- after
+package com.freightly.routing
+
+import com.comcast.ip4s.{Host, Port}
+
+case class ServerConfig(host: Host, httpPort: Port, adminPort: Port)
+=== END
+
+=== EDIT
+note: replace the throw with IO.raiseError in the dispatcher
+--- file: server/src/main/scala/com/freightly/routing/CourierAssigner.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+
+class CourierAssigner(couriers: CourierPool[IO]):
+
+  def assign(parcel: Parcel): IO[Courier] =
+    couriers.nearest(parcel.pickup).map:
+      case Some(courier) => courier
+      case None          => throw RoutingError.NoCourier(parcel.id)
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+
+class CourierAssigner(couriers: CourierPool[IO]):
+
+  def assign(parcel: Parcel): IO[Courier] =
+    couriers.nearest(parcel.pickup).flatMap:
+      case Some(courier) => IO.pure(courier)
+      case None          => IO.raiseError(RoutingError.NoCourier(parcel.id))
+=== END
+
+=== EDIT
+note: replace the null default with None
+--- file: server/src/main/scala/com/acme/payments/RefundRequest.scala
+--- before
+package com.acme.payments
+
+import io.circe.Codec
+
+case class RefundRequest(paymentId: PaymentId, amount: Amount, note: RefundNote = null) derives Codec.AsObject
+--- after
+package com.acme.payments
+
+import io.circe.Codec
+
+case class RefundRequest(paymentId: PaymentId, amount: Amount, note: Option[RefundNote] = None) derives Codec.AsObject
+=== END
+
+=== EDIT
+note: null-initialised lazy holder in an object
+--- file: server/src/main/scala/com/metricly/analytics/RegistryHolder.scala
+--- before
+package com.metricly.analytics
+
+import cats.effect.IO
+import cats.effect.kernel.Ref
+
+object RegistryHolder:
+
+  def make: IO[Ref[IO, MetricRegistry]] =
+    Ref.of[IO, MetricRegistry](MetricRegistry.empty)
+--- after
+package com.metricly.analytics
+
+import cats.effect.IO
+import cats.effect.kernel.Ref
+
+object RegistryHolder:
+
+  def make: IO[Ref[IO, MetricRegistry]] =
+    Ref.of[IO, MetricRegistry](MetricRegistry.empty)
+
+  def uninitialised: IO[Ref[IO, MetricRegistry]] =
+    Ref.of[IO, MetricRegistry](null)
+=== END
+
+=== EDIT
+note: asInstanceOf to satisfy a variance mismatch in a tapir endpoint list
+--- file: server/src/main/scala/com/gatekeep/auth/AuthServer.scala
+--- before
+package com.gatekeep.auth
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class AuthServer(sessions: SessionRoutes, users: UserRoutes):
+
+  val endpoints: List[ServerEndpoint[Any, IO]] =
+    sessions.all ++ users.all
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class AuthServer(sessions: SessionRoutes, users: UserRoutes, admin: AdminRoutes):
+
+  val endpoints: List[ServerEndpoint[Any, IO]] =
+    sessions.all ++ users.all ++ admin.all.asInstanceOf[List[ServerEndpoint[Any, IO]]]
+=== END
+
+=== EDIT
+note: add a hit ratio that is absent when there were no lookups
+--- file: server/src/main/scala/com/metricly/analytics/CacheStats.scala
+--- before
+package com.metricly.analytics
+
+case class CacheStats(hits: Long, misses: Long)
+--- after
+package com.metricly.analytics
+
+case class CacheStats(hits: Long, misses: Long):
+
+  def hitRatio: Option[Double] =
+    Option.when(hits + misses > 0)(hits.toDouble / (hits + misses))
+=== END
+
+=== EDIT
+note: add an xlsx export method to the trait
+--- file: server/src/main/scala/com/acme/orders/OrderExporter.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+
+trait OrderExporter:
+  def csv(orders: List[Order]): IO[Array[Byte]]
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+
+trait OrderExporter:
+  def csv(orders: List[Order]): IO[Array[Byte]]
+  def xlsx(orders: List[Order]): IO[Array[Byte]]
+=== END
+
+=== EDIT
+note: throw a wrapped exception from a test helper
+--- file: server/src/test/scala/com/ledgerly/billing/LedgerFixtures.scala
+--- before
+package com.ledgerly.billing
+
+object LedgerFixtures:
+
+  val opening: LedgerEntry = LedgerEntry(EntryId(1), Amount(10000), EntryKind.Opening)
+--- after
+package com.ledgerly.billing
+
+object LedgerFixtures:
+
+  val opening: LedgerEntry = LedgerEntry(EntryId(1), Amount(10000), EntryKind.Opening)
+
+  def entry(raw: String): LedgerEntry =
+    LedgerEntry.parse(raw).fold(error => throw new AssertionError(error.message), identity)
+=== END

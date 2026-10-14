@@ -1,0 +1,1147 @@
+=== TURN
+note: [pos factor-out.no-utils-object] add a Utils object for bin labels and use it from BinService
+--- file: server/src/main/scala/com/northwind/warehouse/Utils.scala
+--- before
+--- after
+package com.northwind.warehouse
+
+object Utils:
+  def binLabel(aisle: Int, shelf: Int, slot: Int): String =
+    s"A$aisle-S$shelf-$slot"
+
+  def normaliseSku(raw: String): String =
+    raw.trim.toUpperCase.replace(" ", "")
+--- file: server/src/main/scala/com/northwind/warehouse/BinService.scala
+--- before
+package com.northwind.warehouse
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class BinService(bins: BinRepository):
+  def assign(sku: String, location: BinLocation): IO[Bin] =
+    bins.insert(Bin(sku, location))
+
+  def assignAll(items: List[(String, BinLocation)]): IO[List[Bin]] =
+    items.traverse((sku, location) => assign(sku, location))
+--- after
+package com.northwind.warehouse
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class BinService(bins: BinRepository):
+  def assign(sku: String, location: BinLocation): IO[Bin] =
+    bins.insert(Bin(Utils.normaliseSku(sku), location))
+
+  def assignAll(items: List[(String, BinLocation)]): IO[List[Bin]] =
+    items.traverse((sku, location) => assign(sku, location))
+
+  def label(location: BinLocation): String =
+    Utils.binLabel(location.aisle, location.shelf, location.slot)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same fuel surcharge line pasted into three carrier rate tables
+--- file: server/src/main/scala/com/cargoline/shipping/rates/DhlRates.scala
+--- before
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object DhlRates extends CarrierRates:
+  val baseRate = BigDecimal("4.90")
+
+  def quote(parcel: Parcel): Price =
+    Price(baseRate + parcel.weightKg * BigDecimal("1.10"))
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object DhlRates extends CarrierRates:
+  val baseRate = BigDecimal("4.90")
+  val fuelSurchargeRate = BigDecimal(0.075)
+
+  def quote(parcel: Parcel): Price =
+    Price((baseRate + parcel.weightKg * BigDecimal("1.10")) * (1 + fuelSurchargeRate))
+--- file: server/src/main/scala/com/cargoline/shipping/rates/UpsRates.scala
+--- before
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object UpsRates extends CarrierRates:
+  val baseRate = BigDecimal("5.40")
+
+  def quote(parcel: Parcel): Price =
+    Price(baseRate + parcel.weightKg * BigDecimal("0.95"))
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object UpsRates extends CarrierRates:
+  val baseRate = BigDecimal("5.40")
+  val fuelSurchargeRate = BigDecimal(0.075)
+
+  def quote(parcel: Parcel): Price =
+    Price((baseRate + parcel.weightKg * BigDecimal("0.95")) * (1 + fuelSurchargeRate))
+--- file: server/src/main/scala/com/cargoline/shipping/rates/FedexRates.scala
+--- before
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object FedexRates extends CarrierRates:
+  val baseRate = BigDecimal("6.10")
+
+  def quote(parcel: Parcel): Price =
+    Price(baseRate + parcel.weightKg * BigDecimal("0.80"))
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.{Parcel, Price}
+
+object FedexRates extends CarrierRates:
+  val baseRate = BigDecimal("6.10")
+  val fuelSurchargeRate = BigDecimal(0.075)
+
+  def quote(parcel: Parcel): Price =
+    Price((baseRate + parcel.weightKg * BigDecimal("0.80")) * (1 + fuelSurchargeRate))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new reservation repository copies the stock repository's skunk import block
+--- file: server/src/main/scala/com/northwind/inventory/StockReservationRepository.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class StockReservationRepository(pool: Resource[IO, Session[IO]]):
+  private val insertReservation =
+    sql"INSERT INTO stock_reservation (sku, order_id, quantity) VALUES ($text, $uuid, $int4)".command
+
+  def reserve(sku: String, orderId: java.util.UUID, quantity: Int): IO[Unit] =
+    pool.use: session =>
+      session.prepare(insertReservation).flatMap(_.execute((sku, orderId, quantity))).void
+--- file: server/src/main/scala/com/northwind/inventory/StockLevelRepository.scala
+--- before
+package com.northwind.inventory
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class StockLevelRepository(pool: Resource[IO, Session[IO]]):
+  private val selectLevel =
+    sql"SELECT quantity FROM stock_level WHERE sku = $text".query(int4)
+
+  def level(sku: String): IO[Option[Int]] =
+    pool.use(session => session.prepare(selectLevel).flatMap(_.option(sku)))
+--- after
+package com.northwind.inventory
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class StockLevelRepository(pool: Resource[IO, Session[IO]]):
+  private val selectLevel =
+    sql"SELECT quantity FROM stock_level WHERE sku = $text".query(int4)
+
+  private val decrementLevel =
+    sql"UPDATE stock_level SET quantity = quantity - $int4 WHERE sku = $text".command
+
+  def level(sku: String): IO[Option[Int]] =
+    pool.use(session => session.prepare(selectLevel).flatMap(_.option(sku)))
+
+  def decrement(sku: String, quantity: Int): IO[Unit] =
+    pool.use(session => session.prepare(decrementLevel).flatMap(_.execute((quantity, sku))).void)
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] stock summary script folds per-warehouse maps with foldLeft(Map.empty)(_ |+| _)
+--- file: scripts/stock-summary.sc
+--- before
+--- after
+import cats.syntax.semigroup.*
+import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
+
+def readCounts(file: Path): Map[String, Int] =
+  Files.readAllLines(file).asScala.toList
+    .drop(1)
+    .map(_.split(","))
+    .collect:
+      case Array(sku, quantity) => sku -> quantity.trim.toInt
+    .toMap
+
+val warehouses = List("lyon.csv", "torino.csv", "basel.csv").map(Path.of(_))
+val totals = warehouses.map(readCounts).foldLeft(Map.empty[String, Int])(_ |+| _)
+
+totals.toList.sortBy(-_._2).take(20).foreach((sku, quantity) => println(s"$sku\t$quantity"))
+--- file: server/src/main/scala/com/northwind/inventory/StockExport.scala
+--- before
+package com.northwind.inventory
+
+import cats.effect.IO
+
+class StockExport(levels: StockLevelRepository):
+  def header: String = "sku,quantity"
+--- after
+package com.northwind.inventory
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class StockExport(levels: StockLevelRepository):
+  def header: String = "sku,quantity"
+
+  def rows(skus: List[String]): IO[List[String]] =
+    skus.traverse: sku =>
+      levels.level(sku).map(quantity => s"$sku,${quantity.getOrElse(0)}")
+=== END
+=== TURN
+note: [near no-utils-object] pick-list formatting goes into a domain-named PickListFormat module instead of a Utils grab bag
+--- file: server/src/main/scala/com/northwind/warehouse/picking/PickListFormat.scala
+--- before
+--- after
+package com.northwind.warehouse.picking
+
+object PickListFormat:
+  def line(item: PickItem): String =
+    s"${item.binLabel.padTo(12, ' ')}${item.sku.padTo(14, ' ')}x${item.quantity}"
+
+  def document(list: PickList): String =
+    (s"Pick list ${list.id}" :: list.items.sortBy(_.binLabel).map(line)).mkString("\n")
+--- file: server/src/main/scala/com/northwind/warehouse/picking/PickListPrinter.scala
+--- before
+package com.northwind.warehouse.picking
+
+import cats.effect.IO
+
+class PickListPrinter(printer: LabelPrinter):
+  def print(list: PickList): IO[Unit] =
+    val body = list.items.map(item => s"${item.binLabel} ${item.sku} x${item.quantity}").mkString("\n")
+    printer.send(s"Pick list ${list.id}\n$body")
+--- after
+package com.northwind.warehouse.picking
+
+import cats.effect.IO
+
+class PickListPrinter(printer: LabelPrinter):
+  def print(list: PickList): IO[Unit] =
+    printer.send(PickListFormat.document(list))
+=== END
+=== TURN
+note: [clean] add a tracking endpoint and its route test
+--- file: server/src/main/scala/com/cargoline/shipping/http/TrackingEndpoints.scala
+--- before
+package com.cargoline.shipping.http
+
+import com.cargoline.shipping.model.TrackingNumber
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object TrackingEndpoints:
+  val status =
+    endpoint.get
+      .in("tracking" / path[TrackingNumber]("number"))
+      .out(jsonBody[TrackingStatus])
+--- after
+package com.cargoline.shipping.http
+
+import com.cargoline.shipping.model.TrackingNumber
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object TrackingEndpoints:
+  val status =
+    endpoint.get
+      .in("tracking" / path[TrackingNumber]("number"))
+      .out(jsonBody[TrackingStatus])
+
+  val history =
+    endpoint.get
+      .in("tracking" / path[TrackingNumber]("number") / "history")
+      .out(jsonBody[List[TrackingEvent]])
+--- file: server/src/test/scala/com/cargoline/shipping/http/TrackingRoutesSuite.scala
+--- before
+package com.cargoline.shipping.http
+
+import cats.effect.IO
+import munit.CatsEffectSuite
+import org.http4s.implicits.*
+
+class TrackingRoutesSuite extends CatsEffectSuite:
+  test("status returns the latest event"):
+    val routes = TrackingRoutes(StubTracking.delivered).routes
+    routes.orNotFound.run(GET(uri"/tracking/CL123")).map(response => assertEquals(response.status.code, 200))
+--- after
+package com.cargoline.shipping.http
+
+import cats.effect.IO
+import munit.CatsEffectSuite
+import org.http4s.implicits.*
+
+class TrackingRoutesSuite extends CatsEffectSuite:
+  test("status returns the latest event"):
+    val routes = TrackingRoutes(StubTracking.delivered).routes
+    routes.orNotFound.run(GET(uri"/tracking/CL123")).map(response => assertEquals(response.status.code, 200))
+
+  test("history lists every scan"):
+    val routes = TrackingRoutes(StubTracking.delivered).routes
+    routes.orNotFound.run(GET(uri"/tracking/CL123/history")).map(response => assertEquals(response.status.code, 200))
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] test helpers collected in a Utils object shared by two suites
+--- file: server/src/test/scala/com/cargoline/shipping/Utils.scala
+--- before
+--- after
+package com.cargoline.shipping
+
+import com.cargoline.shipping.model.*
+
+object Utils:
+  def parcel(id: String, weightKg: BigDecimal): Parcel =
+    Parcel(ParcelId(id), weightKg, Dimensions(30, 20, 10))
+
+  def address(city: String): Address =
+    Address("1 Quai du Port", city, "FR")
+--- file: server/src/test/scala/com/cargoline/shipping/LabelServiceSuite.scala
+--- before
+package com.cargoline.shipping
+
+import com.cargoline.shipping.model.*
+import munit.CatsEffectSuite
+
+class LabelServiceSuite extends CatsEffectSuite:
+  test("label carries the destination city"):
+    val parcel = Parcel(ParcelId("p-1"), BigDecimal(2), Dimensions(30, 20, 10))
+    LabelService.stub.render(parcel, Address("1 Quai du Port", "Marseille", "FR")).map: label =>
+      assert(label.contains("Marseille"))
+--- after
+package com.cargoline.shipping
+
+import com.cargoline.shipping.model.*
+import munit.CatsEffectSuite
+
+class LabelServiceSuite extends CatsEffectSuite:
+  test("label carries the destination city"):
+    LabelService.stub.render(Utils.parcel("p-1", BigDecimal(2)), Utils.address("Marseille")).map: label =>
+      assert(label.contains("Marseille"))
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] the same request timeout line repeated twice in one client and once in another
+--- file: server/src/main/scala/com/cargoline/shipping/carriers/DhlClient.scala
+--- before
+package com.cargoline.shipping.carriers
+
+import cats.effect.IO
+import org.http4s.client.Client
+import scala.concurrent.duration.*
+
+class DhlClient(http: Client[IO], base: org.http4s.Uri):
+  def book(request: BookingRequest): IO[BookingId] =
+    http.expect[BookingId](post(base / "shipments", request))
+
+  def cancel(id: BookingId): IO[Unit] =
+    http.expect[Unit](delete(base / "shipments" / id.value))
+--- after
+package com.cargoline.shipping.carriers
+
+import cats.effect.IO
+import org.http4s.client.Client
+import scala.concurrent.duration.*
+
+class DhlClient(http: Client[IO], base: org.http4s.Uri):
+  def book(request: BookingRequest): IO[BookingId] =
+    http.expect[BookingId](post(base / "shipments", request))
+      .timeout(2.5.seconds)
+
+  def cancel(id: BookingId): IO[Unit] =
+    http.expect[Unit](delete(base / "shipments" / id.value))
+      .timeout(2.5.seconds)
+--- file: server/src/main/scala/com/cargoline/shipping/carriers/UpsClient.scala
+--- before
+package com.cargoline.shipping.carriers
+
+import cats.effect.IO
+import org.http4s.Uri
+import org.http4s.client.Client
+
+class UpsClient(http: Client[IO], base: Uri):
+  def book(request: BookingRequest): IO[BookingId] =
+    http.expect[BookingId](post(base / "api" / "ship", request))
+--- after
+package com.cargoline.shipping.carriers
+
+import cats.effect.IO
+import org.http4s.Uri
+import org.http4s.client.Client
+import scala.concurrent.duration.*
+
+class UpsClient(http: Client[IO], base: Uri):
+  def book(request: BookingRequest): IO[BookingId] =
+    http.expect[BookingId](post(base / "api" / "ship", request))
+      .timeout(2.5.seconds)
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new ShipmentServiceSuite pastes ManifestServiceSuite's import block
+--- file: server/src/test/scala/com/cargoline/shipping/ShipmentServiceSuite.scala
+--- before
+--- after
+package com.cargoline.shipping
+
+import cats.effect.IO
+import cats.effect.Ref
+import com.cargoline.shipping.model.*
+import munit.CatsEffectSuite
+
+class ShipmentServiceSuite extends CatsEffectSuite:
+  test("dispatch records the shipment"):
+    for
+      store   <- Ref.of[IO, List[Shipment]](List.empty)
+      service  = ShipmentService(InMemoryShipments(store))
+      _       <- service.dispatch(ShipmentId("s-9"))
+      saved   <- store.get
+    yield assertEquals(saved.map(_.id), List(ShipmentId("s-9")))
+--- file: server/src/test/scala/com/cargoline/shipping/ManifestServiceSuite.scala
+--- before
+package com.cargoline.shipping
+
+import cats.effect.IO
+import cats.effect.Ref
+import com.cargoline.shipping.model.*
+import munit.CatsEffectSuite
+
+class ManifestServiceSuite extends CatsEffectSuite:
+  test("closing a manifest freezes its shipments"):
+    for
+      store   <- Ref.of[IO, List[Manifest]](List.empty)
+      service  = ManifestService(InMemoryManifests(store))
+      closed  <- service.close(ManifestId("m-1"))
+    yield assert(closed.frozen)
+--- after
+package com.cargoline.shipping
+
+import cats.effect.IO
+import cats.effect.Ref
+import com.cargoline.shipping.model.*
+import munit.CatsEffectSuite
+
+class ManifestServiceSuite extends CatsEffectSuite:
+  test("closing a manifest freezes its shipments"):
+    for
+      store   <- Ref.of[IO, List[Manifest]](List.empty)
+      service  = ManifestService(InMemoryManifests(store))
+      closed  <- service.close(ManifestId("m-1"))
+    yield assert(closed.frozen)
+
+  test("closing twice is rejected"):
+    for
+      store   <- Ref.of[IO, List[Manifest]](List.empty)
+      service  = ManifestService(InMemoryManifests(store))
+      _       <- service.close(ManifestId("m-1"))
+      second  <- service.close(ManifestId("m-1")).attempt
+    yield assert(second.isLeft)
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] package-less capacity report folds Monoid[Capacity].empty with |+|
+--- file: server/src/main/scala/WarehouseCapacity.scala
+--- before
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class Capacity(pallets: Int, usedPallets: Int)
+
+object Capacity:
+  given Monoid[Capacity] with
+    def empty = Capacity(0, 0)
+    def combine(left: Capacity, right: Capacity) =
+      Capacity(left.pallets + right.pallets, left.usedPallets + right.usedPallets)
+
+object WarehouseCapacity:
+  def network(sites: List[Capacity]): Capacity =
+    sites.foldLeft(Monoid[Capacity].empty)(_ |+| _)
+--- file: server/src/main/scala/com/northwind/warehouse/CapacityRoutes.scala
+--- before
+package com.northwind.warehouse
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class CapacityRoutes(sites: SiteRepository):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "capacity" / site =>
+      sites.capacity(site).flatMap(capacity => Ok(capacity.toString))
+--- after
+package com.northwind.warehouse
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class CapacityRoutes(sites: SiteRepository):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "capacity" / site =>
+      sites.capacity(site).flatMap(capacity => Ok(capacity.toString))
+    case GET -> Root / "capacity" =>
+      sites.all.map(WarehouseCapacity.network).flatMap(total => Ok(total.toString))
+=== END
+=== TURN
+note: [near repeated-numeric-literal] dimensional-weight divisor defined once as a named constant and referenced by three carriers
+--- file: server/src/main/scala/com/cargoline/shipping/rates/VolumetricWeight.scala
+--- before
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.Dimensions
+
+object VolumetricWeight:
+  val DivisorCm3PerKg = 5000.0
+
+  def of(dimensions: Dimensions): BigDecimal =
+    BigDecimal(dimensions.lengthCm * dimensions.widthCm * dimensions.heightCm / DivisorCm3PerKg)
+--- file: server/src/main/scala/com/cargoline/shipping/rates/ChargeableWeight.scala
+--- before
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.Parcel
+
+object ChargeableWeight:
+  def of(parcel: Parcel): BigDecimal =
+    parcel.weightKg.max(BigDecimal(parcel.dimensions.lengthCm * parcel.dimensions.widthCm * parcel.dimensions.heightCm / 5000.0))
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.Parcel
+
+object ChargeableWeight:
+  def of(parcel: Parcel): BigDecimal =
+    parcel.weightKg.max(VolumetricWeight.of(parcel.dimensions))
+=== END
+=== TURN
+note: [near duplicate-import-block] two new inventory files share most imports but one adds cats.syntax.traverse
+--- file: server/src/main/scala/com/northwind/inventory/ReorderService.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+
+class ReorderService(levels: StockLevelRepository, suppliers: SupplierGateway)(using Logger[IO]):
+  def reorderBelow(threshold: Int, skus: List[String]): IO[List[PurchaseOrder]] =
+    skus.flatTraverse: sku =>
+      levels.level(sku).flatMap:
+        case Some(quantity) if quantity < threshold =>
+          Logger[IO].info(s"reordering $sku at $quantity") *> suppliers.order(sku, threshold * 2).map(List(_))
+        case _ => IO.pure(List.empty)
+--- file: server/src/main/scala/com/northwind/inventory/ReorderJob.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+import scala.concurrent.duration.*
+
+class ReorderJob(service: ReorderService, catalog: Catalog)(using Logger[IO]):
+  def run: IO[Nothing] =
+    (catalog.activeSkus.flatMap(skus => service.reorderBelow(20, skus)) *> IO.sleep(1.hour)).foreverM
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] extract shared quantity parsing from two importers into a new Utils object
+--- file: server/src/main/scala/com/northwind/inventory/importing/Utils.scala
+--- before
+--- after
+package com.northwind.inventory.importing
+
+object Utils:
+  def parseQuantity(cell: String): Either[String, Int] =
+    cell.trim.toIntOption.filter(_ >= 0).toRight(s"invalid quantity '$cell'")
+--- file: server/src/main/scala/com/northwind/inventory/importing/CsvStockImporter.scala
+--- before
+package com.northwind.inventory.importing
+
+import cats.syntax.traverse.*
+
+object CsvStockImporter:
+  def parse(rows: List[Array[String]]): Either[String, List[StockRow]] =
+    rows.traverse:
+      case Array(sku, quantity) =>
+        quantity.trim.toIntOption.filter(_ >= 0).toRight(s"invalid quantity '$quantity'").map(StockRow(sku, _))
+      case other => Left(s"unexpected row ${other.mkString(",")}")
+--- after
+package com.northwind.inventory.importing
+
+import cats.syntax.traverse.*
+
+object CsvStockImporter:
+  def parse(rows: List[Array[String]]): Either[String, List[StockRow]] =
+    rows.traverse:
+      case Array(sku, quantity) => Utils.parseQuantity(quantity).map(StockRow(sku, _))
+      case other                => Left(s"unexpected row ${other.mkString(",")}")
+--- file: server/src/main/scala/com/northwind/inventory/importing/EdiStockImporter.scala
+--- before
+package com.northwind.inventory.importing
+
+import cats.syntax.traverse.*
+
+object EdiStockImporter:
+  def parse(segments: List[EdiSegment]): Either[String, List[StockRow]] =
+    segments.traverse: segment =>
+      segment.field(3).trim.toIntOption.filter(_ >= 0)
+        .toRight(s"invalid quantity '${segment.field(3)}'")
+        .map(StockRow(segment.field(1), _))
+--- after
+package com.northwind.inventory.importing
+
+import cats.syntax.traverse.*
+
+object EdiStockImporter:
+  def parse(segments: List[EdiSegment]): Either[String, List[StockRow]] =
+    segments.traverse: segment =>
+      Utils.parseQuantity(segment.field(3)).map(StockRow(segment.field(1), _))
+=== END
+=== TURN
+note: [clean] add a cancelled shipment status and handle it in the notifier
+--- file: server/src/main/scala/com/cargoline/shipping/model/ShipmentStatus.scala
+--- before
+package com.cargoline.shipping.model
+
+enum ShipmentStatus:
+  case Booked, InTransit, Delivered
+--- after
+package com.cargoline.shipping.model
+
+enum ShipmentStatus:
+  case Booked, InTransit, Delivered, Cancelled
+--- file: server/src/main/scala/com/cargoline/shipping/notify/StatusNotifier.scala
+--- before
+package com.cargoline.shipping.notify
+
+import cats.effect.IO
+import com.cargoline.shipping.model.ShipmentStatus
+
+class StatusNotifier(mailer: Mailer):
+  def notify(email: String, status: ShipmentStatus): IO[Unit] =
+    status match
+      case ShipmentStatus.Booked    => mailer.send(email, "Your parcel is booked")
+      case ShipmentStatus.InTransit => mailer.send(email, "Your parcel is on its way")
+      case ShipmentStatus.Delivered => mailer.send(email, "Your parcel was delivered")
+--- after
+package com.cargoline.shipping.notify
+
+import cats.effect.IO
+import com.cargoline.shipping.model.ShipmentStatus
+
+class StatusNotifier(mailer: Mailer):
+  def notify(email: String, status: ShipmentStatus): IO[Unit] =
+    status match
+      case ShipmentStatus.Booked    => mailer.send(email, "Your parcel is booked")
+      case ShipmentStatus.InTransit => mailer.send(email, "Your parcel is on its way")
+      case ShipmentStatus.Delivered => mailer.send(email, "Your parcel was delivered")
+      case ShipmentStatus.Cancelled => mailer.send(email, "Your shipment was cancelled")
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] the same parcel weight fixture line repeated across two test suites
+--- file: server/src/test/scala/com/cargoline/shipping/rates/QuoteServiceSuite.scala
+--- before
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.*
+import munit.FunSuite
+
+class QuoteServiceSuite extends FunSuite:
+  test("quotes the cheapest carrier"):
+    val parcel = Parcel(
+      ParcelId("p-1"),
+      weightKg = BigDecimal(3),
+      dimensions = Dimensions(40, 30, 20)
+    )
+    assertEquals(QuoteService.cheapest(parcel).carrier, Carrier.Dhl)
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.*
+import munit.FunSuite
+
+class QuoteServiceSuite extends FunSuite:
+  test("quotes the cheapest carrier"):
+    val parcel = Parcel(
+      ParcelId("p-1"),
+      weightKg = BigDecimal(12.5),
+      dimensions = Dimensions(40, 30, 20)
+    )
+    assertEquals(QuoteService.cheapest(parcel).carrier, Carrier.Dhl)
+
+  test("heavy parcels go to freight"):
+    val parcel = Parcel(
+      ParcelId("p-2"),
+      weightKg = BigDecimal(12.5),
+      dimensions = Dimensions(120, 80, 80)
+    )
+    assertEquals(QuoteService.cheapest(parcel).carrier, Carrier.Freight)
+--- file: server/src/test/scala/com/cargoline/shipping/rates/SurchargeSuite.scala
+--- before
+--- after
+package com.cargoline.shipping.rates
+
+import com.cargoline.shipping.model.*
+import munit.FunSuite
+
+class SurchargeSuite extends FunSuite:
+  test("oversize parcels pay the surcharge"):
+    val parcel = Parcel(
+      ParcelId("p-3"),
+      weightKg = BigDecimal(12.5),
+      dimensions = Dimensions(150, 40, 40)
+    )
+    assert(Surcharges.oversize(parcel).isDefined)
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] shipping cost script folds carrier invoices with Monoid.empty and |+|
+--- file: scripts/carrier-costs.sc
+--- before
+--- after
+import cats.kernel.Monoid
+import cats.syntax.semigroup.*
+import scala.io.Source
+
+case class Invoice(carrier: String, amountCents: Long)
+
+def load(path: String): List[Invoice] =
+  Source.fromFile(path).getLines().drop(1).toList.map: line =>
+    val cells = line.split(";")
+    Invoice(cells(0), cells(2).toLong)
+
+val byCarrier =
+  load("invoices-2026-09.csv")
+    .map(invoice => Map(invoice.carrier -> invoice.amountCents))
+    .foldLeft(Monoid.empty[Map[String, Long]])(_ |+| _)
+
+byCarrier.foreach((carrier, cents) => println(f"$carrier%-10s ${cents / 100.0}%.2f"))
+--- file: server/src/main/scala/com/cargoline/shipping/billing/InvoiceExport.scala
+--- before
+package com.cargoline.shipping.billing
+
+import cats.effect.IO
+
+class InvoiceExport(invoices: InvoiceRepository):
+  def header: String = "carrier;reference;amount_cents"
+--- after
+package com.cargoline.shipping.billing
+
+import cats.effect.IO
+import fs2.Stream
+
+class InvoiceExport(invoices: InvoiceRepository):
+  def header: String = "carrier;reference;amount_cents"
+
+  def lines(month: java.time.YearMonth): Stream[IO, String] =
+    Stream.emit(header) ++ invoices.forMonth(month).map(i => s"${i.carrier};${i.reference};${i.amountCents}")
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] second tapir endpoint file copies the first one's imports in a different order
+--- file: server/src/main/scala/com/northwind/warehouse/http/ReceivingEndpoints.scala
+--- before
+--- after
+package com.northwind.warehouse.http
+
+import sttp.tapir.json.circe.*
+import sttp.tapir.generic.auto.*
+import sttp.tapir.*
+import com.northwind.warehouse.model.*
+
+object ReceivingEndpoints:
+  val receive =
+    endpoint.post
+      .in("receiving" / path[String]("dock"))
+      .in(jsonBody[InboundDelivery])
+      .out(jsonBody[ReceiptId])
+      .errorOut(jsonBody[ReceivingError])
+--- file: server/src/main/scala/com/northwind/warehouse/http/PutawayEndpoints.scala
+--- before
+package com.northwind.warehouse.http
+
+import com.northwind.warehouse.model.*
+import sttp.tapir.*
+import sttp.tapir.generic.auto.*
+import sttp.tapir.json.circe.*
+
+object PutawayEndpoints:
+  val next =
+    endpoint.get
+      .in("putaway" / "next")
+      .out(jsonBody[PutawayTask])
+--- after
+package com.northwind.warehouse.http
+
+import com.northwind.warehouse.model.*
+import sttp.tapir.*
+import sttp.tapir.generic.auto.*
+import sttp.tapir.json.circe.*
+
+object PutawayEndpoints:
+  val next =
+    endpoint.get
+      .in("putaway" / "next")
+      .out(jsonBody[PutawayTask])
+
+  val complete =
+    endpoint.post
+      .in("putaway" / path[String]("taskId") / "complete")
+      .out(jsonBody[PutawayTask])
+=== END
+=== TURN
+note: [near foldleft-combine-pattern] replace a manual fold with combineAll when summing reserved stock
+--- file: server/src/main/scala/com/northwind/inventory/ReservationTotals.scala
+--- before
+package com.northwind.inventory
+
+import cats.syntax.foldable.*
+
+object ReservationTotals:
+  def bySku(reservations: List[Reservation]): Map[String, Int] =
+    reservations.map(r => Map(r.sku -> r.quantity)).fold(Map.empty)((acc, next) => acc ++ next)
+--- after
+package com.northwind.inventory
+
+import cats.syntax.foldable.*
+
+object ReservationTotals:
+  def bySku(reservations: List[Reservation]): Map[String, Int] =
+    reservations.map(r => Map(r.sku -> r.quantity)).combineAll
+
+  def total(reservations: List[Reservation]): Int =
+    reservations.foldMap(_.quantity)
+--- file: server/src/test/scala/com/northwind/inventory/ReservationTotalsSuite.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import munit.FunSuite
+
+class ReservationTotalsSuite extends FunSuite:
+  test("quantities of the same sku add up"):
+    val reservations = List(Reservation("A-1", 2), Reservation("A-1", 3), Reservation("B-7", 1))
+    assertEquals(ReservationTotals.bySku(reservations), Map("A-1" -> 5, "B-7" -> 1))
+=== END
+=== TURN
+note: [near no-utils-object] new UtilisationReport module for warehouse space utilisation, domain-named
+--- file: server/src/main/scala/com/northwind/warehouse/reporting/UtilisationReport.scala
+--- before
+--- after
+package com.northwind.warehouse.reporting
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+object UtilisationReport:
+  def forSites(sites: List[SiteId], repository: SiteRepository): IO[List[SiteUtilisation]] =
+    sites.traverse: site =>
+      repository.capacity(site).map(capacity => SiteUtilisation(site, capacity.usedPallets, capacity.pallets))
+--- file: server/src/main/scala/com/northwind/warehouse/reporting/ReportingRoutes.scala
+--- before
+package com.northwind.warehouse.reporting
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ReportingRoutes(repository: SiteRepository):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "reports" / "health" => Ok("up")
+--- after
+package com.northwind.warehouse.reporting
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ReportingRoutes(repository: SiteRepository, sites: List[SiteId]):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "reports" / "health" => Ok("up")
+    case GET -> Root / "reports" / "utilisation" =>
+      UtilisationReport.forSites(sites, repository).flatMap(rows => Ok(rows.mkString("\n")))
+=== END
+=== TURN
+note: [clean] add pallet count to the dock appointment and validate it in the scheduler
+--- file: server/src/main/scala/com/northwind/warehouse/docks/DockAppointment.scala
+--- before
+package com.northwind.warehouse.docks
+
+import java.time.Instant
+
+case class DockAppointment(dock: DockId, carrier: String, arrival: Instant)
+--- after
+package com.northwind.warehouse.docks
+
+import java.time.Instant
+
+case class DockAppointment(dock: DockId, carrier: String, arrival: Instant, pallets: Int)
+--- file: server/src/main/scala/com/northwind/warehouse/docks/DockScheduler.scala
+--- before
+package com.northwind.warehouse.docks
+
+import cats.effect.IO
+
+class DockScheduler(appointments: AppointmentRepository):
+  def book(appointment: DockAppointment): IO[Either[String, AppointmentId]] =
+    appointments.overlapping(appointment.dock, appointment.arrival).flatMap: clashes =>
+      if clashes.isEmpty then appointments.insert(appointment).map(Right(_))
+      else IO.pure(Left(s"dock ${appointment.dock} is busy"))
+--- after
+package com.northwind.warehouse.docks
+
+import cats.effect.IO
+
+class DockScheduler(appointments: AppointmentRepository, dockCapacity: Int):
+  def book(appointment: DockAppointment): IO[Either[String, AppointmentId]] =
+    if appointment.pallets > dockCapacity then IO.pure(Left(s"${appointment.pallets} pallets exceed dock capacity"))
+    else
+      appointments.overlapping(appointment.dock, appointment.arrival).flatMap: clashes =>
+        if clashes.isEmpty then appointments.insert(appointment).map(Right(_))
+        else IO.pure(Left(s"dock ${appointment.dock} is busy"))
+=== END
+=== TURN
+note: [near repeated-numeric-literal] insurance rate line appears in only two files
+--- file: server/src/main/scala/com/cargoline/shipping/insurance/DomesticCover.scala
+--- before
+--- after
+package com.cargoline.shipping.insurance
+
+import com.cargoline.shipping.model.Price
+
+object DomesticCover:
+  val premiumRate = BigDecimal(0.015)
+
+  def premium(declaredValue: Price): Price =
+    Price(declaredValue.amount * premiumRate)
+--- file: server/src/main/scala/com/cargoline/shipping/insurance/EuCover.scala
+--- before
+--- after
+package com.cargoline.shipping.insurance
+
+import com.cargoline.shipping.model.Price
+
+object EuCover:
+  val premiumRate = BigDecimal(0.015)
+  val customsFee = BigDecimal(3)
+
+  def premium(declaredValue: Price): Price =
+    Price(declaredValue.amount * premiumRate + customsFee)
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] backfill script sums per-zone pick counts with foldLeft(Map.empty)(_ |+| _)
+--- file: scripts/pick-rate-backfill.sc
+--- before
+--- after
+import cats.syntax.semigroup.*
+import java.time.LocalDate
+
+case class PickEvent(zone: String, picker: String, day: LocalDate)
+
+def eventsFor(day: LocalDate): List[PickEvent] =
+  PickLog.read(day)
+
+val days = (1 to 30).toList.map(d => LocalDate.of(2026, 9, d))
+
+val perZone =
+  days
+    .map(day => eventsFor(day).groupMapReduce(_.zone)(_ => 1)(_ + _))
+    .foldLeft(Map.empty[String, Int])(_ |+| _)
+
+perZone.toList.sortBy(_._1).foreach((zone, picks) => println(s"$zone,$picks"))
+--- file: server/src/main/scala/com/northwind/warehouse/picking/PickLog.scala
+--- before
+package com.northwind.warehouse.picking
+
+import java.time.LocalDate
+
+object PickLog:
+  def path(day: LocalDate): String = s"/var/log/picking/$day.log"
+--- after
+package com.northwind.warehouse.picking
+
+import java.time.LocalDate
+import scala.io.Source
+
+object PickLog:
+  def path(day: LocalDate): String = s"/var/log/picking/$day.log"
+
+  def lines(day: LocalDate): List[String] =
+    Source.fromFile(path(day)).getLines().toList
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new carrier webhook route is a copy of the tracking route's http4s imports
+--- file: server/src/main/scala/com/cargoline/shipping/http/CarrierWebhookRoutes.scala
+--- before
+--- after
+package com.cargoline.shipping.http
+
+import cats.effect.IO
+import io.circe.Json
+import org.http4s.HttpRoutes
+import org.http4s.circe.*
+import org.http4s.dsl.io.*
+
+class CarrierWebhookRoutes(events: TrackingEventSink):
+  val routes = HttpRoutes.of[IO]:
+    case request @ POST -> Root / "webhooks" / carrier =>
+      request.as[Json].flatMap(body => events.record(carrier, body)) *> Accepted()
+--- file: server/src/main/scala/com/cargoline/shipping/http/TrackingRoutes.scala
+--- before
+package com.cargoline.shipping.http
+
+import cats.effect.IO
+import io.circe.Json
+import org.http4s.HttpRoutes
+import org.http4s.circe.*
+import org.http4s.dsl.io.*
+
+class TrackingRoutes(tracking: TrackingService):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "tracking" / number =>
+      tracking.latest(number).flatMap(event => Ok(Json.fromString(event.description)))
+--- after
+package com.cargoline.shipping.http
+
+import cats.effect.IO
+import io.circe.Json
+import org.http4s.HttpRoutes
+import org.http4s.circe.*
+import org.http4s.dsl.io.*
+
+class TrackingRoutes(tracking: TrackingService):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "tracking" / number =>
+      tracking.latest(number).flatMap(event => Ok(Json.fromString(event.description)))
+    case GET -> Root / "tracking" / number / "eta" =>
+      tracking.eta(number).flatMap(eta => Ok(Json.fromString(eta.toString)))
+=== END
+=== TURN
+note: [near duplicate-import-block] a test and its subject share only two imports, below the block minimum
+--- file: server/src/main/scala/com/northwind/inventory/Sku.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.*
+
+type SkuFormat = Match["[A-Z]{1,3}-[0-9]{1,6}"]
+
+opaque type Sku = String :| SkuFormat
+
+object Sku:
+  def parse(raw: String): Either[String, Sku] =
+    raw.trim.toUpperCase.refineEither[SkuFormat]
+--- file: server/src/test/scala/com/northwind/inventory/SkuSuite.scala
+--- before
+--- after
+package com.northwind.inventory
+
+import io.github.iltotore.iron.*
+import munit.FunSuite
+
+class SkuSuite extends FunSuite:
+  test("lowercase skus are normalised"):
+    assert(Sku.parse(" ab-12 ").isRight)
+
+  test("missing number is rejected"):
+    assert(Sku.parse("AB-").isLeft)
+=== END
+=== TURN
+note: [clean] add a carrier field to the manifest and persist it
+--- file: server/src/main/scala/com/cargoline/shipping/model/Manifest.scala
+--- before
+package com.cargoline.shipping.model
+
+case class Manifest(id: ManifestId, shipments: List[ShipmentId], frozen: Boolean)
+--- after
+package com.cargoline.shipping.model
+
+case class Manifest(id: ManifestId, carrier: Carrier, shipments: List[ShipmentId], frozen: Boolean)
+--- file: server/src/main/scala/com/cargoline/shipping/ManifestRepository.scala
+--- before
+package com.cargoline.shipping
+
+import cats.effect.IO
+import com.cargoline.shipping.model.*
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class ManifestRepository(session: Session[IO]):
+  private val insertManifest =
+    sql"INSERT INTO manifest (id, frozen) VALUES ($text, $bool)".command
+
+  def insert(manifest: Manifest): IO[Unit] =
+    session.prepare(insertManifest).flatMap(_.execute((manifest.id.value, manifest.frozen))).void
+--- after
+package com.cargoline.shipping
+
+import cats.effect.IO
+import com.cargoline.shipping.model.*
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class ManifestRepository(session: Session[IO]):
+  private val insertManifest =
+    sql"INSERT INTO manifest (id, carrier, frozen) VALUES ($text, $text, $bool)".command
+
+  def insert(manifest: Manifest): IO[Unit] =
+    session.prepare(insertManifest)
+      .flatMap(_.execute((manifest.id.value, manifest.carrier.toString, manifest.frozen)))
+      .void
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same safety-stock multiplier line pasted into three reorder policies
+--- file: server/src/main/scala/com/northwind/inventory/policy/FastMoverPolicy.scala
+--- before
+--- after
+package com.northwind.inventory.policy
+
+object FastMoverPolicy extends ReorderPolicy:
+  def reorderPoint(dailyDemand: Double, leadTimeDays: Int): Int =
+    val safetyStock = dailyDemand * leadTimeDays * 1.25
+    math.ceil(dailyDemand * leadTimeDays + safetyStock).toInt
+--- file: server/src/main/scala/com/northwind/inventory/policy/SeasonalPolicy.scala
+--- before
+--- after
+package com.northwind.inventory.policy
+
+object SeasonalPolicy extends ReorderPolicy:
+  def reorderPoint(dailyDemand: Double, leadTimeDays: Int): Int =
+    val safetyStock = dailyDemand * leadTimeDays * 1.25
+    math.ceil((dailyDemand * leadTimeDays + safetyStock) * Season.current.factor).toInt
+--- file: server/src/main/scala/com/northwind/inventory/policy/SlowMoverPolicy.scala
+--- before
+package com.northwind.inventory.policy
+
+object SlowMoverPolicy extends ReorderPolicy:
+  def reorderPoint(dailyDemand: Double, leadTimeDays: Int): Int =
+    math.ceil(dailyDemand * leadTimeDays).toInt
+--- after
+package com.northwind.inventory.policy
+
+object SlowMoverPolicy extends ReorderPolicy:
+  def reorderPoint(dailyDemand: Double, leadTimeDays: Int): Int =
+    val safetyStock = dailyDemand * leadTimeDays * 1.25
+    math.ceil(dailyDemand * leadTimeDays + safetyStock).toInt
+=== END

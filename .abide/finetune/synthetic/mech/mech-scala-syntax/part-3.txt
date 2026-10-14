@@ -1,0 +1,657 @@
+=== EDIT
+note: wrap a lambda in braces when adding a second statement
+--- file: server/src/main/scala/com/harbor/shipping/ManifestBuilder.scala
+--- before
+package com.harbor.shipping
+
+case class Container(id: String, weightKg: Double)
+
+object ManifestBuilder:
+  def lines(containers: List[Container]): List[String] =
+    containers.map(container => s"${container.id};${container.weightKg}")
+--- after
+package com.harbor.shipping
+
+case class Container(id: String, weightKg: Double)
+
+object ManifestBuilder:
+  def lines(containers: List[Container]): List[String] =
+    containers.map { container =>
+      val rounded = BigDecimal(container.weightKg).setScale(1, BigDecimal.RoundingMode.HALF_UP)
+      s"${container.id};$rounded"
+    }
+=== END
+
+=== EDIT
+note: braced map with a case pattern over tuples
+--- file: server/src/main/scala/com/acme/analytics/TopPages.scala
+--- before
+package com.acme.analytics
+
+case class PageView(path: String, userId: String)
+
+object TopPages:
+  def counts(views: List[PageView]): Map[String, Int] =
+    views.groupMapReduce(_.path)(_ => 1)(_ + _)
+--- after
+package com.acme.analytics
+
+case class PageView(path: String, userId: String)
+
+object TopPages:
+  def counts(views: List[PageView]): Map[String, Int] =
+    views.groupMapReduce(_.path)(_ => 1)(_ + _)
+
+  def top(views: List[PageView], limit: Int): List[String] =
+    counts(views).toList.sortBy((_, count) => -count).take(limit).map { case (path, _) => path }
+=== END
+
+=== EDIT
+note: braced map on an IO in a service
+--- file: server/src/main/scala/com/acme/weather/AlertService.scala
+--- before
+package com.acme.weather
+
+import cats.effect.IO
+
+case class Alert(region: String, severity: Int)
+
+trait AlertFeed:
+  def current: IO[List[Alert]]
+
+class AlertService(feed: AlertFeed):
+  def all: IO[List[Alert]] = feed.current
+--- after
+package com.acme.weather
+
+import cats.effect.IO
+
+case class Alert(region: String, severity: Int)
+
+trait AlertFeed:
+  def current: IO[List[Alert]]
+
+class AlertService(feed: AlertFeed):
+  def all: IO[List[Alert]] = feed.current
+
+  def severeRegions: IO[Set[String]] =
+    feed.current.map {alerts => alerts.filter(_.severity >= 4).map(_.region).toSet}
+=== END
+
+=== EDIT
+note: flatMap braces in http4s route handler
+--- file: server/src/main/scala/com/acme/orders/OrderRoutes.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+trait Orders:
+  def status(id: String): IO[Option[String]]
+
+class OrderRoutes(orders: Orders):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "orders" / id / "status" =>
+      orders.status(id).flatMap(_.fold(NotFound())(Ok(_)))
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+trait Orders:
+  def status(id: String): IO[Option[String]]
+  def cancel(id: String): IO[Boolean]
+
+class OrderRoutes(orders: Orders):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "orders" / id / "status" =>
+      orders.status(id).flatMap(_.fold(NotFound())(Ok(_)))
+    case POST -> Root / "orders" / id / "cancel" =>
+      orders.cancel(id).flatMap { cancelled => if cancelled then NoContent() else Conflict() }
+=== END
+
+=== EDIT
+note: parenthesised if inside a for-loop style helper
+--- file: server/src/main/scala/com/acme/auth/RateLimiter.scala
+--- before
+package com.acme.auth
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class RateLimiter(attempts: Ref[IO, Map[String, Int]], limit: Int):
+  def register(ip: String): IO[Int] =
+    attempts.updateAndGet(current => current.updated(ip, current.getOrElse(ip, 0) + 1)).map(_.getOrElse(ip, 0))
+--- after
+package com.acme.auth
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class RateLimiter(attempts: Ref[IO, Map[String, Int]], limit: Int):
+  def register(ip: String): IO[Int] =
+    attempts.updateAndGet(current => current.updated(ip, current.getOrElse(ip, 0) + 1)).map(_.getOrElse(ip, 0))
+
+  def allow(ip: String): IO[Boolean] =
+    register(ip).map: count =>
+      if (count > limit) {
+        false
+      } else true
+=== END
+
+=== EDIT
+note: parenthesised braced if in a Laminar observer
+--- file: app/src/main/scala/com/acme/ui/SearchBox.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  val query = Var("")
+  val submitted = EventBus[String]()
+
+  def render: HtmlElement =
+    input(controlled(value <-- query, onInput.mapToValue --> query))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  val query = Var("")
+  val submitted = EventBus[String]()
+
+  def render: HtmlElement =
+    input(
+      controlled(value <-- query, onInput.mapToValue --> query),
+      onKeyDown.filter(_.key == "Enter").mapTo(query.now()) --> Observer[String]: text =>
+        if (text.trim.nonEmpty) {
+          submitted.emit(text.trim)
+        }
+    )
+=== END
+
+=== EDIT
+note: license header block comment on a new file
+--- file: server/src/main/scala/com/tidewater/maps/TileCache.scala
+--- before
+--- after
+/*
+ * Copyright Tidewater Mapping
+ * SPDX-License-Identifier: Apache-2.0
+ */
+package com.tidewater.maps
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class TileCache(entries: Ref[IO, Map[TileKey, Array[Byte]]]):
+  def get(key: TileKey): IO[Option[Array[Byte]]] = entries.get.map(_.get(key))
+
+  def put(key: TileKey, bytes: Array[Byte]): IO[Unit] = entries.update(_.updated(key, bytes))
+=== END
+
+=== EDIT
+note: FIXME comment above a magic adjustment
+--- file: server/src/main/scala/com/acme/billing/TaxCalculator.scala
+--- before
+package com.acme.billing
+
+object TaxCalculator:
+  def vat(net: BigDecimal, rate: BigDecimal): BigDecimal =
+    (net * rate).setScale(2, BigDecimal.RoundingMode.HALF_EVEN)
+--- after
+package com.acme.billing
+
+object TaxCalculator:
+  def vat(net: BigDecimal, rate: BigDecimal): BigDecimal =
+    (net * rate).setScale(2, BigDecimal.RoundingMode.HALF_EVEN)
+
+  def gross(net: BigDecimal, rate: BigDecimal): BigDecimal =
+    // FIXME rounding differs from the ERP for sub-cent amounts
+    net + vat(net, rate)
+=== END
+
+=== EDIT
+note: history comment noting what moved
+--- file: server/src/main/scala/com/acme/inventory/SkuFormat.scala
+--- before
+package com.acme.inventory
+
+object SkuFormat:
+  def normalize(raw: String): String = raw.trim.toUpperCase
+--- after
+package com.acme.inventory
+
+object SkuFormat:
+  def normalize(raw: String): String = raw.trim.toUpperCase
+
+  def isValid(raw: String): Boolean =
+    normalize(raw).matches("[A-Z]{2}-[0-9]{4}") // moved from SkuValidator
+=== END
+
+=== EDIT
+note: comment inside an enum explaining a case
+--- file: server/src/main/scala/com/acme/orders/OrderStatus.scala
+--- before
+package com.acme.orders
+
+enum OrderStatus:
+  case Pending
+  case Paid
+  case Shipped
+--- after
+package com.acme.orders
+
+enum OrderStatus:
+  case Pending
+  case Paid
+  // set by the warehouse integration once the label prints
+  case Shipped
+  case Delivered
+=== END
+
+=== EDIT
+note: cats.syntax.all in a Laminar frontend helper
+--- file: app/src/main/scala/com/acme/ui/FormErrors.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object FormErrors:
+  def render(errors: Signal[List[String]]): HtmlElement =
+    ul(children <-- errors.map(_.map(error => li(error))))
+--- after
+package com.acme.ui
+
+import cats.syntax.all.*
+import com.raquo.laminar.api.L.*
+
+object FormErrors:
+  def render(errors: Signal[List[String]]): HtmlElement =
+    ul(children <-- errors.map(_.map(error => li(error))))
+
+  def firstError(errors: Signal[List[String]]): Signal[Option[String]] =
+    errors.map(_.headOption.orEmpty.some.filter(_.nonEmpty))
+=== END
+
+=== EDIT
+note: cats.syntax.all.given style import in new codec file
+--- file: server/src/main/scala/com/acme/weather/ReadingCodec.scala
+--- before
+--- after
+package com.acme.weather
+
+import cats.syntax.all.given
+import io.circe.Decoder
+
+case class Reading(station: String, celsius: Double)
+
+object ReadingCodec:
+  given Decoder[Reading] =
+    Decoder.forProduct2("station", "celsius")(Reading.apply)
+=== END
+
+=== EDIT
+note: map values by tuple position in a report
+--- file: server/src/main/scala/com/acme/billing/AgingReport.scala
+--- before
+package com.acme.billing
+
+import java.time.LocalDate
+
+case class OpenInvoice(id: String, due: LocalDate, amount: BigDecimal)
+
+object AgingReport:
+  def overdue(invoices: List[OpenInvoice], today: LocalDate): List[OpenInvoice] =
+    invoices.filter(_.due.isBefore(today))
+--- after
+package com.acme.billing
+
+import java.time.LocalDate
+
+case class OpenInvoice(id: String, due: LocalDate, amount: BigDecimal)
+
+object AgingReport:
+  def overdue(invoices: List[OpenInvoice], today: LocalDate): List[OpenInvoice] =
+    invoices.filter(_.due.isBefore(today))
+
+  def bucketTotals(invoices: List[OpenInvoice], today: LocalDate): List[(String, BigDecimal)] =
+    overdue(invoices, today)
+      .groupBy(invoice => if invoice.due.plusDays(30).isBefore(today) then "30+" else "0-30")
+      .toList
+      .map(bucket => (bucket._1, bucket._2.map(_.amount).sum))
+=== END
+
+=== EDIT
+note: partition result accessed positionally
+--- file: server/src/main/scala/com/acme/ingest/RowSplitter.scala
+--- before
+package com.acme.ingest
+
+object RowSplitter:
+  def isHeader(row: String): Boolean = row.startsWith("#")
+--- after
+package com.acme.ingest
+
+object RowSplitter:
+  def isHeader(row: String): Boolean = row.startsWith("#")
+
+  def dataRows(rows: List[String]): List[String] =
+    val parts = rows.partition(isHeader)
+    parts._2
+=== END
+
+=== EDIT
+note: Ref of a pair, reading the counter with ._1
+--- file: server/src/main/scala/com/acme/metrics/Throughput.scala
+--- before
+package com.acme.metrics
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class Throughput(state: Ref[IO, (Long, Long)]):
+  def record(bytes: Long): IO[Unit] =
+    state.update((count, total) => (count + 1, total + bytes))
+--- after
+package com.acme.metrics
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class Throughput(state: Ref[IO, (Long, Long)]):
+  def record(bytes: Long): IO[Unit] =
+    state.update((count, total) => (count + 1, total + bytes))
+
+  def requests: IO[Long] = state.get.map(_._1)
+=== END
+
+=== EDIT
+note: near miss - .sc script may use braced lambdas, ripgrep rules only cover .scala
+--- file: scripts/report-sizes.sc
+--- before
+//> using scala 3.7.2
+
+val sizes = List(120, 340, 90)
+--- after
+//> using scala 3.7.2
+
+val sizes = List(120, 340, 90)
+val labelled = sizes.map(size => s"$size KB")
+println(labelled.mkString(", "))
+=== END
+
+=== EDIT
+note: near miss - flatMap with colon lambda in for-free style
+--- file: server/src/main/scala/com/harbor/shipping/BerthPlanner.scala
+--- before
+package com.harbor.shipping
+
+import cats.effect.IO
+
+case class Berth(id: String, free: Boolean)
+
+trait Berths:
+  def all: IO[List[Berth]]
+  def reserve(id: String): IO[Unit]
+
+class BerthPlanner(berths: Berths):
+  def available: IO[List[Berth]] = berths.all.map(_.filter(_.free))
+--- after
+package com.harbor.shipping
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class Berth(id: String, free: Boolean)
+
+trait Berths:
+  def all: IO[List[Berth]]
+  def reserve(id: String): IO[Unit]
+
+class BerthPlanner(berths: Berths):
+  def available: IO[List[Berth]] = berths.all.map(_.filter(_.free))
+
+  def reserveFirst: IO[Option[Berth]] =
+    available.flatMap: free =>
+      free.headOption.traverse(berth => berths.reserve(berth.id).as(berth))
+=== END
+
+=== EDIT
+note: near miss - match with braces not on a combinator
+--- file: server/src/main/scala/com/acme/orders/StatusLabel.scala
+--- before
+package com.acme.orders
+
+object StatusLabel:
+  def short(status: OrderStatus): String = status.toString.take(3)
+--- after
+package com.acme.orders
+
+object StatusLabel:
+  def short(status: OrderStatus): String = status.toString.take(3)
+
+  def long(status: OrderStatus): String =
+    status match
+      case OrderStatus.Pending   => "Awaiting payment"
+      case OrderStatus.Paid      => "Paid"
+      case OrderStatus.Shipped   => "On its way"
+      case OrderStatus.Delivered => "Delivered"
+=== END
+
+=== EDIT
+note: near miss - word comment inside a string literal
+--- file: server/src/main/scala/com/acme/reviews/ReviewText.scala
+--- before
+package com.acme.reviews
+
+object ReviewText:
+  def preview(body: String): String = body.take(80)
+--- after
+package com.acme.reviews
+
+object ReviewText:
+  def preview(body: String): String = body.take(80)
+
+  val emptyPlaceholder = "No comment yet, be the first to review"
+=== END
+
+=== EDIT
+note: near miss - cats.syntax.option and cats.syntax.either imports
+--- file: server/src/main/scala/com/acme/auth/RoleCheck.scala
+--- before
+package com.acme.auth
+
+enum Role:
+  case Viewer, Editor, Admin
+
+object RoleCheck:
+  def canEdit(role: Role): Boolean = role != Role.Viewer
+--- after
+package com.acme.auth
+
+import cats.syntax.either.*
+import cats.syntax.option.*
+
+enum Role:
+  case Viewer, Editor, Admin
+
+object RoleCheck:
+  def canEdit(role: Role): Boolean = role != Role.Viewer
+
+  def requireEdit(role: Role): Either[String, Role] =
+    role.some.filter(canEdit).toRight("read-only role").leftMap(reason => s"forbidden: $reason")
+=== END
+
+=== EDIT
+note: fix - rewrite braced if as if/then/else
+--- file: server/src/main/scala/com/acme/auth/TokenParser.scala
+--- before
+package com.acme.auth
+
+case class BearerToken(value: String)
+
+object TokenParser:
+  def parse(header: String): Either[String, BearerToken] =
+    val raw = header.stripPrefix("Bearer ").trim
+    if (raw.isEmpty) {
+      Left("missing bearer token")
+    } else {
+      Right(BearerToken(raw))
+    }
+--- after
+package com.acme.auth
+
+case class BearerToken(value: String)
+
+object TokenParser:
+  def parse(header: String): Either[String, BearerToken] =
+    val raw = header.stripPrefix("Bearer ").trim
+    if raw.isEmpty then Left("missing bearer token")
+    else Right(BearerToken(raw))
+=== END
+
+=== EDIT
+note: fix - drop scaladoc and rename for clarity
+--- file: server/src/main/scala/com/acme/maps/Zoom.scala
+--- before
+package com.acme.maps
+
+object Zoom:
+  /** Returns the number of tiles per axis. */
+  def tiles(zoom: Int): Int = 1 << zoom
+--- after
+package com.acme.maps
+
+object Zoom:
+  def tilesPerAxis(zoom: Int): Int = 1 << zoom
+=== END
+
+=== EDIT
+note: tuple access already in file, edit adds a new import only
+--- file: server/src/main/scala/com/acme/analytics/Cohorts.scala
+--- before
+package com.acme.analytics
+
+import java.time.YearMonth
+
+object Cohorts:
+  def sizes(signups: List[(String, YearMonth)]): Map[YearMonth, Int] =
+    signups.groupBy(_._2).view.mapValues(_.size).toMap
+--- after
+package com.acme.analytics
+
+import java.time.YearMonth
+import java.time.format.DateTimeFormatter
+
+object Cohorts:
+  def sizes(signups: List[(String, YearMonth)]): Map[YearMonth, Int] =
+    signups.groupBy(_._2).view.mapValues(_.size).toMap
+
+  val labelFormat = DateTimeFormatter.ofPattern("yyyy-MM")
+=== END
+
+=== EDIT
+note: clean - add a skunk command
+--- file: server/src/main/scala/com/acme/inventory/StockRepository.scala
+--- before
+package com.acme.inventory
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class StockRepository(session: Session[IO]):
+  def levelOf(sku: String): IO[Option[Int]] =
+    session.option(sql"SELECT on_hand FROM stock WHERE sku = $varchar".query(int4))(sku)
+--- after
+package com.acme.inventory
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class StockRepository(session: Session[IO]):
+  def levelOf(sku: String): IO[Option[Int]] =
+    session.option(sql"SELECT on_hand FROM stock WHERE sku = $varchar".query(int4))(sku)
+
+  def setLevel(sku: String, onHand: Int): IO[Unit] =
+    session.execute(sql"UPDATE stock SET on_hand = $int4 WHERE sku = $varchar".command)((onHand, sku)).void
+=== END
+
+=== EDIT
+note: clean - add Resource-wrapped client
+--- file: server/src/main/scala/com/acme/weather/WeatherApp.scala
+--- before
+package com.acme.weather
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object WeatherApp extends IOApp.Simple:
+  def run: IO[Unit] = IO.println("weather service starting")
+--- after
+package com.acme.weather
+
+import cats.effect.IO
+import cats.effect.IOApp
+import org.http4s.ember.client.EmberClientBuilder
+
+object WeatherApp extends IOApp.Simple:
+  def run: IO[Unit] =
+    EmberClientBuilder.default[IO].build.use: client =>
+      IO.println("weather service starting")
+=== END
+
+=== EDIT
+note: clean - munit property test
+--- file: server/src/test/scala/com/acme/inventory/SkuFormatSuite.scala
+--- before
+--- after
+package com.acme.inventory
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class SkuFormatSuite extends ScalaCheckSuite:
+  property("normalize is idempotent"):
+    forAll: (raw: String) =>
+      SkuFormat.normalize(SkuFormat.normalize(raw)) == SkuFormat.normalize(raw)
+=== END
+
+=== EDIT
+note: clean - Laminar split by id
+--- file: app/src/main/scala/com/acme/ui/CartView.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class CartItem(id: String, name: String, quantity: Int)
+
+object CartView:
+  def render(items: Signal[List[CartItem]]): HtmlElement =
+    div(child.text <-- items.map(_.size.toString))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class CartItem(id: String, name: String, quantity: Int)
+
+object CartView:
+  def render(items: Signal[List[CartItem]]): HtmlElement =
+    ul(
+      children <-- items.split(_.id): (_, _, item) =>
+        li(child.text <-- item.map(current => s"${current.name} x${current.quantity}"))
+    )
+=== END

@@ -117,6 +117,186 @@
           }
         }
       }
+    },
+    {
+      "id": "mech-fail-loud-unsafe",
+      "text": "Compliance-gate mechanical rules, checked at edit time: fail-loud.no-null, fail-loud.no-throw, fail-loud.no-as-instance-of, fail-loud.no-is-instance-of, fail-loud.no-finalize, fail-loud.from-list-unsafe.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change add an unsafe escape hatch: a null value or null check, a throw, an asInstanceOf or isInstanceOf, an overridden finalize, or NonEmptyList.fromListUnsafe?",
+          "criteria": {
+            "true": "val x: String = null; throw new IllegalStateException(...); value.asInstanceOf[Order]; if x.isInstanceOf[Foo]; override def finalize(); NonEmptyList.fromListUnsafe(xs)",
+            "false": "Option/Either/IO.raiseError instead of null or throw; a pattern match (case o: Order =>); NonEmptyList.fromList(xs) returning Option; the words only in a string or identifier"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-fail-loud-boundary",
+      "text": "Compliance-gate mechanical rules, checked at edit time: fail-loud.collect-string-narrow, fail-loud.get-or-else-empty-string, fail-loud.to-unit-sweep.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change paper over a dynamic value: getOrElse(\"\") on an optional value, a collect { case s: String => s } that silently drops values of other types, or repeated .toUnit(...) calls extracting units from a duration?",
+          "criteria": {
+            "true": "name.getOrElse(\"\"); values.collect { case s: String => s }; d.toUnit(HOURS) at several call sites",
+            "false": "absence kept as Option; an explicit decode that reports the mismatch; a refined duration type with inHours/inMinutes accessors"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-iron-invariants",
+      "text": "Compliance-gate mechanical rules, checked at edit time: iron.no-require, iron.no-apply-unsafe, iron.no-refine-unsafe, iron.assume-on-literal-string, iron.bare-id-alias, types-first.require-for-invariant.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change check a domain invariant unsafely instead of with a refined type: a require(...), .applyUnsafe, .refineUnsafe, .assume on a string literal, or a domain id declared as a bare alias of a primitive (type UserId = UUID)?",
+          "criteria": {
+            "true": "require(amount > 0); Port.applyUnsafe(n); s.refineUnsafe[Email]; \"abc\".assume[Slug]; type OrderId = UUID",
+            "false": "an Iron refined type built with its constructor for literals or .option/.either at a boundary; object OrderId extends RefinedSubtype[UUID, Pure]"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-scala-imperative",
+      "text": "Compliance-gate mechanical rules, checked at edit time: scala.no-var, scala.no-return, scala.no-while, types-first.prefer-enum-over-sealed.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change use imperative or pre-Scala-3 constructs: a var, a return statement, a while loop, or a sealed trait with case classes where a Scala 3 enum would do?",
+          "criteria": {
+            "true": "var total = 0; return None inside a method; while i < n do ...; sealed trait Status with case objects Active/Closed",
+            "false": "vals with fold/traverse/recursion; an expression as the method result; enum Status { case Active, Closed }; a sealed trait used as an empty marker or phantom type"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-scala-modifiers",
+      "text": "Compliance-gate mechanical rules, checked at edit time: scala.no-final-case-class, scala.no-final-def, scala.no-final-class, scala.no-qualified-private, scala.default-companion-name, scala.no-nowarn.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change add a modifier or annotation the project forbids: final on a case class, class or def, a qualified private[pkg]/protected[pkg], a .Default value on a companion, or a @nowarn annotation?",
+          "criteria": {
+            "true": "final case class Order(...); final class Service; final def run; private[billing] def helper; val Default = Settings(...) in a companion; @nowarn(\"msg=unused\")",
+            "false": "plain case class, class and def; plain private; values passed explicitly at the call site; the underlying warning fixed"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-scala-syntax",
+      "text": "Compliance-gate mechanical rules, checked at edit time: scala.lambda-brace, scala.if-paren-brace, scala.no-comments, scala.cats-syntax-all-import, scala.no-tuple-positional.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change break the project's Scala 3 syntax style: a braced lambda (.map { x => ...}), a parenthesised braced if, a code comment, an import of cats.syntax.all.*, or positional tuple access (._1, ._2)?",
+          "criteria": {
+            "true": "xs.map { x => f(x) }; if (ok) { a } else { b }; // explain; import cats.syntax.all.*; pair._1",
+            "false": "xs.map: x => f(x); if ok then a else b; no comments (scala-cli //> directives are fine); import cats.syntax.traverse.*; val (left, right) = pair"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-scala-ascriptions",
+      "text": "Compliance-gate mechanical rules, checked at edit time: scala.private-val-type-ascription, scala.private-def-return-type, scala.no-local-type-ascription.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change add a type ascription that inference already handles: on a private or protected val, the return type of a private or protected def, or a local val/var/def inside a method?",
+          "criteria": {
+            "true": "private val limit: Int = 10; private def total(xs: List[Money]): Money = ...; inside a method val count: Int = xs.size",
+            "false": "ascriptions on public API members; a recursive def that needs its return type; private val limit = 10"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-effects",
+      "text": "Compliance-gate mechanical rules, checked at edit time: cats-effect-io.effectful-time, cats-effect-io.no-unsafe-run, cats-effect-io.no-unsafe-global-import, cats-mtl-typed-errors.recover-in-mtl-scope, fs2.no-unbounded-par-eval-map, skunk.session-single-in-prod.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change misuse effects: reading the clock directly (Instant.now, System.currentTimeMillis), unsafeRun* outside the app entry point, importing cats.effect.unsafe.implicits.global, an IO-level recover inside a cats-mtl Handle.allow scope, an unbounded parEvalMapUnbounded, or Session.single in production code?",
+          "criteria": {
+            "true": "Instant.now(); io.unsafeRunSync(); import cats.effect.unsafe.implicits.global; .recover inside Handle.allow; stream.parEvalMapUnbounded(f); Session.single(...) outside tests",
+            "false": "Clock[F].realTimeInstant; returning IO and letting IOApp run it; recovery outside the allow scope; parEvalMap(8)(f); Session.pooled"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-duplication",
+      "text": "Compliance-gate mechanical rules, checked at edit time: factor-out.no-utils-object, factor-out.repeated-numeric-literal, factor-out.duplicate-import-block, cats.foldleft-combine-pattern.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/*.scala", "**/*.sc"],
+      "when": "turn",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this change add a duplication smell: a Utils object or file, the same numeric literal repeated instead of a named constant, an import block duplicated from another file, or foldLeft(empty)(_ |+| _) instead of combineAll?",
+          "criteria": {
+            "true": "object StringUtils; 86400 written three times; the same 6-line import block pasted into a new file; xs.foldLeft(Monoid.empty)(_ |+| _)",
+            "false": "a domain-named module; a named constant; xs.combineAll"
+          }
+        }
+      }
+    },
+    {
+      "id": "mech-frontend",
+      "text": "Compliance-gate mechanical rules, checked at edit time: laminar.json-stringify, laminar.raw-set-timeout, laminar.now-inside-combinator, laminar.child-arrow-map-case, waypoint.current-page-signal-map, server-architecture.frontend-imports-api.",
+      "source": { "path": ".claude/skills/compliance-gate/SKILL.md" },
+      "scope": ["**/app/src/**/*.scala", "**/landing/**/*.scala", "**/frontend/**/*.scala", "**/ui/**/*.scala"],
+      "when": "edit",
+      "check": {
+        "type": "model",
+        "question": {
+          "type": "boolean",
+          "instructions": "Does this Laminar frontend change misuse the reactive model: js.JSON.stringify on an Airstream or DOM value, raw js.timers.setTimeout, .now() inside a signal combinator, child <-- signal.map { case ... } on an ADT, currentPageSignal.map to render pages, or an import from the server-side api package?",
+          "criteria": {
+            "true": "js.JSON.stringify(signal); js.timers.setTimeout(500)(...); a.signal.map(x => b.now() + x); child <-- page.map { case Home => ...; case Map => ... }; router.currentPageSignal.map(render); import com.acme.api.OrderDto",
+            "false": "EventStream.delay / periodic; withCurrentValueOf or sample; splitMatchOne with handleCase; SplitRender; DTOs from shared/model"
+          }
+        }
+      }
     }
   ]
 }

@@ -1,0 +1,993 @@
+=== EDIT
+note: [pos laminar.json-stringify] debug log of the stock level signal serialised with JSON.stringify
+--- file: app/src/main/scala/com/northwind/inventory/StockPanel.scala
+--- before
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object StockPanel:
+  def apply(levels: Signal[Map[String, Int]]): HtmlElement =
+    div(
+      cls := "stock-panel",
+      h3("Stock levels"),
+      ul(
+        children <-- levels.map: byItem =>
+          byItem.toList.sortBy(_._1).map: (sku, quantity) =>
+            li(s"$sku: $quantity")
+      )
+    )
+--- after
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object StockPanel:
+  def apply(levels: Signal[Map[String, Int]]): HtmlElement =
+    div(
+      cls := "stock-panel",
+      h3("Stock levels"),
+      levels --> Observer[Map[String, Int]](snapshot => js.Dynamic.global.console.debug(js.JSON.stringify(js.Dictionary(snapshot.toSeq*)))),
+      ul(
+        children <-- levels.map: byItem =>
+          byItem.toList.sortBy(_._1).map: (sku, quantity) =>
+            li(s"$sku: $quantity")
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] persist the slot draft to sessionStorage by stringifying the input element value
+--- file: app/src/main/scala/com/kestrel/scheduling/SlotDraftForm.scala
+--- before
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+
+object SlotDraftForm:
+  def apply(onSubmit: Observer[String]): HtmlElement =
+    val titleInput = input(placeholder := "Slot title")
+    form(
+      titleInput,
+      button(typ := "submit", "Save"),
+      onSubmit.preventDefault.mapTo(titleInput.ref.value) --> onSubmit
+    )
+--- after
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+
+object SlotDraftForm:
+  def apply(onSubmit: Observer[String]): HtmlElement =
+    val titleInput = input(placeholder := "Slot title")
+    form(
+      titleInput,
+      button(typ := "submit", "Save"),
+      onInput --> (_ => dom.window.sessionStorage.setItem("slot-draft", js.JSON.stringify(titleInput.ref))),
+      onSubmit.preventDefault.mapTo(titleInput.ref.value) --> onSubmit
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] session view dumps the whole session Var into a pre element
+--- file: app/src/main/scala/com/northwind/auth/SessionDebugView.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+case class Session(userId: String, roles: List[String], expiresAt: Double)
+
+object SessionDebugView:
+  def apply(session: Var[Option[Session]]): HtmlElement =
+    div(
+      cls := "session-debug",
+      child.text <-- session.signal.map: current =>
+        current.fold("signed out")(s => s"signed in as ${s.userId}")
+    )
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+case class Session(userId: String, roles: List[String], expiresAt: Double)
+
+object SessionDebugView:
+  def apply(session: Var[Option[Session]]): HtmlElement =
+    div(
+      cls := "session-debug",
+      child.text <-- session.signal.map: current =>
+        current.fold("signed out")(s => s"signed in as ${s.userId}"),
+      pre(
+        child.text <-- session.signal.map(_ => js.JSON.stringify(js.Dynamic.literal(signal = session.signal.toString), space = 2))
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] hide the "item saved" toast after three seconds with a raw timer
+--- file: app/src/main/scala/com/kestrel/inventory/SavedToast.scala
+--- before
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SavedToast:
+  def apply(saved: EventStream[String]): HtmlElement =
+    val visible = Var(false)
+    val label = Var("")
+    div(
+      cls := "toast",
+      cls("toast-visible") <-- visible.signal,
+      child.text <-- label.signal,
+      saved --> Observer[String]: sku =>
+        label.set(s"$sku saved")
+        visible.set(true)
+    )
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SavedToast:
+  def apply(saved: EventStream[String]): HtmlElement =
+    val visible = Var(false)
+    val label = Var("")
+    div(
+      cls := "toast",
+      cls("toast-visible") <-- visible.signal,
+      child.text <-- label.signal,
+      saved --> Observer[String]: sku =>
+        label.set(s"$sku saved")
+        visible.set(true)
+        js.timers.setTimeout(3000)(visible.set(false))
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] poll the availability endpoint every 30s with setInterval
+--- file: app/src/main/scala/com/northwind/scheduling/AvailabilityPoller.scala
+--- before
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object AvailabilityPoller:
+  def apply(refresh: () => Unit): HtmlElement =
+    div(
+      cls := "availability",
+      button("Refresh now", onClick --> (_ => refresh())),
+      onMountCallback(_ => refresh())
+    )
+--- after
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object AvailabilityPoller:
+  def apply(refresh: () => Unit): HtmlElement =
+    div(
+      cls := "availability",
+      button("Refresh now", onClick --> (_ => refresh())),
+      onMountCallback: _ =>
+        refresh()
+        js.timers.setInterval(30000)(refresh())
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] debounce the login email check by scheduling a raw timeout per keystroke
+--- file: app/src/main/scala/com/kestrel/auth/EmailField.scala
+--- before
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object EmailField:
+  def apply(check: String => Unit): HtmlElement =
+    val email = Var("")
+    input(
+      typ := "email",
+      placeholder := "you@company.com",
+      controlled(
+        value <-- email.signal,
+        onInput.mapToValue --> email.writer
+      )
+    )
+--- after
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object EmailField:
+  def apply(check: String => Unit): HtmlElement =
+    val email = Var("")
+    input(
+      typ := "email",
+      placeholder := "you@company.com",
+      controlled(
+        value <-- email.signal,
+        onInput.mapToValue --> email.writer
+      ),
+      onInput.mapToValue --> (typed => js.timers.setTimeout(400)(check(typed)))
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] reserved quantity read with now() inside a signal map
+--- file: app/src/main/scala/com/northwind/inventory/AvailableBadge.scala
+--- before
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+
+object AvailableBadge:
+  def apply(onHand: Signal[Int], reserved: Var[Int]): HtmlElement =
+    span(
+      cls := "badge",
+      child.text <-- onHand.map(_.toString)
+    )
+--- after
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+
+object AvailableBadge:
+  def apply(onHand: Signal[Int], reserved: Var[Int]): HtmlElement =
+    span(
+      cls := "badge",
+      child.text <-- onHand.map(total => (total - reserved.now()).max(0).toString)
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] only emit bookings while the calendar toggle is on, reading the Var with now() in filter
+--- file: app/src/main/scala/com/kestrel/scheduling/BookingFeed.scala
+--- before
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+
+case class Booking(id: String, room: String, startsAt: String)
+
+object BookingFeed:
+  def apply(incoming: EventStream[Booking], liveMode: Var[Boolean]): HtmlElement =
+    val latest = Var(List.empty[Booking])
+    div(
+      cls := "booking-feed",
+      incoming --> latest.updater[Booking]((acc, b) => (b :: acc).take(20)),
+      children <-- latest.signal.map(_.map(b => div(s"${b.room} at ${b.startsAt}")))
+    )
+--- after
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+
+case class Booking(id: String, room: String, startsAt: String)
+
+object BookingFeed:
+  def apply(incoming: EventStream[Booking], liveMode: Var[Boolean]): HtmlElement =
+    val latest = Var(List.empty[Booking])
+    div(
+      cls := "booking-feed",
+      incoming.filter(_ => liveMode.now()) --> latest.updater[Booking]((acc, b) => (b :: acc).take(20)),
+      children <-- latest.signal.map(_.map(b => div(s"${b.room} at ${b.startsAt}")))
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] audit log pairs every role change with the current user via now() in a foreach
+--- file: app/src/main/scala/com/northwind/auth/RoleEditor.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+object RoleEditor:
+  def apply(currentUser: Var[String], audit: (String, String) => Unit): HtmlElement =
+    val selected = Var("viewer")
+    div(
+      select(
+        option(value := "viewer", "Viewer"),
+        option(value := "editor", "Editor"),
+        option(value := "admin", "Admin"),
+        onChange.mapToValue --> selected.writer
+      )
+    )
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+object RoleEditor:
+  def apply(currentUser: Var[String], audit: (String, String) => Unit): HtmlElement =
+    val selected = Var("viewer")
+    div(
+      select(
+        option(value := "viewer", "Viewer"),
+        option(value := "editor", "Editor"),
+        option(value := "admin", "Admin"),
+        onChange.mapToValue --> selected.writer
+      ),
+      onMountCallback(ctx => selected.signal.changes.foreach(role => audit(currentUser.now(), role))(ctx.owner))
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] render the warehouse sync status by pattern matching inside child <-- map
+--- file: app/src/main/scala/com/kestrel/inventory/SyncStatusView.scala
+--- before
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+
+enum SyncStatus:
+  case Idle
+  case Running(progress: Int)
+  case Failed(reason: String)
+
+object SyncStatusView:
+  def apply(status: Signal[SyncStatus]): HtmlElement =
+    div(
+      cls := "sync-status",
+      h4("Warehouse sync")
+    )
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+
+enum SyncStatus:
+  case Idle
+  case Running(progress: Int)
+  case Failed(reason: String)
+
+object SyncStatusView:
+  def apply(status: Signal[SyncStatus]): HtmlElement =
+    div(
+      cls := "sync-status",
+      h4("Warehouse sync"),
+      child <-- status.map { case SyncStatus.Idle => span("Idle"); case SyncStatus.Running(p) => progress(value := p.toString); case SyncStatus.Failed(r) => span(cls := "error", r) }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] optional conflict banner rendered via child.maybe with a case match
+--- file: app/src/main/scala/com/northwind/scheduling/ConflictBanner.scala
+--- before
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+
+enum Conflict:
+  case Overlap(other: String)
+  case OutsideHours
+
+object ConflictBanner:
+  def apply(conflict: Signal[Option[Conflict]]): HtmlElement =
+    section(
+      cls := "conflicts"
+    )
+--- after
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+
+enum Conflict:
+  case Overlap(other: String)
+  case OutsideHours
+
+object ConflictBanner:
+  def apply(conflict: Signal[Option[Conflict]]): HtmlElement =
+    section(
+      cls := "conflicts",
+      child.maybe <-- conflict.map { case Some(Conflict.Overlap(other)) => Some(p(s"Overlaps $other")); case Some(Conflict.OutsideHours) => Some(p("Outside opening hours")); case None => None }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] login step switch rewritten from splitMatchOne back to map with cases
+--- file: app/src/main/scala/com/kestrel/auth/LoginFlow.scala
+--- before
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+
+enum LoginStep:
+  case EnterEmail
+  case EnterCode(email: String)
+  case Done
+
+object LoginFlow:
+  def apply(step: Signal[LoginStep]): HtmlElement =
+    div(
+      cls := "login",
+      child <-- step.splitMatchOne
+        .handleValue(LoginStep.EnterEmail)(EmailStep())
+        .handleType[LoginStep.EnterCode]((initial, _) => CodeStep(initial.email))
+        .handleValue(LoginStep.Done)(p("Welcome back"))
+        .toSignal
+    )
+--- after
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+
+enum LoginStep:
+  case EnterEmail
+  case EnterCode(email: String)
+  case Done
+
+object LoginFlow:
+  def apply(step: Signal[LoginStep]): HtmlElement =
+    div(
+      cls := "login",
+      child <-- step.map { case LoginStep.EnterEmail => EmailStep(); case LoginStep.EnterCode(email) => CodeStep(email); case LoginStep.Done => p("Welcome back") }
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] top-level inventory shell renders pages by mapping currentPageSignal
+--- file: app/src/main/scala/com/northwind/inventory/InventoryShell.scala
+--- before
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum InventoryPage:
+  case Catalog
+  case Item(sku: String)
+
+object InventoryShell:
+  def apply(router: Router[InventoryPage]): HtmlElement =
+    div(
+      cls := "inventory-shell",
+      nav(a("Catalog", onClick --> (_ => router.pushState(InventoryPage.Catalog))))
+    )
+--- after
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum InventoryPage:
+  case Catalog
+  case Item(sku: String)
+
+object InventoryShell:
+  def apply(router: Router[InventoryPage]): HtmlElement =
+    div(
+      cls := "inventory-shell",
+      nav(a("Catalog", onClick --> (_ => router.pushState(InventoryPage.Catalog)))),
+      child <-- router.currentPageSignal.map(page => CatalogViews.render(page))
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] breadcrumb title derived via currentPageSignal.map
+--- file: app/src/main/scala/com/kestrel/scheduling/Breadcrumbs.scala
+--- before
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SchedulePage:
+  case Week
+  case Day(date: String)
+  case Room(roomId: String)
+
+object Breadcrumbs:
+  def apply(router: Router[SchedulePage]): HtmlElement =
+    nav(
+      cls := "breadcrumbs",
+      a("Schedule", href := "/schedule")
+    )
+--- after
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SchedulePage:
+  case Week
+  case Day(date: String)
+  case Room(roomId: String)
+
+object Breadcrumbs:
+  def apply(router: Router[SchedulePage]): HtmlElement =
+    nav(
+      cls := "breadcrumbs",
+      a("Schedule", href := "/schedule"),
+      children <-- router.currentPageSignal.map(page => List(span(" / "), span(page.toString)))
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] auth app routes between login and account with a multi-line currentPageSignal.map call
+--- file: app/src/main/scala/com/northwind/auth/AuthApp.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum AuthPage:
+  case Login
+  case Account
+
+object AuthApp:
+  def apply(router: Router[AuthPage]): HtmlElement =
+    mainTag(
+      cls := "auth-app"
+    )
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum AuthPage:
+  case Login
+  case Account
+
+object AuthApp:
+  def apply(router: Router[AuthPage]): HtmlElement =
+    mainTag(
+      cls := "auth-app",
+      child <-- router.currentPageSignal.map: page =>
+          if page == AuthPage.Login then LoginView() else AccountView()
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] stock table imports the server api DTO directly
+--- file: app/src/main/scala/com/kestrel/inventory/StockTable.scala
+--- before
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+
+object StockTable:
+  def apply(rows: Signal[List[(String, Int)]]): HtmlElement =
+    table(
+      thead(tr(th("SKU"), th("Qty"))),
+      tbody(
+        children <-- rows.map(_.map((sku, qty) => tr(td(sku), td(qty.toString))))
+      )
+    )
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import com.kestrel.api.StockRowDto
+
+object StockTable:
+  def apply(rows: Signal[List[StockRowDto]]): HtmlElement =
+    table(
+      thead(tr(th("SKU"), th("Qty"))),
+      tbody(
+        children <-- rows.map(_.map(row => tr(td(row.sku), td(row.quantity.toString))))
+      )
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] calendar view pulls the endpoint request type from the server api package
+--- file: app/src/main/scala/com/northwind/scheduling/CalendarView.scala
+--- before
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.northwind.shared.model.SlotView
+
+object CalendarView:
+  def apply(slots: Signal[List[SlotView]]): HtmlElement =
+    div(
+      cls := "calendar",
+      children <-- slots.map: all =>
+        all.map(slot => div(cls := "slot", slot.label))
+    )
+--- after
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.northwind.shared.model.SlotView
+import com.northwind.scheduling.api.endpoints.BookSlotRequest
+
+object CalendarView:
+  def apply(slots: Signal[List[SlotView]], book: Observer[BookSlotRequest]): HtmlElement =
+    div(
+      cls := "calendar",
+      children <-- slots.map: all =>
+        all.map(slot => div(cls := "slot", slot.label, onClick.mapTo(BookSlotRequest(slot.id)) --> book))
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] password reset form imports the auth api error ADT
+--- file: app/src/main/scala/com/kestrel/auth/ResetPasswordForm.scala
+--- before
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+
+object ResetPasswordForm:
+  def apply(submit: Observer[String], error: Signal[Option[String]]): HtmlElement =
+    val email = Var("")
+    form(
+      input(typ := "email", onInput.mapToValue --> email.writer),
+      child.maybe <-- error.map(_.map(message => p(cls := "error", message))),
+      button(typ := "submit", "Send reset link"),
+      onSubmit.preventDefault.mapTo(email.now()) --> submit
+    )
+--- after
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+import com.kestrel.api.auth.{ResetError, ResetErrorCode}
+
+object ResetPasswordForm:
+  def apply(submit: Observer[String], error: Signal[Option[ResetError]]): HtmlElement =
+    val email = Var("")
+    form(
+      input(typ := "email", onInput.mapToValue --> email.writer),
+      child.maybe <-- error.map(_.map(e => p(cls := "error", e.code.toString))),
+      button(typ := "submit", "Send reset link"),
+      onSubmit.preventDefault.mapTo(email.now()) --> submit
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] threshold combined with withCurrentValueOf instead of reading now()
+--- file: app/src/main/scala/com/northwind/inventory/LowStockAlert.scala
+--- before
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+
+object LowStockAlert:
+  def apply(quantity: Signal[Int], threshold: Var[Int]): HtmlElement =
+    div(
+      cls := "low-stock"
+    )
+--- after
+package com.northwind.inventory
+
+import com.raquo.laminar.api.L.*
+
+object LowStockAlert:
+  def apply(quantity: Signal[Int], threshold: Var[Int]): HtmlElement =
+    div(
+      cls := "low-stock",
+      cls("visible") <-- quantity.withCurrentValueOf(threshold.signal).map((qty, limit) => qty < limit),
+      child.text <-- quantity.combineWith(threshold.signal).map((qty, limit) => s"$qty left (alert under $limit)")
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] reminder dismissal scheduled with EventStream.delay instead of a raw timer
+--- file: app/src/main/scala/com/kestrel/scheduling/ReminderPopup.scala
+--- before
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+
+object ReminderPopup:
+  def apply(reminders: EventStream[String]): HtmlElement =
+    val shown = Var(Option.empty[String])
+    div(
+      cls := "reminder",
+      child.maybe <-- shown.signal.map(_.map(text => p(text))),
+      reminders.map(Some(_)) --> shown.writer
+    )
+--- after
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+
+object ReminderPopup:
+  def apply(reminders: EventStream[String]): HtmlElement =
+    val shown = Var(Option.empty[String])
+    div(
+      cls := "reminder",
+      child.maybe <-- shown.signal.map(_.map(text => p(text))),
+      reminders.map(Some(_)) --> shown.writer,
+      reminders.delay(5000).mapTo(None) --> shown.writer
+    )
+=== END
+=== EDIT
+note: [near laminar.child-arrow-map-case] MFA method rendered with splitMatchOne and handleCase
+--- file: app/src/main/scala/com/northwind/auth/MfaMethodView.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+enum MfaMethod:
+  case Totp(issuer: String)
+  case Sms(phone: String)
+  case Disabled
+
+object MfaMethodView:
+  def apply(method: Signal[MfaMethod]): HtmlElement =
+    div(cls := "mfa")
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+enum MfaMethod:
+  case Totp(issuer: String)
+  case Sms(phone: String)
+  case Disabled
+
+object MfaMethodView:
+  def apply(method: Signal[MfaMethod]): HtmlElement =
+    div(
+      cls := "mfa",
+      child <-- method.splitMatchOne
+        .handleCase { case MfaMethod.Totp(issuer) => issuer }((_, issuer) => p(child.text <-- issuer))
+        .handleCase { case MfaMethod.Sms(phone) => phone }((_, phone) => p(child.text <-- phone))
+        .handleValue(MfaMethod.Disabled)(p("MFA is off"))
+        .toSignal
+    )
+=== END
+=== EDIT
+note: [near waypoint.current-page-signal-map] scheduling routes rendered through SplitRender
+--- file: app/src/main/scala/com/northwind/scheduling/ScheduleRoutes.scala
+--- before
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SchedulePage:
+  case Overview
+  case Day(date: String)
+
+object ScheduleRoutes:
+  def view(router: Router[SchedulePage]): HtmlElement =
+    div(cls := "schedule")
+--- after
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SchedulePage:
+  case Overview
+  case Day(date: String)
+
+object ScheduleRoutes:
+  def view(router: Router[SchedulePage]): HtmlElement =
+    div(
+      cls := "schedule",
+      child <-- SplitRender(router.currentPageSignal)
+        .collectStatic(SchedulePage.Overview)(OverviewView())
+        .collectSignal[SchedulePage.Day](day => DayView(day.map(_.date)))
+        .signal
+    )
+=== END
+=== EDIT
+note: [near server-architecture.frontend-imports-api] DTO moved to shared.model, import swapped (fix edit)
+--- file: app/src/main/scala/com/kestrel/inventory/ReorderList.scala
+--- before
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import com.kestrel.api.ReorderSuggestion
+
+object ReorderList:
+  def apply(suggestions: Signal[List[ReorderSuggestion]]): HtmlElement =
+    ul(
+      cls := "reorder",
+      children <-- suggestions.map(_.map(s => li(s"${s.sku}: order ${s.quantity}")))
+    )
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import com.kestrel.shared.model.ReorderSuggestion
+
+object ReorderList:
+  def apply(suggestions: Signal[List[ReorderSuggestion]]): HtmlElement =
+    ul(
+      cls := "reorder",
+      children <-- suggestions.map(_.map(s => li(s"${s.sku}: order ${s.quantity}")))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] token age computed with js.Date.now() inside a periodic map
+--- file: app/src/main/scala/com/kestrel/auth/TokenExpiry.scala
+--- before
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object TokenExpiry:
+  def apply(expiresAtMillis: Double): HtmlElement =
+    span(
+      cls := "token-expiry",
+      "Session active"
+    )
+--- after
+package com.kestrel.auth
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object TokenExpiry:
+  def apply(expiresAtMillis: Double): HtmlElement =
+    span(
+      cls := "token-expiry",
+      child.text <-- EventStream.periodic(60000).map(_ => ((expiresAtMillis - js.Date.now()) / 60000).toInt).map(mins => s"Expires in $mins min")
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] fix edit replacing raw setInterval clock with EventStream.periodic
+--- file: app/src/main/scala/com/kestrel/scheduling/LiveClock.scala
+--- before
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object LiveClock:
+  def apply(): HtmlElement =
+    val now = Var(new js.Date().toLocaleTimeString())
+    span(
+      cls := "clock",
+      child.text <-- now.signal,
+      onMountCallback(_ => js.timers.setInterval(1000)(now.set(new js.Date().toLocaleTimeString())))
+    )
+--- after
+package com.kestrel.scheduling
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object LiveClock:
+  def apply(): HtmlElement =
+    span(
+      cls := "clock",
+      child.text <-- EventStream.periodic(1000).map(_ => new js.Date().toLocaleTimeString())
+    )
+=== END
+=== EDIT
+note: [near server-architecture.frontend-imports-api] api import already in the before file; edit only adds a heading
+--- file: app/src/main/scala/com/northwind/auth/ApiKeyList.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import com.northwind.api.ApiKeyDto
+
+object ApiKeyList:
+  def apply(keys: Signal[List[ApiKeyDto]]): HtmlElement =
+    div(
+      cls := "api-keys",
+      ul(children <-- keys.map(_.map(key => li(key.label))))
+    )
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+import com.northwind.api.ApiKeyDto
+
+object ApiKeyList:
+  def apply(keys: Signal[List[ApiKeyDto]]): HtmlElement =
+    div(
+      cls := "api-keys",
+      h3("API keys"),
+      p(cls := "hint", "Keys grant full access to your workspace."),
+      ul(children <-- keys.map(_.map(key => li(key.label))))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] test reads Var.now() inside a map; src/test is excluded
+--- file: app/src/test/scala/com/kestrel/inventory/CartTotalsSuite.scala
+--- before
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class CartTotalsSuite extends FunSuite:
+  test("empty cart has zero total"):
+    val lines = Var(List.empty[Int])
+    assertEquals(lines.now().sum, 0)
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class CartTotalsSuite extends FunSuite:
+  test("empty cart has zero total"):
+    val lines = Var(List.empty[Int])
+    assertEquals(lines.now().sum, 0)
+
+  test("discount is applied to every line"):
+    val discount = Var(2)
+    val discounted = List(10, 20).map(price => price - discount.now())
+    assertEquals(discounted, List(8, 18))
+=== END
+=== EDIT
+note: [clean] add a disabled state to the booking button
+--- file: app/src/main/scala/com/northwind/scheduling/BookButton.scala
+--- before
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+
+object BookButton:
+  def apply(onBook: Observer[Unit]): HtmlElement =
+    button(
+      cls := "book",
+      "Book slot",
+      onClick.mapToUnit --> onBook
+    )
+--- after
+package com.northwind.scheduling
+
+import com.raquo.laminar.api.L.*
+
+object BookButton:
+  def apply(onBook: Observer[Unit], available: Signal[Boolean]): HtmlElement =
+    button(
+      cls := "book",
+      disabled <-- available.map(!_),
+      "Book slot",
+      onClick.mapToUnit --> onBook
+    )
+=== END
+=== EDIT
+note: [clean] new search box component filtering inventory items by name
+--- file: app/src/main/scala/com/kestrel/inventory/ItemSearch.scala
+--- before
+--- after
+package com.kestrel.inventory
+
+import com.raquo.laminar.api.L.*
+import com.kestrel.shared.model.ItemSummary
+
+object ItemSearch:
+  def apply(items: Signal[List[ItemSummary]]): HtmlElement =
+    val query = Var("")
+    val matching = items.combineWith(query.signal).map: (all, text) =>
+      all.filter(_.name.toLowerCase.contains(text.toLowerCase))
+    div(
+      cls := "item-search",
+      input(
+        placeholder := "Search items",
+        controlled(value <-- query.signal, onInput.mapToValue --> query.writer)
+      ),
+      ul(children <-- matching.map(_.map(item => li(item.name))))
+    )
+=== END
+=== EDIT
+note: [clean] show the signed-in user's initials in the header avatar
+--- file: app/src/main/scala/com/northwind/auth/HeaderAvatar.scala
+--- before
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+object HeaderAvatar:
+  def apply(displayName: Signal[String]): HtmlElement =
+    div(
+      cls := "avatar",
+      child.text <-- displayName
+    )
+--- after
+package com.northwind.auth
+
+import com.raquo.laminar.api.L.*
+
+object HeaderAvatar:
+  def apply(displayName: Signal[String]): HtmlElement =
+    div(
+      cls := "avatar",
+      title <-- displayName,
+      child.text <-- displayName.map: name =>
+        name.split(" ").toList.flatMap(_.headOption).take(2).mkString.toUpperCase
+    )
+=== END

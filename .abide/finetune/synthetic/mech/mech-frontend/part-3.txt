@@ -1,0 +1,1130 @@
+=== EDIT
+note: [pos laminar.json-stringify] log the checkout form state as JSON while debugging a stuck submit
+--- file: app/src/main/scala/com/lumen/payments/CheckoutForm.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object CheckoutForm:
+  case class Draft(cardholder: String, amountCents: Long)
+
+  def apply(draft: Var[Draft], onSubmit: Draft => Unit): HtmlElement =
+    form(
+      input(
+        placeholder := "Cardholder",
+        controlled(
+          value <-- draft.signal.map(_.cardholder),
+          onInput.mapToValue --> draft.updater[String]((d, name) => d.copy(cardholder = name))
+        )
+      ),
+      button(
+        typ := "submit",
+        "Pay"
+      ),
+      onSubmit.preventDefault --> (_ => onSubmit(draft.now()))
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object CheckoutForm:
+  case class Draft(cardholder: String, amountCents: Long)
+
+  def apply(draft: Var[Draft], onSubmit: Draft => Unit): HtmlElement =
+    form(
+      input(
+        placeholder := "Cardholder",
+        controlled(
+          value <-- draft.signal.map(_.cardholder),
+          onInput.mapToValue --> draft.updater[String]((d, name) => d.copy(cardholder = name))
+        )
+      ),
+      button(
+        typ := "submit",
+        "Pay"
+      ),
+      draft.signal --> (d => js.Dynamic.global.console.debug(js.JSON.stringify(js.Dictionary("cardholder" -> d.cardholder, "amount" -> d.amountCents.toDouble)))),
+      onSubmit.preventDefault --> (_ => onSubmit(draft.now()))
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] persist selected route stops to localStorage by stringifying the signal value
+--- file: app/src/main/scala/com/orbitlabs/transit/SavedStops.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+
+object SavedStops:
+  val selected = Var(List.empty[String])
+
+  def toggle(stopId: String): Unit =
+    selected.update: stops =>
+      if stops.contains(stopId) then stops.filterNot(_ == stopId) else stopId :: stops
+
+  def view: HtmlElement =
+    ul(
+      children <-- selected.signal.map: stops =>
+        stops.map(stop => li(stop, onClick --> (_ => toggle(stop))))
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+import scala.scalajs.js.JSConverters.*
+
+object SavedStops:
+  val selected = Var(List.empty[String])
+
+  def toggle(stopId: String): Unit =
+    selected.update: stops =>
+      if stops.contains(stopId) then stops.filterNot(_ == stopId) else stopId :: stops
+
+  def view: HtmlElement =
+    ul(
+      selected.signal --> (stops => dom.window.localStorage.setItem("stops", js.JSON.stringify(stops.toJSArray))),
+      children <-- selected.signal.map: stops =>
+        stops.map(stop => li(stop, onClick --> (_ => toggle(stop))))
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] show raw workout event in a debug panel via JSON.stringify of the DOM event
+--- file: app/src/main/scala/com/lumen/workouts/SetLogger.scala
+--- before
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SetLogger:
+  case class LoggedSet(exercise: String, reps: Int, weightKg: Double)
+
+  def apply(sets: Var[List[LoggedSet]], exercise: String): HtmlElement =
+    val reps = Var(8)
+    div(
+      cls := "set-logger",
+      span(exercise),
+      input(
+        typ := "number",
+        controlled(
+          value <-- reps.signal.map(_.toString),
+          onInput.mapToValue.map(_.toIntOption.getOrElse(0)) --> reps.writer
+        )
+      ),
+      button(
+        "Log set",
+        onClick --> (_ => sets.update(LoggedSet(exercise, reps.now(), 0) :: _))
+      )
+    )
+--- after
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SetLogger:
+  case class LoggedSet(exercise: String, reps: Int, weightKg: Double)
+
+  def apply(sets: Var[List[LoggedSet]], exercise: String): HtmlElement =
+    val reps = Var(8)
+    val lastEvent = Var("")
+    div(
+      cls := "set-logger",
+      span(exercise),
+      input(
+        typ := "number",
+        controlled(
+          value <-- reps.signal.map(_.toString),
+          onInput.mapToValue.map(_.toIntOption.getOrElse(0)) --> reps.writer
+        )
+      ),
+      button(
+        "Log set",
+        onClick --> (event => lastEvent.set(js.JSON.stringify(event))),
+        onClick --> (_ => sets.update(LoggedSet(exercise, reps.now(), 0) :: _))
+      ),
+      pre(child.text <-- lastEvent.signal)
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] auto-dismiss the payment success toast with a raw setTimeout
+--- file: app/src/main/scala/com/lumen/payments/PaymentToast.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PaymentToast:
+  val message = Var(Option.empty[String])
+
+  def show(text: String): Unit =
+    message.set(Some(text))
+
+  def view: HtmlElement =
+    div(
+      cls := "toast",
+      display <-- message.signal.map(m => if m.isDefined then "block" else "none"),
+      child.text <-- message.signal.map(_.getOrElse(""))
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PaymentToast:
+  val message = Var(Option.empty[String])
+
+  def show(text: String): Unit =
+    message.set(Some(text))
+    js.timers.setTimeout(4000)(message.set(None))
+
+  def view: HtmlElement =
+    div(
+      cls := "toast",
+      display <-- message.signal.map(m => if m.isDefined then "block" else "none"),
+      child.text <-- message.signal.map(_.getOrElse(""))
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] poll vehicle positions every 15s with js.timers.setInterval
+--- file: app/src/main/scala/com/orbitlabs/transit/LiveVehicles.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object LiveVehicles:
+  case class Vehicle(id: String, line: String, lat: Double, lon: Double)
+
+  def apply(fetch: () => Unit, vehicles: Signal[List[Vehicle]]): HtmlElement =
+    div(
+      cls := "live-vehicles",
+      onMountCallback(_ => fetch()),
+      children <-- vehicles.map: vs =>
+        vs.map(v => div(s"${v.line} · ${v.id}"))
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object LiveVehicles:
+  case class Vehicle(id: String, line: String, lat: Double, lon: Double)
+
+  def apply(fetch: () => Unit, vehicles: Signal[List[Vehicle]]): HtmlElement =
+    div(
+      cls := "live-vehicles",
+      onMountCallback: _ =>
+        fetch()
+        js.timers.setInterval(15000)(fetch()),
+      children <-- vehicles.map: vs =>
+        vs.map(v => div(s"${v.line} · ${v.id}"))
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] delay focusing the rest-timer input after mount using js.timers.setTimeout
+--- file: app/src/main/scala/com/orbitlabs/workouts/RestTimer.scala
+--- before
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+import scala.concurrent.duration.*
+
+object RestTimer:
+  def apply(seconds: Var[Int]): HtmlElement =
+    div(
+      cls := "rest-timer",
+      input(
+        typ := "number",
+        controlled(
+          value <-- seconds.signal.map(_.toString),
+          onInput.mapToValue.map(_.toIntOption.getOrElse(60)) --> seconds.writer
+        )
+      ),
+      span(child.text <-- seconds.signal.map(s => s"$s s"))
+    )
+--- after
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+import scala.concurrent.duration.*
+
+object RestTimer:
+  def apply(seconds: Var[Int]): HtmlElement =
+    div(
+      cls := "rest-timer",
+      input(
+        typ := "number",
+        onMountCallback(ctx => js.timers.setTimeout(150.millis)(ctx.thisNode.ref.focus())),
+        controlled(
+          value <-- seconds.signal.map(_.toString),
+          onInput.mapToValue.map(_.toIntOption.getOrElse(60)) --> seconds.writer
+        )
+      ),
+      span(child.text <-- seconds.signal.map(s => s"$s s"))
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] apply the tip percentage by reading tipVar.now() inside the total map
+--- file: app/src/main/scala/com/lumen/payments/TipSelector.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+object TipSelector:
+  val tipPercent = Var(10)
+
+  def apply(subtotalCents: Signal[Long]): HtmlElement =
+    div(
+      cls := "tip-selector",
+      List(0, 10, 15, 20).map: pct =>
+        button(
+          s"$pct%",
+          cls.toggle("active") <-- tipPercent.signal.map(_ == pct),
+          onClick.mapTo(pct) --> tipPercent.writer
+        ),
+      span(child.text <-- subtotalCents.map(c => f"${c / 100.0}%.2f"))
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+object TipSelector:
+  val tipPercent = Var(10)
+
+  def apply(subtotalCents: Signal[Long]): HtmlElement =
+    div(
+      cls := "tip-selector",
+      List(0, 10, 15, 20).map: pct =>
+        button(
+          s"$pct%",
+          cls.toggle("active") <-- tipPercent.signal.map(_ == pct),
+          onClick.mapTo(pct) --> tipPercent.writer
+        ),
+      span(child.text <-- subtotalCents.map(c => f"${c * (100 + tipPercent.now()) / 10000.0}%.2f"))
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] filter departures by the accessibility toggle read via .now() in filter
+--- file: app/src/main/scala/com/orbitlabs/transit/DepartureBoard.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+
+object DepartureBoard:
+  case class Departure(line: String, destination: String, minutes: Int, stepFree: Boolean)
+
+  val stepFreeOnly = Var(false)
+
+  def apply(departures: EventStream[List[Departure]]): HtmlElement =
+    div(
+      label(
+        input(typ := "checkbox", onClick.mapToChecked --> stepFreeOnly.writer),
+        "Step-free only"
+      ),
+      ul(
+        children <-- departures.map: ds =>
+          ds.map(d => li(s"${d.line} → ${d.destination} in ${d.minutes} min"))
+      )
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+
+object DepartureBoard:
+  case class Departure(line: String, destination: String, minutes: Int, stepFree: Boolean)
+
+  val stepFreeOnly = Var(false)
+
+  def apply(departures: EventStream[List[Departure]]): HtmlElement =
+    div(
+      label(
+        input(typ := "checkbox", onClick.mapToChecked --> stepFreeOnly.writer),
+        "Step-free only"
+      ),
+      ul(
+        children <-- departures.map(ds => ds.filter(d => d.stepFree || !stepFreeOnly.now())).map: ds =>
+          ds.map(d => li(s"${d.line} → ${d.destination} in ${d.minutes} min"))
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] tag each completed rep stream event with the current set number via .now() in foreach
+--- file: app/src/main/scala/com/lumen/workouts/RepCounter.scala
+--- before
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+
+object RepCounter:
+  val currentSet = Var(1)
+  val log = Var(Vector.empty[(Int, Int)])
+
+  def apply(repCompleted: EventStream[Int]): HtmlElement =
+    div(
+      cls := "rep-counter",
+      child.text <-- currentSet.signal.map(s => s"Set $s"),
+      button("Next set", onClick --> (_ => currentSet.update(_ + 1))),
+      ul(children <-- log.signal.map(_.map((set, reps) => li(s"Set $set: $reps reps"))))
+    )
+--- after
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+
+object RepCounter:
+  val currentSet = Var(1)
+  val log = Var(Vector.empty[(Int, Int)])
+
+  def apply(repCompleted: EventStream[Int]): HtmlElement =
+    div(
+      cls := "rep-counter",
+      child.text <-- currentSet.signal.map(s => s"Set $s"),
+      button("Next set", onClick --> (_ => currentSet.update(_ + 1))),
+      repCompleted.map(reps => (currentSet.now(), reps)) --> (entry => log.update(_ :+ entry)),
+      ul(children <-- log.signal.map(_.map((set, reps) => li(s"Set $set: $reps reps"))))
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] render payment status with child <-- status.map { case ... }
+--- file: app/src/main/scala/com/lumen/payments/PaymentStatusView.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+enum PaymentStatus:
+  case Pending
+  case Authorized(reference: String)
+  case Declined(reason: String)
+
+object PaymentStatusView:
+  def apply(status: Signal[PaymentStatus]): HtmlElement =
+    div(
+      cls := "payment-status",
+      h3("Payment")
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+enum PaymentStatus:
+  case Pending
+  case Authorized(reference: String)
+  case Declined(reason: String)
+
+object PaymentStatusView:
+  def apply(status: Signal[PaymentStatus]): HtmlElement =
+    div(
+      cls := "payment-status",
+      h3("Payment"),
+      child <-- status.map { case PaymentStatus.Pending => span("Processing…"); case PaymentStatus.Authorized(ref) => span(s"Paid, ref $ref"); case PaymentStatus.Declined(reason) => span(cls := "error", reason) }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] switch the journey planner panel by travel mode with a map/case child
+--- file: app/src/main/scala/com/orbitlabs/transit/JourneyPanel.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+
+enum TravelMode:
+  case Train, Bus, Walk
+
+object JourneyPanel:
+  val mode = Var(TravelMode.Train)
+
+  def apply(): HtmlElement =
+    div(
+      cls := "journey-panel",
+      TravelMode.values.toList.map: m =>
+        button(m.toString, onClick.mapTo(m) --> mode.writer),
+      div(cls := "details")
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+
+enum TravelMode:
+  case Train, Bus, Walk
+
+object JourneyPanel:
+  val mode = Var(TravelMode.Train)
+
+  def apply(): HtmlElement =
+    div(
+      cls := "journey-panel",
+      TravelMode.values.toList.map: m =>
+        button(m.toString, onClick.mapTo(m) --> mode.writer),
+      div(
+        cls := "details",
+        child <-- mode.signal.map { case TravelMode.Train => TrainOptions(); case TravelMode.Bus => BusOptions(); case TravelMode.Walk => WalkingRoute() }
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] optional badge for personal record using child.maybe <-- map { case ... }
+--- file: app/src/main/scala/com/orbitlabs/workouts/ExerciseRow.scala
+--- before
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+
+enum Achievement:
+  case None
+  case PersonalBest(kg: Double)
+  case Streak(days: Int)
+
+object ExerciseRow:
+  def apply(name: String, achievement: Signal[Achievement]): HtmlElement =
+    tr(
+      td(name),
+      td(cls := "badges")
+    )
+--- after
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+
+enum Achievement:
+  case None
+  case PersonalBest(kg: Double)
+  case Streak(days: Int)
+
+object ExerciseRow:
+  def apply(name: String, achievement: Signal[Achievement]): HtmlElement =
+    tr(
+      td(name),
+      td(
+        cls := "badges",
+        child.maybe <-- achievement.map { case Achievement.None => scala.None; case Achievement.PersonalBest(kg) => Some(span(s"PB $kg kg")); case Achievement.Streak(d) => Some(span(s"$d-day streak")) }
+      )
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] render the payments app shell by mapping currentPageSignal
+--- file: app/src/main/scala/com/lumen/payments/PaymentsApp.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum PaymentsPage:
+  case Overview
+  case Invoices
+  case Settings
+
+object PaymentsApp:
+  def apply(router: Router[PaymentsPage]): HtmlElement =
+    div(
+      cls := "payments-app",
+      nav(
+        PaymentsPage.values.toList.map: page =>
+          a(page.toString, onClick --> (_ => router.pushState(page)))
+      )
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum PaymentsPage:
+  case Overview
+  case Invoices
+  case Settings
+
+object PaymentsApp:
+  def apply(router: Router[PaymentsPage]): HtmlElement =
+    div(
+      cls := "payments-app",
+      nav(
+        PaymentsPage.values.toList.map: page =>
+          a(page.toString, onClick --> (_ => router.pushState(page)))
+      ),
+      child <-- router.currentPageSignal.map(renderPage)
+    )
+
+  private def renderPage(page: PaymentsPage) = page match
+    case PaymentsPage.Overview => OverviewView()
+    case PaymentsPage.Invoices => InvoiceList()
+    case PaymentsPage.Settings => PaymentSettings()
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] highlight the active tab by mapping currentPageSignal in the transit header
+--- file: app/src/main/scala/com/orbitlabs/transit/TransitHeader.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum TransitPage:
+  case Planner
+  case Lines
+  case Alerts
+
+object TransitHeader:
+  def apply(router: Router[TransitPage]): HtmlElement =
+    header(
+      cls := "transit-header",
+      h1("Orbit Transit")
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum TransitPage:
+  case Planner
+  case Lines
+  case Alerts
+
+object TransitHeader:
+  def apply(router: Router[TransitPage]): HtmlElement =
+    header(
+      cls := "transit-header",
+      h1("Orbit Transit"),
+      h2(child.text <-- router.currentPageSignal.map(_.toString)),
+      child <-- router.currentPageSignal.map(page => if page == TransitPage.Alerts then AlertsBanner() else emptyNode)
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] new workouts root view built from currentPageSignal.map with a match
+--- file: app/src/main/scala/com/lumen/workouts/WorkoutsRoot.scala
+--- before
+--- after
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum WorkoutPage:
+  case Plan
+  case History
+  case Exercise(id: String)
+
+object WorkoutsRoot:
+  def apply(router: Router[WorkoutPage]): HtmlElement =
+    mainTag(
+      cls := "workouts-root",
+      child <-- router.currentPageSignal.map:
+        case WorkoutPage.Plan         => PlanView()
+        case WorkoutPage.History      => HistoryView()
+        case WorkoutPage.Exercise(id) => ExerciseDetail(id)
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] import the server-side InvoiceDto from the api package into the invoice list
+--- file: app/src/main/scala/com/lumen/payments/InvoiceList.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceList:
+  def apply(invoices: Signal[List[(String, Long)]]): HtmlElement =
+    table(
+      cls := "invoice-list",
+      tbody(
+        children <-- invoices.map: rows =>
+          rows.map((number, cents) => tr(td(number), td(f"${cents / 100.0}%.2f")))
+      )
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import com.lumen.api.InvoiceDto
+
+object InvoiceList:
+  def apply(invoices: Signal[List[InvoiceDto]]): HtmlElement =
+    table(
+      cls := "invoice-list",
+      tbody(
+        children <-- invoices.map: rows =>
+          rows.map(dto => tr(td(dto.number), td(f"${dto.totalCents / 100.0}%.2f")))
+      )
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] reuse the route planner request types from the server api package
+--- file: app/src/main/scala/com/orbitlabs/transit/PlannerForm.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+
+object PlannerForm:
+  val origin = Var("")
+  val destination = Var("")
+
+  def apply(onPlan: (String, String) => Unit): HtmlElement =
+    form(
+      input(placeholder := "From", onInput.mapToValue --> origin.writer),
+      input(placeholder := "To", onInput.mapToValue --> destination.writer),
+      button(typ := "submit", "Plan"),
+      onSubmit.preventDefault --> (_ => onPlan(origin.now(), destination.now()))
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import com.orbitlabs.transit.api.routing.PlanRequest
+
+object PlannerForm:
+  val origin = Var("")
+  val destination = Var("")
+
+  def apply(onPlan: PlanRequest => Unit): HtmlElement =
+    form(
+      input(placeholder := "From", onInput.mapToValue --> origin.writer),
+      input(placeholder := "To", onInput.mapToValue --> destination.writer),
+      button(typ := "submit", "Plan"),
+      onSubmit.preventDefault --> (_ => onPlan(PlanRequest(origin.now(), destination.now())))
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] import several workout endpoint DTOs from the api package with a selector
+--- file: app/src/main/scala/com/orbitlabs/workouts/WorkoutSummaryCard.scala
+--- before
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import com.orbitlabs.shared.model.WorkoutId
+
+object WorkoutSummaryCard:
+  def apply(id: WorkoutId, title: Signal[String]): HtmlElement =
+    div(
+      cls := "summary-card",
+      h4(child.text <-- title),
+      small(id.value)
+    )
+--- after
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import com.orbitlabs.shared.model.WorkoutId
+import com.orbitlabs.api.{WorkoutSummaryDto, VolumeDto}
+
+object WorkoutSummaryCard:
+  def apply(id: WorkoutId, summary: Signal[WorkoutSummaryDto]): HtmlElement =
+    div(
+      cls := "summary-card",
+      h4(child.text <-- summary.map(_.title)),
+      small(id.value),
+      span(child.text <-- summary.map(s => s"${s.totalVolumeKg} kg"))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] compute the tip-adjusted total with withCurrentValueOf instead of .now()
+--- file: app/src/main/scala/com/orbitlabs/payments/SplitBill.scala
+--- before
+package com.orbitlabs.payments
+
+import com.raquo.laminar.api.L.*
+
+object SplitBill:
+  val people = Var(2)
+
+  def apply(totalChanged: EventStream[Long]): HtmlElement =
+    div(
+      cls := "split-bill",
+      input(
+        typ := "number",
+        onInput.mapToValue.map(_.toIntOption.getOrElse(1)) --> people.writer
+      )
+    )
+--- after
+package com.orbitlabs.payments
+
+import com.raquo.laminar.api.L.*
+
+object SplitBill:
+  val people = Var(2)
+
+  def apply(totalChanged: EventStream[Long]): HtmlElement =
+    div(
+      cls := "split-bill",
+      input(
+        typ := "number",
+        onInput.mapToValue.map(_.toIntOption.getOrElse(1)) --> people.writer
+      ),
+      span(
+        child.text <-- totalChanged
+          .withCurrentValueOf(people.signal)
+          .map((cents, n) => f"${cents / 100.0 / n.max(1)}%.2f each")
+      )
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] auto-refresh departures with EventStream.periodic rather than js.timers
+--- file: app/src/main/scala/com/lumen/transit/StopCountdown.scala
+--- before
+package com.lumen.transit
+
+import com.raquo.laminar.api.L.*
+
+object StopCountdown:
+  def apply(stopName: String, minutesAway: Signal[Int]): HtmlElement =
+    div(
+      cls := "stop-countdown",
+      h3(stopName),
+      span(child.text <-- minutesAway.map(m => s"$m min"))
+    )
+--- after
+package com.lumen.transit
+
+import com.raquo.laminar.api.L.*
+
+object StopCountdown:
+  def apply(stopName: String, minutesAway: Signal[Int], refresh: () => Unit): HtmlElement =
+    div(
+      cls := "stop-countdown",
+      h3(stopName),
+      EventStream.periodic(30000) --> (_ => refresh()),
+      span(child.text <-- minutesAway.map(m => s"$m min"))
+    )
+=== END
+=== EDIT
+note: [near laminar.child-arrow-map-case] render the workout phase with splitMatchOne and handleCase
+--- file: app/src/main/scala/com/orbitlabs/workouts/PhaseView.scala
+--- before
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+
+enum Phase:
+  case Warmup(minutes: Int)
+  case Working(setIndex: Int)
+  case Cooldown
+
+object PhaseView:
+  def apply(phase: Signal[Phase]): HtmlElement =
+    section(cls := "phase")
+--- after
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+
+enum Phase:
+  case Warmup(minutes: Int)
+  case Working(setIndex: Int)
+  case Cooldown
+
+object PhaseView:
+  def apply(phase: Signal[Phase]): HtmlElement =
+    section(
+      cls := "phase",
+      child <-- phase.splitMatchOne
+        .handleCase { case Phase.Warmup(m) => m }(minutes => div(child.text <-- minutes.map(m => s"Warm up $m min")))
+        .handleCase { case Phase.Working(i) => i }(index => div(child.text <-- index.map(i => s"Set ${i + 1}")))
+        .handleValue(Phase.Cooldown)(div("Cool down"))
+        .toSignal
+    )
+=== END
+=== EDIT
+note: [near waypoint.current-page-signal-map] route transit pages through SplitRender instead of mapping currentPageSignal
+--- file: app/src/main/scala/com/orbitlabs/transit/TransitApp.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+object TransitApp:
+  def apply(router: Router[TransitPage]): HtmlElement =
+    div(
+      cls := "transit-app",
+      TransitHeader(router)
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+object TransitApp:
+  def apply(router: Router[TransitPage]): HtmlElement =
+    div(
+      cls := "transit-app",
+      TransitHeader(router),
+      child <-- SplitRender[TransitPage, HtmlElement](router.currentPageSignal)
+        .collectStatic(TransitPage.Planner)(PlannerForm(_ => ()))
+        .collectStatic(TransitPage.Lines)(LinesView())
+        .collectStatic(TransitPage.Alerts)(AlertsBanner())
+        .signal
+    )
+=== END
+=== EDIT
+note: [near server-architecture.frontend-imports-api] take the refund DTO from shared.model rather than the server api package
+--- file: app/src/main/scala/com/lumen/payments/RefundDialog.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+object RefundDialog:
+  def apply(open: Var[Boolean]): HtmlElement =
+    dialogTag(
+      cls := "refund-dialog",
+      h3("Request refund"),
+      button("Close", onClick.mapTo(false) --> open.writer)
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+import com.lumen.shared.model.RefundRequest
+
+object RefundDialog:
+  def apply(open: Var[Boolean], paymentId: String, onRequest: RefundRequest => Unit): HtmlElement =
+    val reason = Var("")
+    dialogTag(
+      cls := "refund-dialog",
+      h3("Request refund"),
+      textArea(onInput.mapToValue --> reason.writer),
+      button("Send", onClick --> (_ => onRequest(RefundRequest(paymentId, reason.now())))),
+      button("Close", onClick.mapTo(false) --> open.writer)
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] elapsed workout time via js.Date.now() inside a periodic map, which is not a Var read
+--- file: app/src/main/scala/com/lumen/workouts/ElapsedClock.scala
+--- before
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ElapsedClock:
+  def apply(startedAtMillis: Double): HtmlElement =
+    div(
+      cls := "elapsed",
+      "Started"
+    )
+--- after
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ElapsedClock:
+  def apply(startedAtMillis: Double): HtmlElement =
+    div(
+      cls := "elapsed",
+      child.text <-- EventStream.periodic(1000).map(_ => ((js.Date.now() - startedAtMillis) / 1000).toInt).map(s => f"${s / 60}%02d:${s % 60}%02d")
+    )
+=== END
+=== EDIT
+note: [near laminar.json-stringify] mention JSON.stringify only in a user-facing help string
+--- file: app/src/main/scala/com/orbitlabs/payments/WebhookHelp.scala
+--- before
+package com.orbitlabs.payments
+
+import com.raquo.laminar.api.L.*
+
+object WebhookHelp:
+  def apply(): HtmlElement =
+    div(
+      cls := "webhook-help",
+      h4("Webhook payloads"),
+      p("Payloads are signed with your webhook secret.")
+    )
+--- after
+package com.orbitlabs.payments
+
+import com.raquo.laminar.api.L.*
+
+object WebhookHelp:
+  def apply(): HtmlElement =
+    div(
+      cls := "webhook-help",
+      h4("Webhook payloads"),
+      p("Payloads are signed with your webhook secret."),
+      p("In Node, sign the body exactly as sent: hmac(secret, \"js.JSON.stringify\" output is not stable across key orders).")
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] existing setTimeout stays in the before file; edit only changes the toast text
+--- file: app/src/main/scala/com/orbitlabs/transit/DelayAlert.scala
+--- before
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object DelayAlert:
+  val visible = Var(false)
+
+  def trigger(): Unit =
+    visible.set(true)
+    js.timers.setTimeout(6000)(visible.set(false))
+
+  def view(line: String): HtmlElement =
+    div(
+      cls := "delay-alert",
+      display <-- visible.signal.map(v => if v then "block" else "none"),
+      s"Line $line is delayed"
+    )
+--- after
+package com.orbitlabs.transit
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object DelayAlert:
+  val visible = Var(false)
+
+  def trigger(): Unit =
+    visible.set(true)
+    js.timers.setTimeout(6000)(visible.set(false))
+
+  def view(line: String, minutes: Int): HtmlElement =
+    div(
+      cls := "delay-alert",
+      display <-- visible.signal.map(v => if v then "block" else "none"),
+      s"Line $line is running $minutes min late"
+    )
+=== END
+=== EDIT
+note: [near laminar.child-arrow-map-case] fix: replace child <-- map { case ... } with splitMatchOne handleType for card brand
+--- file: app/src/main/scala/com/lumen/payments/CardBrandIcon.scala
+--- before
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+enum CardBrand:
+  case Visa, Mastercard, Amex
+
+object CardBrandIcon:
+  def apply(brand: Signal[CardBrand]): HtmlElement =
+    span(
+      cls := "card-brand",
+      child <-- brand.map { case CardBrand.Visa => img(src := "/visa.svg"); case CardBrand.Mastercard => img(src := "/mc.svg"); case CardBrand.Amex => img(src := "/amex.svg") }
+    )
+--- after
+package com.lumen.payments
+
+import com.raquo.laminar.api.L.*
+
+enum CardBrand:
+  case Visa, Mastercard, Amex
+
+object CardBrandIcon:
+  def apply(brand: Signal[CardBrand]): HtmlElement =
+    span(
+      cls := "card-brand",
+      child <-- brand.splitMatchOne
+        .handleValue(CardBrand.Visa)(img(src := "/visa.svg"))
+        .handleValue(CardBrand.Mastercard)(img(src := "/mc.svg"))
+        .handleValue(CardBrand.Amex)(img(src := "/amex.svg"))
+        .toSignal
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] .now() read inside a map in a test file, which the rule excludes
+--- file: app/src/test/scala/com/orbitlabs/workouts/RepCounterSpec.scala
+--- before
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class RepCounterSpec extends FunSuite:
+  test("next set increments the set counter"):
+    val counter = Var(1)
+    counter.update(_ + 1)
+    assertEquals(counter.now(), 2)
+--- after
+package com.orbitlabs.workouts
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class RepCounterSpec extends FunSuite:
+  test("next set increments the set counter"):
+    val counter = Var(1)
+    counter.update(_ + 1)
+    assertEquals(counter.now(), 2)
+
+  test("labels carry the current set"):
+    val counter = Var(3)
+    val labels = List(10, 8).map(reps => s"${counter.now()}x$reps")
+    assertEquals(labels, List("3x10", "3x8"))
+=== END
+=== EDIT
+note: [clean] disable the start button while a workout is already running
+--- file: app/src/main/scala/com/lumen/workouts/StartWorkoutButton.scala
+--- before
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+
+object StartWorkoutButton:
+  def apply(running: Signal[Boolean], onStart: Observer[Unit]): HtmlElement =
+    button(
+      cls := "start-workout",
+      "Start workout",
+      onClick.mapToUnit --> onStart
+    )
+--- after
+package com.lumen.workouts
+
+import com.raquo.laminar.api.L.*
+
+object StartWorkoutButton:
+  def apply(running: Signal[Boolean], onStart: Observer[Unit]): HtmlElement =
+    button(
+      cls := "start-workout",
+      disabled <-- running,
+      child.text <-- running.map(r => if r then "In progress" else "Start workout"),
+      onClick.mapToUnit --> onStart
+    )
+=== END
+=== EDIT
+note: [clean] new saved-cards list component rendering cards with split
+--- file: app/src/main/scala/com/orbitlabs/payments/SavedCards.scala
+--- before
+--- after
+package com.orbitlabs.payments
+
+import com.raquo.laminar.api.L.*
+import com.orbitlabs.shared.model.SavedCard
+
+object SavedCards:
+  def apply(cards: Signal[List[SavedCard]], onRemove: Observer[String]): HtmlElement =
+    ul(
+      cls := "saved-cards",
+      children <-- cards.split(_.id): (id, _, card) =>
+        li(
+          span(child.text <-- card.map(c => s"•••• ${c.last4}")),
+          span(cls := "expiry", child.text <-- card.map(c => f"${c.expMonth}%02d/${c.expYear % 100}%02d")),
+          button("Remove", onClick.mapTo(id) --> onRemove)
+        )
+    )
+=== END

@@ -1,0 +1,692 @@
+=== EDIT
+note: rate limiter window computed from System.currentTimeMillis
+--- file: server/src/main/scala/com/hivemind/ratelimit/Window.scala
+--- before
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class Window(counts: Ref[IO, Map[(ClientRef, Long), Int]], sizeMillis: Long):
+
+  def hit(client: ClientRef, bucket: Long): IO[Int] =
+    counts.modify(m => m.updatedWith((client, bucket))(c => Some(c.fold(1)(_ + 1))) -> m.getOrElse((client, bucket), 0))
+--- after
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class Window(counts: Ref[IO, Map[(ClientRef, Long), Int]], sizeMillis: Long):
+
+  def hit(client: ClientRef, bucket: Long): IO[Int] =
+    counts.modify(m => m.updatedWith((client, bucket))(c => Some(c.fold(1)(_ + 1))) -> m.getOrElse((client, bucket), 0))
+
+  def hitNow(client: ClientRef): IO[Int] =
+    hit(client, System.currentTimeMillis / sizeMillis)
+=== END
+
+=== EDIT
+note: rate limiter bucket from IO.realTime
+--- file: server/src/main/scala/com/hivemind/ratelimit/Buckets.scala
+--- before
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+
+class Buckets(window: Window, sizeMillis: Long):
+  def hit(client: ClientRef, bucket: Long): IO[Int] = window.hit(client, bucket)
+--- after
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+
+class Buckets(window: Window, sizeMillis: Long):
+  def hit(client: ClientRef, bucket: Long): IO[Int] = window.hit(client, bucket)
+
+  def hitNow(client: ClientRef): IO[Int] =
+    IO.realTime.flatMap(now => hit(client, now.toMillis / sizeMillis))
+=== END
+
+=== EDIT
+note: mtl Raise file gets an attempt on a cache warmup call
+--- file: server/src/main/scala/com/hivemind/tenancy/TenantResolver.scala
+--- before
+package com.hivemind.tenancy
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class TenantResolver(directory: Directory, cache: TenantCache):
+
+  def resolve(host: Hostname)(using Raise[IO, TenantError]): IO[Tenant] =
+    directory.lookup(host).flatMap(_.fold(Raise[IO, TenantError].raise(TenantError.Unknown(host)))(IO.pure))
+--- after
+package com.hivemind.tenancy
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class TenantResolver(directory: Directory, cache: TenantCache):
+
+  def resolve(host: Hostname)(using Raise[IO, TenantError]): IO[Tenant] =
+    directory.lookup(host).flatMap(_.fold(Raise[IO, TenantError].raise(TenantError.Unknown(host)))(IO.pure))
+      .flatTap(t => cache.put(host, t).attempt.void)
+=== END
+
+=== EDIT
+note: tenant cache write moved into its own non-mtl wrapper with attempt
+--- file: server/src/main/scala/com/hivemind/tenancy/SafeTenantCache.scala
+--- before
+package com.hivemind.tenancy
+
+import cats.effect.IO
+
+class SafeTenantCache(underlying: TenantCache):
+  def get(host: Hostname): IO[Option[Tenant]] = underlying.get(host)
+--- after
+package com.hivemind.tenancy
+
+import cats.effect.IO
+
+class SafeTenantCache(underlying: TenantCache):
+  def get(host: Hostname): IO[Option[Tenant]] = underlying.get(host)
+
+  def put(host: Hostname, tenant: Tenant): IO[Unit] =
+    underlying.put(host, tenant).attempt.void
+=== END
+
+=== EDIT
+note: recover with a partial function inside a tagless Handle-using service
+--- file: server/src/main/scala/com/payroll/hr/Onboarding.scala
+--- before
+package com.payroll.hr
+
+import cats.MonadThrow
+import cats.mtl.Handle
+import cats.syntax.flatMap.*
+
+class Onboarding[F[_]: MonadThrow](employees: Employees[F], accounts: Accounts[F]):
+
+  def onboard(hire: Hire)(using Handle[F, OnboardError]): F[EmployeeRef] =
+    employees.create(hire).flatTap(accounts.provision)
+--- after
+package com.payroll.hr
+
+import cats.MonadThrow
+import cats.mtl.Handle
+import cats.syntax.applicativeError.*
+import cats.syntax.flatMap.*
+
+class Onboarding[F[_]: MonadThrow](employees: Employees[F], accounts: Accounts[F]):
+
+  def onboard(hire: Hire)(using Handle[F, OnboardError]): F[EmployeeRef] =
+    employees
+      .create(hire)
+      .flatTap(accounts.provision)
+      .recover:
+        case _: DuplicateEmployee => hire.existing
+=== END
+
+=== EDIT
+note: Handle.handleWith on the typed channel instead of IO recovery
+--- file: server/src/main/scala/com/payroll/hr/Offboarding.scala
+--- before
+package com.payroll.hr
+
+import cats.Monad
+import cats.mtl.Handle
+import cats.syntax.flatMap.*
+
+class Offboarding[F[_]: Monad](employees: Employees[F], accounts: Accounts[F]):
+
+  def offboard(employee: EmployeeRef)(using Handle[F, OffboardError]): F[Unit] =
+    accounts.revoke(employee).flatMap(_ => employees.archive(employee))
+--- after
+package com.payroll.hr
+
+import cats.Monad
+import cats.mtl.Handle
+import cats.syntax.flatMap.*
+
+class Offboarding[F[_]: Monad](employees: Employees[F], accounts: Accounts[F]):
+
+  def offboard(employee: EmployeeRef)(using Handle[F, OffboardError]): F[Unit] =
+    Handle[F, OffboardError].handleWith(accounts.revoke(employee)):
+      case OffboardError.AlreadyRevoked(_) => Monad[F].unit
+    .flatMap(_ => employees.archive(employee))
+=== END
+
+=== EDIT
+note: payslip generation reads Instant.now for the issue date
+--- file: server/src/main/scala/com/payroll/hr/PayslipService.scala
+--- before
+package com.payroll.hr
+
+import cats.effect.IO
+
+class PayslipService(payslips: Payslips, renderer: PdfRenderer):
+
+  def generate(employee: EmployeeRef, period: Period): IO[PdfRef] =
+    payslips.compute(employee, period).flatMap(renderer.render)
+--- after
+package com.payroll.hr
+
+import cats.effect.IO
+import java.time.Instant
+
+class PayslipService(payslips: Payslips, renderer: PdfRenderer):
+
+  def generate(employee: EmployeeRef, period: Period): IO[PdfRef] =
+    payslips.compute(employee, period).flatMap: payslip =>
+      renderer.render(payslip.copy(issuedAt = Instant.now))
+=== END
+
+=== EDIT
+note: payslip uses an injected Clock[IO]
+--- file: server/src/main/scala/com/payroll/hr/BonusService.scala
+--- before
+package com.payroll.hr
+
+import cats.effect.IO
+
+class BonusService(bonuses: Bonuses, renderer: PdfRenderer):
+
+  def generate(employee: EmployeeRef, year: Year): IO[PdfRef] =
+    bonuses.compute(employee, year).flatMap(renderer.render)
+--- after
+package com.payroll.hr
+
+import cats.effect.Clock
+import cats.effect.IO
+
+class BonusService(bonuses: Bonuses, renderer: PdfRenderer)(using Clock[IO]):
+
+  def generate(employee: EmployeeRef, year: Year): IO[PdfRef] =
+    (bonuses.compute(employee, year), Clock[IO].realTimeInstant).flatMapN: (bonus, now) =>
+      renderer.render(bonus.copy(issuedAt = now))
+=== END
+
+=== EDIT
+note: global runtime import added to a domain object to make a lazy val
+--- file: server/src/main/scala/com/payroll/tax/TaxTables.scala
+--- before
+package com.payroll.tax
+
+import cats.effect.IO
+
+object TaxTables:
+  def load(year: Int): IO[TaxTable] = TaxTableLoader.fromClasspath(year)
+--- after
+package com.payroll.tax
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+
+object TaxTables:
+  def load(year: Int): IO[TaxTable] = TaxTableLoader.fromClasspath(year)
+
+  lazy val current: TaxTable = load(2025).unsafeRunSync()
+=== END
+
+=== EDIT
+note: memoize the tax table load in IO
+--- file: server/src/main/scala/com/payroll/tax/TaxTableCache.scala
+--- before
+package com.payroll.tax
+
+import cats.effect.IO
+
+object TaxTableCache:
+  def load(year: Int): IO[TaxTable] = TaxTableLoader.fromClasspath(year)
+--- after
+package com.payroll.tax
+
+import cats.effect.IO
+
+object TaxTableCache:
+  def load(year: Int): IO[TaxTable] = TaxTableLoader.fromClasspath(year)
+
+  def memoized(year: Int): IO[IO[TaxTable]] = load(year).memoize
+=== END
+
+=== EDIT
+note: add a second tax bracket, unrelated
+--- file: server/src/main/scala/com/payroll/tax/SwissBrackets.scala
+--- before
+package com.payroll.tax
+
+object SwissBrackets:
+  val all: List[Bracket] = List(Bracket(0, 14500, 0))
+--- after
+package com.payroll.tax
+
+object SwissBrackets:
+  val all: List[Bracket] = List(Bracket(0, 14500, 0), Bracket(14500, 31600, 0.0077))
+=== END
+
+=== EDIT
+note: global runtime import in a test with CatsEffectSuite (still forbidden in tests)
+--- file: server/src/test/scala/com/payroll/tax/TaxTablesSuite.scala
+--- before
+package com.payroll.tax
+
+import munit.CatsEffectSuite
+
+class TaxTablesSuite extends CatsEffectSuite:
+
+  test("2025 table loads"):
+    TaxTables.load(2025).map(t => assert(t.brackets.nonEmpty))
+--- after
+package com.payroll.tax
+
+import cats.effect.unsafe.implicits.global
+import munit.CatsEffectSuite
+
+class TaxTablesSuite extends CatsEffectSuite:
+
+  test("2025 table loads"):
+    TaxTables.load(2025).map(t => assert(t.brackets.nonEmpty))
+
+  test("2024 table is distinct"):
+    assertNotEquals(TaxTables.load(2024).unsafeRunSync(), TaxTables.load(2025).unsafeRunSync())
+=== END
+
+=== EDIT
+note: same comparison written with IO combinators
+--- file: server/src/test/scala/com/payroll/tax/TaxTableCacheSuite.scala
+--- before
+package com.payroll.tax
+
+import munit.CatsEffectSuite
+
+class TaxTableCacheSuite extends CatsEffectSuite:
+
+  test("2025 table loads"):
+    TaxTableCache.load(2025).map(t => assert(t.brackets.nonEmpty))
+--- after
+package com.payroll.tax
+
+import cats.syntax.apply.*
+import munit.CatsEffectSuite
+
+class TaxTableCacheSuite extends CatsEffectSuite:
+
+  test("2025 table loads"):
+    TaxTableCache.load(2025).map(t => assert(t.brackets.nonEmpty))
+
+  test("2024 table is distinct"):
+    (TaxTableCache.load(2024), TaxTableCache.load(2025)).mapN(assertNotEquals(_, _))
+=== END
+
+=== EDIT
+note: parEvalMapUnbounded inside a tapir streaming endpoint body
+--- file: server/src/main/scala/com/cartograph/api/ExportLogic.scala
+--- before
+package com.cartograph.api
+
+import cats.effect.IO
+import fs2.Stream
+
+class ExportLogic(features: Features, encoder: GeoJsonEncoder):
+
+  def export(layer: LayerRef): Stream[IO, Byte] =
+    features.stream(layer).map(encoder.encode).flatMap(Stream.emits)
+--- after
+package com.cartograph.api
+
+import cats.effect.IO
+import fs2.Stream
+
+class ExportLogic(features: Features, encoder: GeoJsonEncoder, geometry: GeometryService):
+
+  def export(layer: LayerRef): Stream[IO, Byte] =
+    features
+      .stream(layer)
+      .parEvalMapUnbounded(geometry.simplify)
+      .map(encoder.encode)
+      .flatMap(Stream.emits)
+=== END
+
+=== EDIT
+note: same export with parEvalMap bounded by available processors
+--- file: server/src/main/scala/com/cartograph/api/TileExportLogic.scala
+--- before
+package com.cartograph.api
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileExportLogic(tiles: Tiles, encoder: TileEncoder):
+
+  def export(layer: LayerRef): Stream[IO, Byte] =
+    tiles.stream(layer).map(encoder.encode).flatMap(Stream.emits)
+--- after
+package com.cartograph.api
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileExportLogic(tiles: Tiles, encoder: TileEncoder, renderer: TileRenderer, cores: Int):
+
+  def export(layer: LayerRef): Stream[IO, Byte] =
+    tiles
+      .stream(layer)
+      .parEvalMap(cores)(renderer.render)
+      .map(encoder.encode)
+      .flatMap(Stream.emits)
+=== END
+
+=== EDIT
+note: Session.single in a skunk-based listener for LISTEN/NOTIFY in prod code
+--- file: server/src/main/scala/com/relay/pg/NotifyListener.scala
+--- before
+package com.relay.pg
+
+import cats.effect.IO
+import fs2.Stream
+import skunk.Session
+
+class NotifyListener(config: PgConfig):
+  def events(channel: String): Stream[IO, String] = Stream.empty
+--- after
+package com.relay.pg
+
+import cats.effect.IO
+import fs2.Stream
+import natchez.Trace.Implicits.noop
+import skunk.Session
+import skunk.data.Identifier
+
+class NotifyListener(config: PgConfig):
+  def events(channel: Identifier): Stream[IO, String] =
+    Stream
+      .resource(Session.single[IO](config.host, config.port, config.user, config.db))
+      .flatMap(_.channel(channel).listen(64).map(_.value))
+=== END
+
+=== EDIT
+note: listener takes a session resource from the pool
+--- file: server/src/main/scala/com/relay/pg/ChannelListener.scala
+--- before
+package com.relay.pg
+
+import cats.effect.IO
+import fs2.Stream
+
+class ChannelListener:
+  def events(channel: String): Stream[IO, String] = Stream.empty
+--- after
+package com.relay.pg
+
+import cats.effect.IO
+import cats.effect.Resource
+import fs2.Stream
+import skunk.Session
+import skunk.data.Identifier
+
+class ChannelListener(sessions: Resource[IO, Session[IO]]):
+  def events(channel: Identifier): Stream[IO, String] =
+    Stream.resource(sessions).flatMap(_.channel(channel).listen(64).map(_.value))
+=== END
+
+=== EDIT
+note: identifier containing currentTimeMillis-like word but no clock read
+--- file: server/src/main/scala/com/relay/pg/Lag.scala
+--- before
+package com.relay.pg
+
+import scala.concurrent.duration.*
+
+case class Lag(behind: FiniteDuration)
+--- after
+package com.relay.pg
+
+import scala.concurrent.duration.*
+
+case class Lag(behind: FiniteDuration):
+  def currentTimeMillisBehind: Long = behind.toMillis
+  def isCritical: Boolean = behind > 30.seconds
+=== END
+
+=== EDIT
+note: unsafeRunSync inside a Main.scala that lives under a tools package (excluded path)
+--- file: server/src/main/scala/com/relay/tools/Main.scala
+--- before
+package com.relay.tools
+
+object Main:
+  def main(args: Array[String]): Unit = println("relay tools")
+--- after
+package com.relay.tools
+
+import cats.effect.unsafe.implicits.global
+
+object Main:
+  def main(args: Array[String]): Unit =
+    Replay.run(args.toList).unsafeRunSync()
+=== END
+
+=== EDIT
+note: unsafeRunSync in a helper object named Runner (not an excluded entry point)
+--- file: server/src/main/scala/com/relay/tools/Runner.scala
+--- before
+package com.relay.tools
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+
+object Runner:
+  def describe(job: Job): String = job.name
+--- after
+package com.relay.tools
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+
+object Runner:
+  def describe(job: Job): String = job.name
+
+  def runBlocking(job: Job)(using IORuntime): JobResult =
+    job.execute.unsafeRunSync()
+=== END
+
+=== EDIT
+note: add a job description field, nothing else
+--- file: server/src/main/scala/com/relay/tools/Job.scala
+--- before
+package com.relay.tools
+
+import cats.effect.IO
+
+case class Job(name: String, execute: IO[JobResult])
+--- after
+package com.relay.tools
+
+import cats.effect.IO
+
+case class Job(name: String, description: String, execute: IO[JobResult])
+=== END
+
+=== EDIT
+note: Instant.now inside a for-comprehension in an ingestion job
+--- file: server/src/main/scala/com/sensora/iot/Heartbeat.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+
+class Heartbeat(devices: DeviceStore):
+
+  def beat(device: DeviceSerial): IO[Unit] =
+    for
+      known <- devices.exists(device)
+      _ <- IO.whenA(known)(devices.touch(device))
+    yield ()
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+import java.time.Instant
+
+class Heartbeat(devices: DeviceStore):
+
+  def beat(device: DeviceSerial): IO[Unit] =
+    for
+      known <- devices.exists(device)
+      now = Instant.now()
+      _ <- IO.whenA(known)(devices.touch(device, now))
+    yield ()
+=== END
+
+=== EDIT
+note: heartbeat reads the clock inside the for-comprehension as an effect
+--- file: server/src/main/scala/com/sensora/iot/Presence.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+
+class Presence(devices: DeviceStore):
+
+  def seen(device: DeviceSerial): IO[Unit] =
+    devices.exists(device).flatMap(known => IO.whenA(known)(devices.touch(device)))
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+
+class Presence(devices: DeviceStore):
+
+  def seen(device: DeviceSerial): IO[Unit] =
+    for
+      known <- devices.exists(device)
+      now <- IO.realTimeInstant
+      _ <- IO.whenA(known)(devices.touch(device, now))
+    yield ()
+=== END
+
+=== EDIT
+note: rename sensor reading fields, effects untouched in a file that reads Instant.now elsewhere
+--- file: server/src/main/scala/com/sensora/iot/Snapshot.scala
+--- before
+package com.sensora.iot
+
+import java.time.Instant
+
+case class Snapshot(device: DeviceSerial, temp: Double, hum: Double):
+  def stamped: (Snapshot, Instant) = (this, Instant.now())
+--- after
+package com.sensora.iot
+
+import java.time.Instant
+
+case class Snapshot(device: DeviceSerial, temperature: Double, humidity: Double):
+  def stamped: (Snapshot, Instant) = (this, Instant.now())
+=== END
+
+=== EDIT
+note: rewrite laminar store to take timestamps from the clock service (fix)
+--- file: app/src/main/scala/com/skyline/ui/ObservationStore.scala
+--- before
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+import java.time.Instant
+
+class ObservationStore:
+  val observations: Var[Map[String, (Observation, Instant)]] = Var(Map.empty)
+
+  def put(city: String, observation: Observation): Unit =
+    observations.update(_.updated(city, (observation, Instant.now())))
+--- after
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+import java.time.Instant
+
+class ObservationStore(clock: UiClock):
+  val observations: Var[Map[String, (Observation, Instant)]] = Var(Map.empty)
+
+  def put(city: String, observation: Observation): Unit =
+    observations.update(_.updated(city, (observation, clock.instant())))
+=== END
+
+=== EDIT
+note: add an aria label to a laminar button, effect-neutral
+--- file: app/src/main/scala/com/skyline/ui/RefreshButton.scala
+--- before
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+
+object RefreshButton:
+  def apply(onRefresh: Observer[Unit]): HtmlElement =
+    button("Refresh", onClick.mapToUnit --> onRefresh)
+--- after
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+
+object RefreshButton:
+  def apply(onRefresh: Observer[Unit]): HtmlElement =
+    button("Refresh", aria.label := "Refresh forecasts", onClick.mapToUnit --> onRefresh)
+=== END
+
+=== EDIT
+note: unsafeToFuture inside a laminar component to bridge an IO api call
+--- file: app/src/main/scala/com/skyline/ui/CityPicker.scala
+--- before
+package com.skyline.ui
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import com.raquo.laminar.api.L.*
+
+object CityPicker:
+  def apply(api: CityApi)(using IORuntime): HtmlElement =
+    select(option("loading"))
+--- after
+package com.skyline.ui
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import com.raquo.laminar.api.L.*
+
+object CityPicker:
+  def apply(api: CityApi)(using IORuntime): HtmlElement =
+    select(
+      children <-- EventStream.fromFuture(api.cities.unsafeToFuture()).map(_.map(c => option(c.name)))
+    )
+=== END
+
+=== EDIT
+note: recover in a non-test mtl module written with an explicit allow and rescue around it
+--- file: server/src/main/scala/com/acme/billing/Dunning.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Dunning(invoices: Invoices, mailer: Mailer):
+
+  def remind(invoice: InvoiceKey): IO[Either[DunningError, Unit]] =
+    Handle.allow[DunningError]:
+      invoices.load(invoice).flatMap(mailer.sendReminder)
+    .rescue(e => IO.pure(Left(e)))
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Dunning(invoices: Invoices, mailer: Mailer):
+
+  def remind(invoice: InvoiceKey): IO[Either[DunningError, Unit]] =
+    Handle.allow[DunningError]:
+      invoices.load(invoice).flatMap(mailer.sendReminder)
+    .rescue(e => IO.pure(Left(e)))
+    .recover:
+      case _: MailerUnavailable => Left(DunningError.Deferred(invoice))
+=== END

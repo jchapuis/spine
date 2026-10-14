@@ -1,0 +1,708 @@
+=== EDIT
+note: global runtime import in a scala-cli script
+--- file: scripts/Seed.sc
+--- before
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.7
+
+import cats.effect.IO
+
+IO.println("seeding")
+--- after
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.7
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+
+IO.println("seeding").unsafeRunSync()
+=== END
+
+=== EDIT
+note: scala-cli script rewritten as an IOApp
+--- file: scripts/Cleanup.scala
+--- before
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.7
+
+import cats.effect.IO
+
+@main def cleanup(): Unit = println("cleanup")
+--- after
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.7
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object Cleanup extends IOApp.Simple:
+  def run: IO[Unit] = IO.println("cleanup")
+=== END
+
+=== EDIT
+note: global runtime import in a laminar app to run an IO on click
+--- file: app/src/main/scala/com/stockpile/ui/StockTable.scala
+--- before
+package com.stockpile.ui
+
+import cats.effect.IO
+import com.raquo.laminar.api.L.*
+
+object StockTable:
+  def apply(api: StockApi, rows: Var[List[StockRow]]): HtmlElement =
+    table(tbody(children <-- rows.signal.map(_.map(r => tr(td(r.sku), td(r.quantity.toString))))))
+--- after
+package com.stockpile.ui
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+import com.raquo.laminar.api.L.*
+
+object StockTable:
+  def apply(api: StockApi, rows: Var[List[StockRow]]): HtmlElement =
+    div(
+      button("Refresh", onClick --> (_ => api.list.flatMap(r => IO(rows.set(r))).unsafeRunAndForget())),
+      table(tbody(children <-- rows.signal.map(_.map(r => tr(td(r.sku), td(r.quantity.toString))))))
+    )
+=== END
+
+=== EDIT
+note: laminar refresh button emits into an EventBus consumed by an observer
+--- file: app/src/main/scala/com/stockpile/ui/LotTable.scala
+--- before
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+
+object LotTable:
+  def apply(lots: Signal[List[LotRow]]): HtmlElement =
+    table(tbody(children <-- lots.map(_.map(l => tr(td(l.number))))))
+--- after
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+
+object LotTable:
+  def apply(lots: Signal[List[LotRow]], refresh: Observer[Unit]): HtmlElement =
+    div(
+      button("Refresh", onClick.mapToUnit --> refresh),
+      table(tbody(children <-- lots.map(_.map(l => tr(td(l.number))))))
+    )
+=== END
+
+=== EDIT
+note: recoverWith inside a Raise-scoped service method using F[_]
+--- file: server/src/main/scala/com/shelfwise/orders/Checkout.scala
+--- before
+package com.shelfwise.orders
+
+import cats.MonadThrow
+import cats.mtl.Raise
+import cats.syntax.flatMap.*
+
+class Checkout[F[_]: MonadThrow](carts: Carts[F], payments: Payments[F]):
+
+  def checkout(cart: CartRef)(using Raise[F, CheckoutError]): F[OrderRef] =
+    carts.load(cart).flatMap(payments.charge)
+--- after
+package com.shelfwise.orders
+
+import cats.MonadThrow
+import cats.mtl.Raise
+import cats.syntax.applicativeError.*
+import cats.syntax.flatMap.*
+
+class Checkout[F[_]: MonadThrow](carts: Carts[F], payments: Payments[F]):
+
+  def checkout(cart: CartRef)(using Raise[F, CheckoutError]): F[OrderRef] =
+    carts.load(cart).flatMap(payments.charge).recoverWith:
+      case _: PaymentDeclined => Raise[F, CheckoutError].raise(CheckoutError.Declined(cart))
+=== END
+
+=== EDIT
+note: payments algebra raises the typed error itself, checkout only composes
+--- file: server/src/main/scala/com/shelfwise/orders/Reorder.scala
+--- before
+package com.shelfwise.orders
+
+import cats.Monad
+import cats.mtl.Raise
+import cats.syntax.flatMap.*
+
+class Reorder[F[_]: Monad](orders: Orders[F], payments: Payments[F]):
+
+  def reorder(order: OrderRef)(using Raise[F, CheckoutError]): F[OrderRef] =
+    orders.load(order).flatMap(payments.charge)
+--- after
+package com.shelfwise.orders
+
+import cats.Monad
+import cats.mtl.Raise
+import cats.syntax.flatMap.*
+
+class Reorder[F[_]: Monad](orders: Orders[F], payments: Payments[F]):
+
+  def reorder(order: OrderRef)(using Raise[F, CheckoutError]): F[OrderRef] =
+    orders.load(order).flatMap(payments.chargeOrRaise)
+=== END
+
+=== EDIT
+note: attempt in a service that does not import cats.mtl
+--- file: server/src/main/scala/com/shelfwise/orders/OrderNotifier.scala
+--- before
+package com.shelfwise.orders
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class OrderNotifier(mailer: Mailer)(using Logger[IO]):
+
+  def placed(order: Order): IO[Unit] =
+    mailer.send(order.customer, Templates.placed(order))
+--- after
+package com.shelfwise.orders
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class OrderNotifier(mailer: Mailer)(using Logger[IO]):
+
+  def placed(order: Order): IO[Unit] =
+    mailer.send(order.customer, Templates.placed(order)).attempt.flatMap:
+      case Left(e) => Logger[IO].warn(e)(s"could not notify ${order.customer}")
+      case Right(_) => IO.unit
+=== END
+
+=== EDIT
+note: handleErrorWith inside Handle.allow in a fulfilment step
+--- file: server/src/main/scala/com/shelfwise/orders/Fulfilment.scala
+--- before
+package com.shelfwise.orders
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Fulfilment(warehouse: Warehouse, couriers: Couriers):
+
+  def ship(order: Order): IO[Either[ShipError, Tracking]] =
+    Handle.allow[ShipError]:
+      warehouse.pick(order).flatMap(couriers.book)
+    .rescue(e => IO.pure(Left(e)))
+--- after
+package com.shelfwise.orders
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Fulfilment(warehouse: Warehouse, couriers: Couriers):
+
+  def ship(order: Order): IO[Either[ShipError, Tracking]] =
+    Handle.allow[ShipError]:
+      warehouse.pick(order).flatMap(couriers.book).handleErrorWith(_ => couriers.bookFallback(order))
+    .rescue(e => IO.pure(Left(e)))
+=== END
+
+=== EDIT
+note: fix by moving the fallback around the whole allow block result
+--- file: server/src/main/scala/com/shelfwise/orders/Returns.scala
+--- before
+package com.shelfwise.orders
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Returns(warehouse: Warehouse, couriers: Couriers):
+
+  def collect(order: Order): IO[Either[ReturnError, Tracking]] =
+    Handle.allow[ReturnError]:
+      couriers.pickup(order).handleErrorWith(_ => couriers.pickupFallback(order))
+    .rescue(e => IO.pure(Left(e)))
+--- after
+package com.shelfwise.orders
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class Returns(warehouse: Warehouse, couriers: Couriers):
+
+  def collect(order: Order): IO[Either[ReturnError, Tracking]] =
+    Handle.allow[ReturnError]:
+      couriers.pickup(order)
+    .rescue(e => IO.pure(Left(e)))
+=== END
+
+=== EDIT
+note: Instant.now passed as a default parameter value
+--- file: server/src/main/scala/com/shelfwise/orders/OrderEvents.scala
+--- before
+package com.shelfwise.orders
+
+import java.time.Instant
+
+case class OrderPlaced(order: OrderRef, at: Instant)
+--- after
+package com.shelfwise.orders
+
+import java.time.Instant
+
+case class OrderPlaced(order: OrderRef, at: Instant = Instant.now())
+case class OrderCancelled(order: OrderRef, at: Instant)
+=== END
+
+=== EDIT
+note: events take the instant explicitly and the caller reads Clock
+--- file: server/src/main/scala/com/shelfwise/orders/OrderEmitter.scala
+--- before
+package com.shelfwise.orders
+
+import cats.effect.IO
+
+class OrderEmitter(bus: EventBus):
+  def placed(order: OrderRef): IO[Unit] = IO.unit
+--- after
+package com.shelfwise.orders
+
+import cats.effect.Clock
+import cats.effect.IO
+
+class OrderEmitter(bus: EventBus):
+  def placed(order: OrderRef): IO[Unit] =
+    Clock[IO].realTimeInstant.flatMap(now => bus.publish(OrderPlaced(order, now)))
+=== END
+
+=== EDIT
+note: Instant.ofEpochMilli conversion of a stored column (not a clock read)
+--- file: server/src/main/scala/com/shelfwise/orders/db/OrderRow.scala
+--- before
+package com.shelfwise.orders.db
+
+case class OrderRow(id: String, placedMillis: Long)
+--- after
+package com.shelfwise.orders.db
+
+import java.time.Instant
+
+case class OrderRow(id: String, placedMillis: Long):
+  def placedAt: Instant = Instant.ofEpochMilli(placedMillis)
+=== END
+
+=== EDIT
+note: parEvalMapUnordered with an unbounded Int.MaxValue concurrency in email sending
+--- file: server/src/main/scala/com/beacon/notify/BulkMailer.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+
+class BulkMailer(mailer: Mailer):
+
+  def sendAll(messages: Stream[IO, Outgoing]): Stream[IO, Unit] =
+    messages.evalMap(mailer.deliver)
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+
+class BulkMailer(mailer: Mailer):
+
+  def sendAll(messages: Stream[IO, Outgoing]): Stream[IO, Unit] =
+    messages.parEvalMapUnordered(Int.MaxValue)(mailer.deliver)
+=== END
+
+=== EDIT
+note: bounded parEvalMap with a named concurrency in sms sending
+--- file: server/src/main/scala/com/beacon/notify/BulkSms.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+
+class BulkSms(gateway: SmsGateway):
+
+  def sendAll(messages: Stream[IO, Sms]): Stream[IO, Unit] =
+    messages.evalMap(gateway.send)
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+
+class BulkSms(gateway: SmsGateway, concurrency: Int):
+
+  def sendAll(messages: Stream[IO, Sms]): Stream[IO, Unit] =
+    messages.parEvalMap(concurrency)(gateway.send)
+=== END
+
+=== EDIT
+note: parEvalMapUnbounded in an fs2 test (rule applies everywhere fs2 is imported)
+--- file: server/src/test/scala/com/beacon/notify/BulkMailerSuite.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import munit.CatsEffectSuite
+
+class BulkMailerSuite extends CatsEffectSuite:
+
+  test("delivers every message"):
+    Fixtures.recordingMailer.flatMap: (mailer, sent) =>
+      BulkMailer(mailer).sendAll(Stream.emits(Fixtures.batch)).compile.drain *> assertIO(sent.get.map(_.size), 3)
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import munit.CatsEffectSuite
+
+class BulkMailerSuite extends CatsEffectSuite:
+
+  test("delivers every message"):
+    Fixtures.recordingMailer.flatMap: (mailer, sent) =>
+      BulkMailer(mailer).sendAll(Stream.emits(Fixtures.batch)).compile.drain *> assertIO(sent.get.map(_.size), 3)
+
+  test("concurrent deliveries all land"):
+    Fixtures.recordingMailer.flatMap: (mailer, sent) =>
+      Stream.emits(Fixtures.batch).parEvalMapUnbounded(mailer.deliver).compile.drain *> assertIO(sent.get.map(_.size), 3)
+=== END
+
+=== EDIT
+note: change the batch size in a file that already had parEvalMapUnbounded
+--- file: server/src/main/scala/com/beacon/notify/PushFanout.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class PushFanout(push: PushGateway):
+
+  def send(devices: Stream[IO, DeviceToken], message: Push): Stream[IO, Unit] =
+    devices.groupWithin(100, 1.second).parEvalMapUnbounded(chunk => push.sendBatch(chunk.toList, message))
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class PushFanout(push: PushGateway):
+
+  def send(devices: Stream[IO, DeviceToken], message: Push): Stream[IO, Unit] =
+    devices.groupWithin(500, 1.second).parEvalMapUnbounded(chunk => push.sendBatch(chunk.toList, message))
+=== END
+
+=== EDIT
+note: bound the push fanout (fix)
+--- file: server/src/main/scala/com/beacon/notify/WebPushFanout.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class WebPushFanout(push: PushGateway):
+
+  def send(devices: Stream[IO, DeviceToken], message: Push): Stream[IO, Unit] =
+    devices.groupWithin(100, 1.second).parEvalMapUnbounded(chunk => push.sendBatch(chunk.toList, message))
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class WebPushFanout(push: PushGateway):
+
+  def send(devices: Stream[IO, DeviceToken], message: Push): Stream[IO, Unit] =
+    devices.groupWithin(100, 1.second).parEvalMap(8)(chunk => push.sendBatch(chunk.toList, message))
+=== END
+
+=== EDIT
+note: unsafeRunSync inside a skunk repository to load a cached prepared query
+--- file: server/src/main/scala/com/stockpile/inventory/db/StockRepo.scala
+--- before
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import skunk.Session
+
+class StockRepo(session: Session[IO])(using IORuntime):
+
+  def level(sku: Sku): IO[Option[Int]] =
+    session.option(Queries.level)(sku)
+--- after
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import skunk.Session
+
+class StockRepo(session: Session[IO])(using IORuntime):
+
+  private val prepared = session.prepare(Queries.level).unsafeRunSync()
+
+  def level(sku: Sku): IO[Option[Int]] =
+    prepared.option(sku)
+=== END
+
+=== EDIT
+note: prepare the query per call inside IO
+--- file: server/src/main/scala/com/stockpile/inventory/db/LotRepo.scala
+--- before
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import skunk.Session
+
+class LotRepo(session: Session[IO]):
+
+  def lot(number: LotNumber): IO[Option[Lot]] =
+    session.option(Queries.lot)(number)
+--- after
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import skunk.Session
+
+class LotRepo(session: Session[IO]):
+
+  def lot(number: LotNumber): IO[Option[Lot]] =
+    session.prepare(Queries.lot).flatMap(_.option(number))
+=== END
+
+=== EDIT
+note: add a column to a skunk query, nothing effect-related
+--- file: server/src/main/scala/com/stockpile/inventory/db/Queries.scala
+--- before
+package com.stockpile.inventory.db
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object Queries:
+  val level: Query[String, Int] =
+    sql"select quantity from stock where sku = $varchar".query(int4)
+--- after
+package com.stockpile.inventory.db
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object Queries:
+  val level: Query[String, Int] =
+    sql"select quantity from stock where sku = $varchar and archived = false".query(int4)
+=== END
+
+=== EDIT
+note: Session.single with a named import alias in a health check
+--- file: server/src/main/scala/com/stockpile/health/DbHealth.scala
+--- before
+package com.stockpile.health
+
+import cats.effect.IO
+
+class DbHealth(config: DbConfig):
+  def check: IO[Boolean] = IO.pure(true)
+--- after
+package com.stockpile.health
+
+import cats.effect.IO
+import natchez.Trace.Implicits.noop
+import skunk.Session
+import skunk.implicits.*
+import skunk.codec.all.int4
+
+class DbHealth(config: DbConfig):
+  def check: IO[Boolean] =
+    Session.single[IO](config.host, config.port, config.user, config.db)
+      .use(_.unique(sql"select 1".query(int4)))
+      .map(_ == 1)
+=== END
+
+=== EDIT
+note: health check reuses the app session pool
+--- file: server/src/main/scala/com/stockpile/health/PoolHealth.scala
+--- before
+package com.stockpile.health
+
+import cats.effect.IO
+
+class PoolHealth:
+  def check: IO[Boolean] = IO.pure(true)
+--- after
+package com.stockpile.health
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.implicits.*
+import skunk.codec.all.int4
+
+class PoolHealth(sessions: Resource[IO, Session[IO]]):
+  def check: IO[Boolean] =
+    sessions.use(_.unique(sql"select 1".query(int4))).map(_ == 1)
+=== END
+
+=== EDIT
+note: nanoTime-based id generator in a domain object
+--- file: server/src/main/scala/com/relay/messaging/Ids.scala
+--- before
+package com.relay.messaging
+
+object Ids:
+  def prefix(topic: Topic): String = topic.value.take(4)
+--- after
+package com.relay.messaging
+
+object Ids:
+  def prefix(topic: Topic): String = topic.value.take(4)
+
+  def next(topic: Topic): String = s"${prefix(topic)}-${System.nanoTime()}"
+=== END
+
+=== EDIT
+note: id generator uses UUIDGen in IO
+--- file: server/src/main/scala/com/relay/messaging/MessageIds.scala
+--- before
+package com.relay.messaging
+
+import cats.effect.IO
+
+object MessageIds:
+  def prefix(topic: Topic): String = topic.value.take(4)
+--- after
+package com.relay.messaging
+
+import cats.effect.IO
+import cats.effect.std.UUIDGen
+
+object MessageIds:
+  def prefix(topic: Topic): String = topic.value.take(4)
+
+  def next(topic: Topic): IO[String] = UUIDGen[IO].randomUUID.map(u => s"${prefix(topic)}-$u")
+=== END
+
+=== EDIT
+note: tweak a log message in an http4s server builder
+--- file: server/src/main/scala/com/relay/http/HttpServer.scala
+--- before
+package com.relay.http
+
+import cats.effect.IO
+import cats.effect.Resource
+import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.server.Server
+
+object HttpServer:
+  def resource(app: HttpApp): Resource[IO, Server] =
+    EmberServerBuilder.default[IO].withHttpApp(app.orNotFound).build
+--- after
+package com.relay.http
+
+import cats.effect.IO
+import cats.effect.Resource
+import org.http4s.ember.server.EmberServerBuilder
+import org.http4s.server.Server
+import org.typelevel.log4cats.Logger
+
+object HttpServer:
+  def resource(app: HttpApp)(using Logger[IO]): Resource[IO, Server] =
+    EmberServerBuilder.default[IO].withHttpApp(app.orNotFound).build.evalTap(s => Logger[IO].info(s"listening on ${s.address}"))
+=== END
+
+=== EDIT
+note: unsafeRunSync in a ScalaCheck property (tests are not excluded for this rule)
+--- file: server/src/test/scala/com/relay/messaging/PartitionerSuite.scala
+--- before
+package com.relay.messaging
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class PartitionerSuite extends ScalaCheckSuite:
+
+  property("every envelope lands in one partition"):
+    forAll(MessagingGenerators.envelopes): envelopes =>
+      Partitioner(4).assign(envelopes).values.map(_.size).sum == envelopes.size
+--- after
+package com.relay.messaging
+
+import cats.effect.unsafe.implicits.global
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class PartitionerSuite extends ScalaCheckSuite:
+
+  property("every envelope lands in one partition"):
+    forAll(MessagingGenerators.envelopes): envelopes =>
+      Partitioner(4).assign(envelopes).values.map(_.size).sum == envelopes.size
+
+  property("router agrees with partitioner"):
+    forAll(MessagingGenerators.envelope): envelope =>
+      RouterService.make.flatMap(_.route(envelope)).unsafeRunSync() == Partitioner(4).slot(envelope)
+=== END
+
+=== EDIT
+note: property-based IO test with munit-scalacheck-effect, no unsafe run
+--- file: server/src/test/scala/com/relay/messaging/RouterServiceSuite.scala
+--- before
+package com.relay.messaging
+
+import munit.CatsEffectSuite
+import munit.ScalaCheckEffectSuite
+
+class RouterServiceSuite extends CatsEffectSuite with ScalaCheckEffectSuite:
+
+  test("router starts empty"):
+    assertIO(RouterService.make.flatMap(_.size), 0)
+--- after
+package com.relay.messaging
+
+import munit.CatsEffectSuite
+import munit.ScalaCheckEffectSuite
+import org.scalacheck.effect.PropF
+
+class RouterServiceSuite extends CatsEffectSuite with ScalaCheckEffectSuite:
+
+  test("router starts empty"):
+    assertIO(RouterService.make.flatMap(_.size), 0)
+
+  test("routes are stable"):
+    PropF.forAllF(MessagingGenerators.envelope): envelope =>
+      RouterService.make.flatMap(r => (r.route(envelope), r.route(envelope)).tupled.map((a, b) => assertEquals(a, b)))
+=== END
+
+=== EDIT
+note: Instant.now used as a cache key timestamp in a laminar store
+--- file: app/src/main/scala/com/skyline/ui/ForecastStore.scala
+--- before
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+
+class ForecastStore:
+  val forecasts: Var[Map[String, Forecast]] = Var(Map.empty)
+
+  def put(city: String, forecast: Forecast): Unit =
+    forecasts.update(_.updated(city, forecast))
+--- after
+package com.skyline.ui
+
+import com.raquo.laminar.api.L.*
+import java.time.Instant
+
+class ForecastStore:
+  val forecasts: Var[Map[String, (Forecast, Instant)]] = Var(Map.empty)
+
+  def put(city: String, forecast: Forecast): Unit =
+    forecasts.update(_.updated(city, (forecast, Instant.now())))
+=== END

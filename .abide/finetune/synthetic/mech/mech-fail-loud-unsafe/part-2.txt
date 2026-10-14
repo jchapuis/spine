@@ -1,0 +1,754 @@
+=== EDIT
+note: match a null case when reading a Java config value
+--- file: server/src/main/scala/com/orbital/config/LegacySettings.scala
+--- before
+package com.orbital.config
+
+import java.util.Properties
+
+class LegacySettings(properties: Properties):
+
+  def keys: List[String] =
+    properties.stringPropertyNames.toArray.toList.map(_.toString)
+--- after
+package com.orbital.config
+
+import java.util.Properties
+
+class LegacySettings(properties: Properties):
+
+  def keys: List[String] =
+    properties.stringPropertyNames.toArray.toList.map(_.toString)
+
+  def setting(key: String): Option[String] =
+    properties.getProperty(key) match
+      case null  => None
+      case value => Some(value)
+=== END
+
+=== EDIT
+note: wrap the Java value with Option(...) instead of a null check
+--- file: server/src/main/scala/com/orbital/config/EnvSettings.scala
+--- before
+package com.orbital.config
+
+import cats.effect.IO
+
+object EnvSettings:
+
+  def required(name: String): IO[String] =
+    IO.raiseError(ConfigError.Missing(name))
+--- after
+package com.orbital.config
+
+import cats.effect.IO
+
+object EnvSettings:
+
+  def required(name: String): IO[String] =
+    IO(Option(System.getenv(name))).flatMap:
+      case Some(value) => IO.pure(value)
+      case None        => IO.raiseError(ConfigError.Missing(name))
+=== END
+
+=== EDIT
+note: rethrow the error after logging it
+--- file: server/src/main/scala/com/freightly/routing/DispatchWorker.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class DispatchWorker(dispatcher: Dispatcher)(using logger: Logger[IO]):
+
+  def run(job: DispatchJob): IO[Unit] =
+    dispatcher.dispatch(job)
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+import scala.util.control.NonFatal
+
+class DispatchWorker(dispatcher: Dispatcher)(using logger: Logger[IO]):
+
+  def run(job: DispatchJob): IO[Unit] =
+    dispatcher.dispatch(job)
+
+  def runBlocking(job: DispatchJob): Unit =
+    try dispatcher.dispatchSync(job)
+    catch case NonFatal(error) => throw DispatchError.Failed(job.id, error)
+=== END
+
+=== EDIT
+note: log and re-raise with onError instead of rethrowing
+--- file: server/src/main/scala/com/freightly/routing/PickupWorker.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class PickupWorker(scheduler: PickupScheduler)(using logger: Logger[IO]):
+
+  def run(pickup: Pickup): IO[Unit] =
+    scheduler.schedule(pickup)
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class PickupWorker(scheduler: PickupScheduler)(using logger: Logger[IO]):
+
+  def run(pickup: Pickup): IO[Unit] =
+    scheduler.schedule(pickup).onError:
+      case error => logger.error(error)(s"pickup ${pickup.id} failed to schedule")
+=== END
+
+=== EDIT
+note: cast every element of a heterogeneous list
+--- file: server/src/main/scala/com/metricly/analytics/SeriesMerger.scala
+--- before
+package com.metricly.analytics
+
+object SeriesMerger:
+
+  def merge(left: Series, right: Series): Series =
+    Series(left.points ++ right.points)
+--- after
+package com.metricly.analytics
+
+object SeriesMerger:
+
+  def merge(left: Series, right: Series): Series =
+    Series(left.points ++ right.points)
+
+  def fromRaw(values: List[Any]): Series =
+    Series(values.map(_.asInstanceOf[DataPoint]))
+=== END
+
+=== EDIT
+note: count failures by checking the error subtype
+--- file: server/src/main/scala/com/metricly/analytics/IngestReport.scala
+--- before
+package com.metricly.analytics
+
+case class IngestReport(results: List[Either[IngestError, Sample]]):
+
+  def accepted: Int =
+    results.count(_.isRight)
+--- after
+package com.metricly.analytics
+
+case class IngestReport(results: List[Either[IngestError, Sample]]):
+
+  def accepted: Int =
+    results.count(_.isRight)
+
+  def timeouts: Int =
+    results.count:
+      case Left(error) => error.isInstanceOf[IngestError.Timeout]
+      case Right(_)    => false
+=== END
+
+=== EDIT
+note: count timeouts with a pattern match instead of isInstanceOf
+--- file: server/src/main/scala/com/metricly/analytics/ExportReport.scala
+--- before
+package com.metricly.analytics
+
+case class ExportReport(results: List[Either[ExportError, ExportId]]):
+
+  def succeeded: Int =
+    results.count(_.isRight)
+--- after
+package com.metricly.analytics
+
+case class ExportReport(results: List[Either[ExportError, ExportId]]):
+
+  def succeeded: Int =
+    results.count(_.isRight)
+
+  def timeouts: Int =
+    results.count:
+      case Left(ExportError.Timeout(_)) => true
+      case _                            => false
+=== END
+
+=== EDIT
+note: finalize flushes the buffered writer
+--- file: server/src/main/scala/com/metricly/analytics/CsvSink.scala
+--- before
+package com.metricly.analytics
+
+import java.io.BufferedWriter
+
+class CsvSink(writer: BufferedWriter):
+
+  def write(row: List[String]): Unit =
+    writer.write(row.mkString(","))
+    writer.newLine()
+--- after
+package com.metricly.analytics
+
+import java.io.BufferedWriter
+
+class CsvSink(writer: BufferedWriter):
+
+  def write(row: List[String]): Unit =
+    writer.write(row.mkString(","))
+    writer.newLine()
+
+  override def finalize(): Unit =
+    writer.flush()
+    writer.close()
+=== END
+
+=== EDIT
+note: method named finalizeDraft on an invoice, not an override
+--- file: server/src/main/scala/com/acme/billing/DraftInvoices.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+
+class DraftInvoices(repository: InvoiceRepository):
+
+  def create(customer: CustomerId): IO[DraftInvoice] =
+    repository.createDraft(customer)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+
+class DraftInvoices(repository: InvoiceRepository):
+
+  def create(customer: CustomerId): IO[DraftInvoice] =
+    repository.createDraft(customer)
+
+  def finalizeDraft(id: InvoiceId): IO[Invoice] =
+    repository.markIssued(id)
+=== END
+
+=== EDIT
+note: fromListUnsafe on a list of recipients that was just mapped
+--- file: server/src/main/scala/com/telio/messaging/BroadcastService.scala
+--- before
+package com.telio.messaging
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class BroadcastService(sender: MessageSender[IO], directory: Directory[IO]):
+
+  def broadcast(channel: ChannelId, body: MessageBody): IO[Unit] =
+    directory.members(channel).flatMap: members =>
+      sender.sendAll(members.map(_.address), body)
+--- after
+package com.telio.messaging
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class BroadcastService(sender: MessageSender[IO], directory: Directory[IO]):
+
+  def broadcast(channel: ChannelId, body: MessageBody): IO[Unit] =
+    directory.members(channel).flatMap: members =>
+      sender.sendAll(NonEmptyList.fromListUnsafe(members.map(_.address)), body)
+=== END
+
+=== EDIT
+note: existing throw in the file, edit adds an unrelated accessor
+--- file: server/src/main/scala/com/freightly/routing/ZoneIndex.scala
+--- before
+package com.freightly.routing
+
+class ZoneIndex(zones: Map[ZoneCode, Zone]):
+
+  def zone(code: ZoneCode): Zone =
+    zones.getOrElse(code, throw new NoSuchElementException(code.value))
+--- after
+package com.freightly.routing
+
+class ZoneIndex(zones: Map[ZoneCode, Zone]):
+
+  def zone(code: ZoneCode): Zone =
+    zones.getOrElse(code, throw new NoSuchElementException(code.value))
+
+  def codes: Set[ZoneCode] =
+    zones.keySet
+=== END
+
+=== EDIT
+note: existing asInstanceOf untouched, edit renames the method below it
+--- file: server/src/main/scala/com/orbital/telemetry/PacketReader.scala
+--- before
+package com.orbital.telemetry
+
+import java.nio.ByteBuffer
+
+object PacketReader:
+
+  def header(raw: Any): PacketHeader =
+    raw.asInstanceOf[PacketHeader]
+
+  def payload(buffer: ByteBuffer): Array[Byte] =
+    val bytes = Array.ofDim[Byte](buffer.remaining)
+    buffer.get(bytes)
+    bytes
+--- after
+package com.orbital.telemetry
+
+import java.nio.ByteBuffer
+
+object PacketReader:
+
+  def header(raw: Any): PacketHeader =
+    raw.asInstanceOf[PacketHeader]
+
+  def payloadBytes(buffer: ByteBuffer): Array[Byte] =
+    val bytes = Array.ofDim[Byte](buffer.remaining)
+    buffer.get(bytes)
+    bytes
+=== END
+
+=== EDIT
+note: remove a null sentinel field, use Option
+--- file: server/src/main/scala/com/gatekeep/auth/UserProfile.scala
+--- before
+package com.gatekeep.auth
+
+case class UserProfile(id: UserId, email: Email, avatarUrl: String):
+
+  def hasAvatar: Boolean =
+    avatarUrl != null
+--- after
+package com.gatekeep.auth
+
+case class UserProfile(id: UserId, email: Email, avatarUrl: Option[AvatarUrl]):
+
+  def hasAvatar: Boolean =
+    avatarUrl.isDefined
+=== END
+
+=== EDIT
+note: tapir server logic throws on an impossible branch
+--- file: server/src/main/scala/com/stockly/inventory/WarehouseRoutes.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class WarehouseRoutes(warehouses: WarehouseService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    WarehouseEndpoints.list.serverLogicSuccess(_ => warehouses.all)
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class WarehouseRoutes(warehouses: WarehouseService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    WarehouseEndpoints.list.serverLogicSuccess(_ => warehouses.all)
+
+  val get: ServerEndpoint[Any, IO] =
+    WarehouseEndpoints.get.serverLogicSuccess: id =>
+      warehouses.find(id).map(_.getOrElse(throw WarehouseError.NotFound(id)))
+=== END
+
+=== EDIT
+note: tapir server logic returns a typed error instead
+--- file: server/src/main/scala/com/stockly/inventory/BinRoutes.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class BinRoutes(bins: BinService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    BinEndpoints.list.serverLogicSuccess(_ => bins.all)
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class BinRoutes(bins: BinService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    BinEndpoints.list.serverLogicSuccess(_ => bins.all)
+
+  val get: ServerEndpoint[Any, IO] =
+    BinEndpoints.get.serverLogic: id =>
+      bins.find(id).map(_.toRight(BinError.NotFound(id)))
+=== END
+
+=== EDIT
+note: add a skunk query for open orders
+--- file: server/src/main/scala/com/acme/orders/OrderSql.scala
+--- before
+package com.acme.orders
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object OrderSql:
+
+  val byId: Query[OrderId, Order] =
+    sql"select id, customer_id, status from orders where id = ${OrderCodecs.orderId}".query(OrderCodecs.order)
+--- after
+package com.acme.orders
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object OrderSql:
+
+  val byId: Query[OrderId, Order] =
+    sql"select id, customer_id, status from orders where id = ${OrderCodecs.orderId}".query(OrderCodecs.order)
+
+  val open: Query[Void, Order] =
+    sql"select id, customer_id, status from orders where status = 'open'".query(OrderCodecs.order)
+=== END
+
+=== EDIT
+note: skunk query adds is not null in SQL text only
+--- file: server/src/main/scala/com/acme/orders/ShipmentSql.scala
+--- before
+package com.acme.orders
+
+import skunk.*
+import skunk.implicits.*
+
+object ShipmentSql:
+
+  val pending: Query[Void, Shipment] =
+    sql"select id, order_id, carrier from shipments where shipped_at is null".query(ShipmentCodecs.shipment)
+--- after
+package com.acme.orders
+
+import skunk.*
+import skunk.implicits.*
+
+object ShipmentSql:
+
+  val pending: Query[Void, Shipment] =
+    sql"select id, order_id, carrier from shipments where shipped_at is null".query(ShipmentCodecs.shipment)
+
+  val tracked: Query[Void, Shipment] =
+    sql"select id, order_id, carrier from shipments where tracking_code is not null".query(ShipmentCodecs.shipment)
+=== END
+
+=== EDIT
+note: fs2 pipe casts chunk elements
+--- file: server/src/main/scala/com/orbital/telemetry/FramePipe.scala
+--- before
+package com.orbital.telemetry
+
+import cats.effect.IO
+import fs2.Pipe
+
+object FramePipe:
+
+  val decode: Pipe[IO, Byte, Frame] =
+    _.chunkN(FrameSize.bytes).map(chunk => Frame.decode(chunk.toArray))
+--- after
+package com.orbital.telemetry
+
+import cats.effect.IO
+import fs2.Pipe
+
+object FramePipe:
+
+  val decode: Pipe[IO, Byte, Frame] =
+    _.chunkN(FrameSize.bytes).map(chunk => Frame.decode(chunk.toArray))
+
+  val housekeeping: Pipe[IO, Frame, HousekeepingFrame] =
+    _.filter(_.kind == FrameKind.Housekeeping).map(_.asInstanceOf[HousekeepingFrame])
+=== END
+
+=== EDIT
+note: fs2 pipe narrows by pattern match with collect
+--- file: server/src/main/scala/com/orbital/telemetry/EventPipe.scala
+--- before
+package com.orbital.telemetry
+
+import cats.effect.IO
+import fs2.Pipe
+
+object EventPipe:
+
+  val all: Pipe[IO, Frame, Frame] =
+    identity
+--- after
+package com.orbital.telemetry
+
+import cats.effect.IO
+import fs2.Pipe
+
+object EventPipe:
+
+  val all: Pipe[IO, Frame, Frame] =
+    identity
+
+  val events: Pipe[IO, Frame, EventFrame] =
+    _.collect:
+      case frame: EventFrame => frame
+=== END
+
+=== EDIT
+note: isInstanceOf in an if-guard on a Laminar signal
+--- file: app/src/main/scala/com/metricly/analytics/ui/ChartPanel.scala
+--- before
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object ChartPanel:
+
+  def apply(state: Signal[ChartState]): HtmlElement =
+    div(
+      cls := "chart-panel",
+      child <-- state.map(ChartView.render)
+    )
+--- after
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object ChartPanel:
+
+  def apply(state: Signal[ChartState]): HtmlElement =
+    div(
+      cls := "chart-panel",
+      cls("loading") <-- state.map(_.isInstanceOf[ChartState.Loading]),
+      child <-- state.map(ChartView.render)
+    )
+=== END
+
+=== EDIT
+note: Laminar loading flag via a dedicated method on the enum
+--- file: app/src/main/scala/com/metricly/analytics/ui/TablePanel.scala
+--- before
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object TablePanel:
+
+  def apply(state: Signal[TableState]): HtmlElement =
+    div(
+      cls := "table-panel",
+      child <-- state.map(TableView.render)
+    )
+--- after
+package com.metricly.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object TablePanel:
+
+  def apply(state: Signal[TableState]): HtmlElement =
+    div(
+      cls := "table-panel",
+      cls("loading") <-- state.map(_.isLoading),
+      child <-- state.map(TableView.render)
+    )
+=== END
+
+=== EDIT
+note: Sync delay that throws on an unsupported format
+--- file: server/src/main/scala/com/cartograph/maps/ExportService.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.Sync
+
+class ExportService[F[_]: Sync](writer: GeoWriter):
+
+  def geojson(layer: Layer): F[Array[Byte]] =
+    Sync[F].delay(writer.geojson(layer))
+--- after
+package com.cartograph.maps
+
+import cats.effect.Sync
+
+class ExportService[F[_]: Sync](writer: GeoWriter):
+
+  def geojson(layer: Layer): F[Array[Byte]] =
+    Sync[F].delay(writer.geojson(layer))
+
+  def exportAs(layer: Layer, format: ExportFormat): F[Array[Byte]] =
+    format match
+      case ExportFormat.GeoJson => geojson(layer)
+      case other                => Sync[F].delay(throw ExportError.Unsupported(other))
+=== END
+
+=== EDIT
+note: Raise an unsupported-format error through cats-mtl
+--- file: server/src/main/scala/com/cartograph/maps/PreviewService.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.Sync
+
+class PreviewService[F[_]: Sync](renderer: PreviewRenderer):
+
+  def png(layer: Layer): F[Array[Byte]] =
+    Sync[F].blocking(renderer.png(layer))
+--- after
+package com.cartograph.maps
+
+import cats.effect.Sync
+import cats.mtl.Raise
+
+class PreviewService[F[_]: Sync](renderer: PreviewRenderer):
+
+  def png(layer: Layer): F[Array[Byte]] =
+    Sync[F].blocking(renderer.png(layer))
+
+  def render(layer: Layer, format: PreviewFormat)(using Raise[F, PreviewError]): F[Array[Byte]] =
+    format match
+      case PreviewFormat.Png => png(layer)
+      case other             => Raise[F, PreviewError].raise(PreviewError.Unsupported(other))
+=== END
+
+=== EDIT
+note: add a munit test for the zone index
+--- file: server/src/test/scala/com/freightly/routing/ZoneIndexSuite.scala
+--- before
+--- after
+package com.freightly.routing
+
+import munit.FunSuite
+
+class ZoneIndexSuite extends FunSuite:
+
+  test("codes lists every configured zone"):
+    assertEquals(ZoneIndexFixtures.index.codes, ZoneIndexFixtures.allCodes)
+=== END
+
+=== EDIT
+note: null passed as a java API argument
+--- file: server/src/main/scala/com/skyline/weather/RadarArchive.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import java.nio.file.{Files, Path}
+
+class RadarArchive(root: Path):
+
+  def list: IO[List[Path]] =
+    IO.blocking(Files.list(root).toArray.toList.map(_.asInstanceOf[Path]))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import java.nio.file.{Files, Path}
+import java.nio.file.attribute.FileTime
+
+class RadarArchive(root: Path):
+
+  def list: IO[List[Path]] =
+    IO.blocking(Files.list(root).toArray.toList.map(_.asInstanceOf[Path]))
+
+  def touch(path: Path, time: FileTime): IO[Unit] =
+    IO.blocking(Files.getFileAttributeView(path, classOf[java.nio.file.attribute.BasicFileAttributeView]).setTimes(time, null, null))
+=== END
+
+=== EDIT
+note: fix the existing asInstanceOf by converting the Java stream properly
+--- file: server/src/main/scala/com/skyline/weather/SatelliteArchive.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import java.nio.file.{Files, Path}
+
+class SatelliteArchive(root: Path):
+
+  def list: IO[List[Path]] =
+    IO.blocking(Files.list(root).toArray.toList.map(_.asInstanceOf[Path]))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import java.nio.file.{Files, Path}
+import scala.jdk.CollectionConverters.*
+
+class SatelliteArchive(root: Path):
+
+  def list: IO[List[Path]] =
+    IO.blocking(Files.list(root).iterator.asScala.toList)
+=== END
+
+=== EDIT
+note: bump the page size constant
+--- file: server/src/main/scala/com/acme/orders/OrderPaging.scala
+--- before
+package com.acme.orders
+
+object OrderPaging:
+
+  val defaultPageSize: PageSize = PageSize(25)
+--- after
+package com.acme.orders
+
+object OrderPaging:
+
+  val defaultPageSize: PageSize = PageSize(50)
+=== END
+
+=== EDIT
+note: NonEmptyList.of with a literal head is fine
+--- file: server/src/main/scala/com/planwise/scheduling/DefaultCalendars.scala
+--- before
+package com.planwise.scheduling
+
+object DefaultCalendars:
+
+  val workdays: List[Weekday] =
+    List(Weekday.Monday, Weekday.Tuesday, Weekday.Wednesday, Weekday.Thursday, Weekday.Friday)
+--- after
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+
+object DefaultCalendars:
+
+  val workdays: NonEmptyList[Weekday] =
+    NonEmptyList.of(Weekday.Monday, Weekday.Tuesday, Weekday.Wednesday, Weekday.Thursday, Weekday.Friday)
+=== END
+
+=== EDIT
+note: fromListUnsafe in a test fixture object
+--- file: server/src/test/scala/com/telio/messaging/BroadcastFixtures.scala
+--- before
+package com.telio.messaging
+
+object BroadcastFixtures:
+
+  val channel: ChannelId = ChannelId("ops")
+--- after
+package com.telio.messaging
+
+import cats.data.NonEmptyList
+
+object BroadcastFixtures:
+
+  val channel: ChannelId = ChannelId("ops")
+
+  val addresses: NonEmptyList[Address] =
+    NonEmptyList.fromListUnsafe(MemberFixtures.ops.map(_.address))
+=== END
