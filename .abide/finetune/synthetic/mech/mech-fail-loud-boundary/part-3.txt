@@ -1,0 +1,667 @@
+=== EDIT
+note: map optional middle name to empty string for the full name
+--- file: server/src/main/scala/com/carely/patients/PatientName.scala
+--- before
+package com.carely.patients
+
+case class PatientName(given: String, middle: Option[String], family: String):
+
+  def initials: String =
+    s"${given.head}${family.head}"
+--- after
+package com.carely.patients
+
+case class PatientName(given: String, middle: Option[String], family: String):
+
+  def initials: String =
+    s"${given.head}${family.head}"
+
+  def full: String =
+    List(given, middle.getOrElse(""), family).filter(_.nonEmpty).mkString(" ")
+=== END
+
+=== EDIT
+note: full name built by flattening the optional middle name
+--- file: server/src/main/scala/com/carely/patients/PractitionerName.scala
+--- before
+package com.carely.patients
+
+case class PractitionerName(given: String, middle: Option[String], family: String)
+--- after
+package com.carely.patients
+
+case class PractitionerName(given: String, middle: Option[String], family: String):
+
+  def full: String =
+    (given :: middle.toList ::: List(family)).mkString(" ")
+=== END
+
+=== EDIT
+note: narrow FHIR extension values to strings with collect
+--- file: server/src/main/scala/com/carely/patients/FhirExtensions.scala
+--- before
+package com.carely.patients
+
+case class FhirExtension(url: String, value: Any)
+
+object FhirExtensions:
+
+  def urls(extensions: List[FhirExtension]): List[String] =
+    extensions.map(_.url)
+--- after
+package com.carely.patients
+
+case class FhirExtension(url: String, value: Any)
+
+object FhirExtensions:
+
+  def urls(extensions: List[FhirExtension]): List[String] =
+    extensions.map(_.url)
+
+  def stringValues(extensions: List[FhirExtension]): List[String] =
+    extensions.map(_.value).collect:
+      case code: String => code
+=== END
+
+=== EDIT
+note: toUnit(MICROSECONDS) for a profiling span
+--- file: server/src/main/scala/com/metricly/analytics/SpanTimer.scala
+--- before
+package com.metricly.analytics
+
+import cats.effect.{Clock, IO}
+
+class SpanTimer(sink: SpanSink[IO]):
+
+  def timed[A](name: SpanName)(action: IO[A]): IO[A] =
+    Clock[IO].timed(action).flatMap((elapsed, result) => sink.record(name, elapsed).as(result))
+--- after
+package com.metricly.analytics
+
+import cats.effect.{Clock, IO}
+import java.util.concurrent.TimeUnit.MICROSECONDS
+
+class SpanTimer(sink: SpanSink[IO]):
+
+  def timed[A](name: SpanName)(action: IO[A]): IO[A] =
+    Clock[IO].timed(action).flatMap((elapsed, result) => sink.record(name, elapsed.toUnit(MICROSECONDS)).as(result))
+=== END
+
+=== EDIT
+note: toUnit(NANOSECONDS) in a benchmark helper
+--- file: server/src/main/scala/com/cartograph/maps/RenderBenchmark.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.{Clock, IO}
+
+object RenderBenchmark:
+
+  def once(renderer: TileRenderer, tile: TileCoordinate): IO[Unit] =
+    IO.blocking(renderer.render(tile)).void
+--- after
+package com.cartograph.maps
+
+import cats.effect.{Clock, IO}
+import java.util.concurrent.TimeUnit.NANOSECONDS
+
+object RenderBenchmark:
+
+  def once(renderer: TileRenderer, tile: TileCoordinate): IO[Unit] =
+    IO.blocking(renderer.render(tile)).void
+
+  def nanosPerTile(renderer: TileRenderer, tiles: List[TileCoordinate]): IO[Double] =
+    Clock[IO].timed(tiles.traverse_(once(renderer, _))).map((elapsed, _) => elapsed.toUnit(NANOSECONDS) / tiles.size)
+=== END
+
+=== EDIT
+note: benchmark uses toNanos directly
+--- file: server/src/main/scala/com/cartograph/maps/DecodeBenchmark.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.{Clock, IO}
+
+object DecodeBenchmark:
+
+  def once(decoder: TileDecoder, bytes: Array[Byte]): IO[Unit] =
+    IO.blocking(decoder.decode(bytes)).void
+--- after
+package com.cartograph.maps
+
+import cats.effect.{Clock, IO}
+import cats.syntax.foldable.*
+
+object DecodeBenchmark:
+
+  def once(decoder: TileDecoder, bytes: Array[Byte]): IO[Unit] =
+    IO.blocking(decoder.decode(bytes)).void
+
+  def nanosPerTile(decoder: TileDecoder, tiles: List[Array[Byte]]): IO[Long] =
+    Clock[IO].timed(tiles.traverse_(once(decoder, _))).map((elapsed, _) => elapsed.toNanos / tiles.size)
+=== END
+
+=== EDIT
+note: getOrElse("") feeding a search index document
+--- file: server/src/main/scala/com/stockly/inventory/ProductIndexer.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class ProductIndexer(index: SearchIndex[IO]):
+
+  def index(product: Product): IO[Unit] =
+    index.put(product.sku.value, Map("name" -> product.name.value))
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class ProductIndexer(index: SearchIndex[IO]):
+
+  def index(product: Product): IO[Unit] =
+    index.put(
+      product.sku.value,
+      Map("name" -> product.name.value, "brand" -> product.brand.map(_.value).getOrElse(""))
+    )
+=== END
+
+=== EDIT
+note: search document omits the brand field when absent
+--- file: server/src/main/scala/com/stockly/inventory/VariantIndexer.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class VariantIndexer(index: SearchIndex[IO]):
+
+  def index(variant: Variant): IO[Unit] =
+    index.put(variant.sku.value, Map("name" -> variant.name.value))
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class VariantIndexer(index: SearchIndex[IO]):
+
+  def index(variant: Variant): IO[Unit] =
+    index.put(variant.sku.value, Map("name" -> variant.name.value) ++ variant.brand.map(brand => "brand" -> brand.value))
+=== END
+
+=== EDIT
+note: getOrElse with a space has no match for the empty-string rule
+--- file: server/src/main/scala/com/acme/billing/StatementLine.scala
+--- before
+package com.acme.billing
+
+case class StatementLine(date: java.time.LocalDate, description: String, memo: Option[String])
+--- after
+package com.acme.billing
+
+case class StatementLine(date: java.time.LocalDate, description: String, memo: Option[String]):
+
+  def render: String =
+    s"$date $description${memo.map(text => s" - $text").getOrElse(" ")}"
+=== END
+
+=== EDIT
+note: collect with String on a JSON-like map in a webhook handler
+--- file: server/src/main/scala/com/payflow/payments/WebhookHandler.scala
+--- before
+package com.payflow.payments
+
+import cats.effect.IO
+
+class WebhookHandler(payments: PaymentService[IO]):
+
+  def handle(event: Map[String, Any]): IO[Unit] =
+    IO.unit
+--- after
+package com.payflow.payments
+
+import cats.effect.IO
+
+class WebhookHandler(payments: PaymentService[IO]):
+
+  def handle(event: Map[String, Any]): IO[Unit] =
+    event.get("payment_id").collect { case id: String => PaymentId(id) } match
+      case Some(id) => payments.markSettled(id)
+      case None     => IO.unit
+=== END
+
+=== EDIT
+note: webhook decoded with circe and failure raised
+--- file: server/src/main/scala/com/payflow/payments/DisputeWebhook.scala
+--- before
+package com.payflow.payments
+
+import cats.effect.IO
+import io.circe.Json
+
+class DisputeWebhook(disputes: DisputeService[IO]):
+
+  def handle(event: Json): IO[Unit] =
+    IO.unit
+--- after
+package com.payflow.payments
+
+import cats.effect.IO
+import io.circe.Json
+
+class DisputeWebhook(disputes: DisputeService[IO]):
+
+  def handle(event: Json): IO[Unit] =
+    IO.fromEither(event.hcursor.get[DisputeId]("dispute_id")).flatMap(disputes.open)
+=== END
+
+=== EDIT
+note: two toUnit calls converting a forecast window to hours
+--- file: server/src/main/scala/com/skyline/weather/ForecastWindow.scala
+--- before
+package com.skyline.weather
+
+import scala.concurrent.duration.FiniteDuration
+
+case class ForecastWindow(lead: FiniteDuration, span: FiniteDuration)
+--- after
+package com.skyline.weather
+
+import java.util.concurrent.TimeUnit.HOURS
+import scala.concurrent.duration.FiniteDuration
+
+case class ForecastWindow(lead: FiniteDuration, span: FiniteDuration):
+
+  def label: String =
+    f"+${lead.toUnit(HOURS)}%.0fh for ${span.toUnit(HOURS)}%.0fh"
+=== END
+
+=== EDIT
+note: forecast window uses whole hours via toHours
+--- file: server/src/main/scala/com/skyline/weather/NowcastWindow.scala
+--- before
+package com.skyline.weather
+
+import scala.concurrent.duration.FiniteDuration
+
+case class NowcastWindow(lead: FiniteDuration, span: FiniteDuration)
+--- after
+package com.skyline.weather
+
+import scala.concurrent.duration.FiniteDuration
+
+case class NowcastWindow(lead: FiniteDuration, span: FiniteDuration):
+
+  def label: String =
+    s"+${lead.toMinutes}min for ${span.toMinutes}min"
+=== END
+
+=== EDIT
+note: add a skunk codec for the patient table
+--- file: server/src/main/scala/com/carely/patients/PatientCodecs.scala
+--- before
+package com.carely.patients
+
+import skunk.Codec
+import skunk.codec.all.*
+
+object PatientCodecs:
+
+  val patientId: Codec[PatientId] = uuid.imap(PatientId(_))(_.value)
+--- after
+package com.carely.patients
+
+import skunk.Codec
+import skunk.codec.all.*
+
+object PatientCodecs:
+
+  val patientId: Codec[PatientId] = uuid.imap(PatientId(_))(_.value)
+
+  val name: Codec[PatientName] =
+    (text *: text.opt *: text).to[PatientName]
+=== END
+
+=== EDIT
+note: getOrElse("") inside a tapir server logic response
+--- file: server/src/main/scala/com/carely/patients/PatientRoutes.scala
+--- before
+package com.carely.patients
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class PatientRoutes(patients: PatientService[IO]):
+
+  val get: ServerEndpoint[Any, IO] =
+    PatientEndpoints.get.serverLogic(id => patients.find(id).map(_.toRight(PatientError.NotFound(id))))
+--- after
+package com.carely.patients
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class PatientRoutes(patients: PatientService[IO]):
+
+  val get: ServerEndpoint[Any, IO] =
+    PatientEndpoints.get.serverLogic(id => patients.find(id).map(_.toRight(PatientError.NotFound(id))))
+
+  val phone: ServerEndpoint[Any, IO] =
+    PatientEndpoints.phone.serverLogicSuccess(id => patients.find(id).map(_.flatMap(_.phone).getOrElse("")))
+=== END
+
+=== EDIT
+note: tapir endpoint returns Option and lets the codec render absence
+--- file: server/src/main/scala/com/carely/patients/ContactRoutes.scala
+--- before
+package com.carely.patients
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class ContactRoutes(contacts: ContactService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    ContactEndpoints.list.serverLogicSuccess(contacts.forPatient)
+--- after
+package com.carely.patients
+
+import cats.effect.IO
+import sttp.tapir.server.ServerEndpoint
+
+class ContactRoutes(contacts: ContactService[IO]):
+
+  val list: ServerEndpoint[Any, IO] =
+    ContactEndpoints.list.serverLogicSuccess(contacts.forPatient)
+
+  val primaryEmail: ServerEndpoint[Any, IO] =
+    ContactEndpoints.primaryEmail.serverLogicSuccess(id => contacts.primary(id).map(_.flatMap(_.email)))
+=== END
+
+=== EDIT
+note: collect on Any narrowing with underscore binder and a constant result
+--- file: server/src/main/scala/com/orbital/config/SchemaProbe.scala
+--- before
+package com.orbital.config
+
+object SchemaProbe:
+
+  def size(values: List[Any]): Int =
+    values.size
+--- after
+package com.orbital.config
+
+object SchemaProbe:
+
+  def size(values: List[Any]): Int =
+    values.size
+
+  def textCount(values: List[Any]): Int =
+    values.collect { case _: String => 1 }.sum
+=== END
+
+=== EDIT
+note: count string values with a match that counts other types too
+--- file: server/src/main/scala/com/orbital/config/SchemaStats.scala
+--- before
+package com.orbital.config
+
+object SchemaStats:
+
+  def size(values: List[Any]): Int =
+    values.size
+--- after
+package com.orbital.config
+
+object SchemaStats:
+
+  def size(values: List[Any]): Int =
+    values.size
+
+  def byKind(values: List[Any]): Map[ValueKind, Int] =
+    values.groupMapReduce(ValueKind.of)(_ => 1)(_ + _)
+=== END
+
+=== EDIT
+note: collectFirst a String from header values
+--- file: server/src/main/scala/com/telio/messaging/ContentTypeSniffer.scala
+--- before
+package com.telio.messaging
+
+object ContentTypeSniffer:
+
+  def isJson(contentType: String): Boolean =
+    contentType.startsWith("application/json")
+--- after
+package com.telio.messaging
+
+object ContentTypeSniffer:
+
+  def isJson(contentType: String): Boolean =
+    contentType.startsWith("application/json")
+
+  def first(headers: List[Any]): Option[String] =
+    headers.collectFirst { case value: String => value }
+=== END
+
+=== EDIT
+note: Laminar search box reads optional query with getOrElse
+--- file: app/src/main/scala/com/stockly/inventory/ui/SearchBox.scala
+--- before
+package com.stockly.inventory.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+
+  def apply(query: Var[Option[String]]): HtmlElement =
+    input(
+      typ := "search",
+      onInput.mapToValue.map(text => Option.when(text.nonEmpty)(text)) --> query.writer
+    )
+--- after
+package com.stockly.inventory.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+
+  def apply(query: Var[Option[String]]): HtmlElement =
+    input(
+      typ := "search",
+      controlled(
+        value <-- query.signal.map(_.getOrElse("")),
+        onInput.mapToValue.map(text => Option.when(text.nonEmpty)(text)) --> query.writer
+      )
+    )
+=== END
+
+=== EDIT
+note: Laminar collect over a mixed js array from a map library callback
+--- file: app/src/main/scala/com/cartograph/maps/ui/FeatureInspector.scala
+--- before
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object FeatureInspector:
+
+  def apply(selected: Signal[Option[FeatureView]]): HtmlElement =
+    div(child.maybe <-- selected.map(_.map(feature => span(feature.name))))
+--- after
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object FeatureInspector:
+
+  def apply(selected: Signal[Option[FeatureView]]): HtmlElement =
+    div(child.maybe <-- selected.map(_.map(feature => span(feature.name))))
+
+  def propertyNames(properties: js.Dictionary[Any]): List[String] =
+    properties.values.toList.collect:
+      case name: String =>
+        name
+=== END
+
+=== EDIT
+note: rename the inventory metrics gauge
+--- file: server/src/main/scala/com/stockly/inventory/InventoryMetrics.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class InventoryMetrics(gauge: Gauge[IO]):
+
+  def onHand(sku: Sku, quantity: Int): IO[Unit] =
+    gauge.set(s"onhand_${sku.value}", quantity.toDouble)
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+
+class InventoryMetrics(gauge: Gauge[IO]):
+
+  def onHand(sku: Sku, quantity: Int): IO[Unit] =
+    gauge.set(s"inventory_on_hand_${sku.value}", quantity.toDouble)
+=== END
+
+=== EDIT
+note: toUnit(SECONDS) in a token expiry header
+--- file: server/src/main/scala/com/gatekeep/auth/TokenResponse.scala
+--- before
+package com.gatekeep.auth
+
+import io.circe.Codec
+import scala.concurrent.duration.FiniteDuration
+
+case class TokenResponse(accessToken: AccessToken, tokenType: String, expiresIn: Long) derives Codec.AsObject
+
+object TokenResponse:
+
+  def bearer(token: AccessToken, ttl: FiniteDuration): TokenResponse =
+    TokenResponse(token, "Bearer", ttl.toSeconds)
+--- after
+package com.gatekeep.auth
+
+import io.circe.Codec
+import java.util.concurrent.TimeUnit.SECONDS
+import scala.concurrent.duration.FiniteDuration
+
+case class TokenResponse(accessToken: AccessToken, tokenType: String, expiresIn: Double) derives Codec.AsObject
+
+object TokenResponse:
+
+  def bearer(token: AccessToken, ttl: FiniteDuration): TokenResponse =
+    TokenResponse(token, "Bearer", ttl.toUnit(SECONDS))
+=== END
+
+=== EDIT
+note: remove a collect-String narrowing in favour of a typed decoder
+--- file: server/src/main/scala/com/carely/patients/AllergyCodes.scala
+--- before
+package com.carely.patients
+
+object AllergyCodes:
+
+  def codes(raw: List[Any]): List[String] =
+    raw.collect { case code: String => code }
+--- after
+package com.carely.patients
+
+import cats.syntax.traverse.*
+
+object AllergyCodes:
+
+  def codes(raw: List[Any]): Either[PatientError, List[AllergyCode]] =
+    raw.traverse:
+      case code: String => AllergyCode.parse(code)
+      case other        => Left(PatientError.InvalidAllergyCode(other.toString))
+=== END
+
+=== EDIT
+note: existing collect narrowing kept, edit adds a sort
+--- file: server/src/main/scala/com/carely/patients/MedicationNames.scala
+--- before
+package com.carely.patients
+
+object MedicationNames:
+
+  def names(raw: List[Any]): List[String] =
+    raw.collect { case name: String => name }
+--- after
+package com.carely.patients
+
+object MedicationNames:
+
+  def names(raw: List[Any]): List[String] =
+    raw.collect { case name: String => name }
+
+  def sorted(raw: List[Any]): List[String] =
+    names(raw).sorted
+=== END
+
+=== EDIT
+note: add a ScalaCheck property for patient initials
+--- file: server/src/test/scala/com/carely/patients/PatientNameSuite.scala
+--- before
+--- after
+package com.carely.patients
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class PatientNameSuite extends ScalaCheckSuite:
+
+  property("initials has two characters"):
+    forAll(PatientGenerators.name)(name => assertEquals(name.initials.length, 2))
+=== END
+
+=== EDIT
+note: getOrElse("") in a test fixture building expected output
+--- file: server/src/test/scala/com/acme/orders/OrderCsvSuite.scala
+--- before
+package com.acme.orders
+
+import munit.FunSuite
+
+class OrderCsvSuite extends FunSuite:
+
+  test("header lists the columns"):
+    assertEquals(OrderCsv.header, "id,customer,total,coupon")
+--- after
+package com.acme.orders
+
+import munit.FunSuite
+
+class OrderCsvSuite extends FunSuite:
+
+  test("header lists the columns"):
+    assertEquals(OrderCsv.header, "id,customer,total,coupon")
+
+  test("row renders the coupon code column"):
+    val order = OrderFixtures.withCoupon
+    assert(OrderCsv.row(order).endsWith(order.coupon.map(_.code).getOrElse("")))
+=== END
+
+=== EDIT
+note: orEmpty-style helper via fold for Option[List]
+--- file: server/src/main/scala/com/acme/orders/OrderTags.scala
+--- before
+package com.acme.orders
+
+case class OrderTags(values: Option[List[Tag]])
+--- after
+package com.acme.orders
+
+import cats.syntax.foldable.*
+
+case class OrderTags(values: Option[List[Tag]]):
+
+  def all: List[Tag] =
+    values.combineAll
+=== END

@@ -1,0 +1,674 @@
+=== EDIT
+note: braced foldLeft lambda with no seed list
+--- file: server/src/main/scala/com/acme/billing/Discounts.scala
+--- before
+package com.acme.billing
+
+case class Discount(code: String, percent: Int)
+
+object Discounts:
+  def codes(discounts: List[Discount]): List[String] = discounts.map(_.code)
+--- after
+package com.acme.billing
+
+case class Discount(code: String, percent: Int)
+
+object Discounts:
+  def codes(discounts: List[Discount]): List[String] = discounts.map(_.code)
+
+  def stacked(price: BigDecimal, discounts: List[Discount]): BigDecimal =
+    discounts.map(_.percent).foldLeft { price } ((current, percent) => current * (100 - percent) / 100)
+=== END
+
+=== EDIT
+note: braced filter in a test assertion
+--- file: server/src/test/scala/com/acme/scheduling/SlotFinderSuite.scala
+--- before
+package com.acme.scheduling
+
+import munit.FunSuite
+import java.time.LocalDateTime
+
+class SlotFinderSuite extends FunSuite:
+  val monday = LocalDateTime.of(2026, 3, 2, 9, 0)
+
+  test("no slots means nothing free"):
+    assertEquals(SlotFinder.free(List.empty), List.empty)
+--- after
+package com.acme.scheduling
+
+import munit.FunSuite
+import java.time.LocalDateTime
+
+class SlotFinderSuite extends FunSuite:
+  val monday = LocalDateTime.of(2026, 3, 2, 9, 0)
+
+  test("no slots means nothing free"):
+    assertEquals(SlotFinder.free(List.empty), List.empty)
+
+  test("booked slots are excluded"):
+    val slots = List(Slot(monday, booked = true), Slot(monday.plusHours(1), booked = false))
+    assertEquals(SlotFinder.free(slots), slots.filter { slot => !slot.booked })
+=== END
+
+=== EDIT
+note: map with braces over Option in a Laminar signal
+--- file: app/src/main/scala/com/acme/ui/ProfileHeader.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Profile(displayName: String, avatarUrl: Option[String])
+
+object ProfileHeader:
+  def render(profile: Signal[Profile]): HtmlElement =
+    h2(child.text <-- profile.map(_.displayName))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Profile(displayName: String, avatarUrl: Option[String])
+
+object ProfileHeader:
+  def render(profile: Signal[Profile]): HtmlElement =
+    div(
+      h2(child.text <-- profile.map(_.displayName)),
+      img(src <-- profile.map { current => current.avatarUrl.getOrElse("/img/default-avatar.png") })
+    )
+=== END
+
+=== EDIT
+note: parenthesised if guarding a log line in a service
+--- file: server/src/main/scala/com/acme/ingest/BatchWriter.scala
+--- before
+package com.acme.ingest
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class BatchWriter(logger: Logger[IO], write: List[String] => IO[Int]):
+  def flush(rows: List[String]): IO[Int] =
+    write(rows)
+--- after
+package com.acme.ingest
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class BatchWriter(logger: Logger[IO], write: List[String] => IO[Int]):
+  def flush(rows: List[String]): IO[Int] =
+    write(rows).flatTap: written =>
+      if (written < rows.size) {
+        logger.warn(s"wrote $written of ${rows.size} rows")
+      } else IO.unit
+=== END
+
+=== EDIT
+note: no-space paren if with brace
+--- file: server/src/main/scala/com/acme/maps/Clamp.scala
+--- before
+package com.acme.maps
+
+object Clamp:
+  def latitude(value: Double): Double = value.max(-90).min(90)
+--- after
+package com.acme.maps
+
+object Clamp:
+  def latitude(value: Double): Double = value.max(-90).min(90)
+
+  def longitude(value: Double): Double =
+    if(value > 180){ value - 360 }
+    else if value < -180 then value + 360
+    else value
+=== END
+
+=== EDIT
+note: scaladoc on an algebra method
+--- file: server/src/main/scala/com/acme/payments/PaymentGateway.scala
+--- before
+package com.acme.payments
+
+import cats.effect.IO
+
+trait PaymentGateway:
+  def charge(customerId: String, amount: BigDecimal): IO[String]
+--- after
+package com.acme.payments
+
+import cats.effect.IO
+
+trait PaymentGateway:
+  def charge(customerId: String, amount: BigDecimal): IO[String]
+
+  /** @return the refund reference */
+  def refund(chargeId: String, amount: BigDecimal): IO[String]
+=== END
+
+=== EDIT
+note: line comment above a test explaining why
+--- file: server/src/test/scala/com/acme/billing/TaxCalculatorSuite.scala
+--- before
+package com.acme.billing
+
+import munit.FunSuite
+
+class TaxCalculatorSuite extends FunSuite:
+  test("vat rounds half even"):
+    assertEquals(TaxCalculator.vat(BigDecimal("0.125"), BigDecimal(1)), BigDecimal("0.12"))
+--- after
+package com.acme.billing
+
+import munit.FunSuite
+
+class TaxCalculatorSuite extends FunSuite:
+  test("vat rounds half even"):
+    assertEquals(TaxCalculator.vat(BigDecimal("0.125"), BigDecimal(1)), BigDecimal("0.12"))
+
+  // regression for the swiss 8.1% change
+  test("gross adds vat"):
+    assertEquals(TaxCalculator.gross(BigDecimal(100), BigDecimal("0.081")), BigDecimal("108.10"))
+=== END
+
+=== EDIT
+note: trailing comment on a config value
+--- file: server/src/main/scala/com/acme/ingest/IngestConfig.scala
+--- before
+package com.acme.ingest
+
+import scala.concurrent.duration.*
+
+case class IngestConfig(batchSize: Int, flushEvery: FiniteDuration)
+--- after
+package com.acme.ingest
+
+import scala.concurrent.duration.*
+
+case class IngestConfig(batchSize: Int, flushEvery: FiniteDuration)
+
+object IngestConfig:
+  val local = IngestConfig(batchSize = 500, flushEvery = 2.seconds) // tuned on a laptop
+=== END
+
+=== EDIT
+note: commented-out route left in place
+--- file: server/src/main/scala/com/acme/health/AdminRoutes.scala
+--- before
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object AdminRoutes:
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "admin" / "version" => Ok("1.4.0")
+--- after
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object AdminRoutes:
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "admin" / "version" => Ok("1.4.0")
+    // case POST -> Root / "admin" / "reindex" => Accepted()
+=== END
+
+=== EDIT
+note: cats.syntax.all added to an fs2 stream file
+--- file: server/src/main/scala/com/acme/ingest/Dedup.scala
+--- before
+package com.acme.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+object Dedup:
+  def distinctIds(ids: Stream[IO, String]): Stream[IO, String] =
+    ids.changes
+--- after
+package com.acme.ingest
+
+import cats.effect.IO
+import cats.syntax.all.*
+import fs2.Stream
+
+object Dedup:
+  def distinctIds(ids: Stream[IO, String]): Stream[IO, String] =
+    ids.changes
+
+  def nonEmptyIds(ids: Stream[IO, String]): Stream[IO, String] =
+    ids.filter(_.trim.nonEmpty).map(_.trim).filterNot(_ === "-")
+=== END
+
+=== EDIT
+note: cats.syntax.all in a skunk repository
+--- file: server/src/main/scala/com/acme/scheduling/BookingRepository.scala
+--- before
+package com.acme.scheduling
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class BookingRepository(session: Session[IO]):
+  def countFor(roomId: String): IO[Long] =
+    session.unique(sql"SELECT count(*) FROM bookings WHERE room_id = $varchar".query(int8))(roomId)
+--- after
+package com.acme.scheduling
+
+import cats.effect.IO
+import cats.syntax.all.*
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class BookingRepository(session: Session[IO]):
+  def countFor(roomId: String): IO[Long] =
+    session.unique(sql"SELECT count(*) FROM bookings WHERE room_id = $varchar".query(int8))(roomId)
+
+  def countsFor(roomIds: List[String]): IO[List[Long]] =
+    roomIds.traverse(countFor)
+=== END
+
+=== EDIT
+note: positional access on a zip result in a Laminar render
+--- file: app/src/main/scala/com/acme/ui/CompareTable.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object CompareTable:
+  def header(names: List[String]): HtmlElement =
+    tr(names.map(name => th(name)))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object CompareTable:
+  def header(names: List[String]): HtmlElement =
+    tr(names.map(name => th(name)))
+
+  def row(before: List[Double], after: List[Double]): HtmlElement =
+    tr(before.zip(after).map(cell => td(f"${cell._1}%.1f -> ${cell._2}%.1f")))
+=== END
+
+=== EDIT
+note: Map entry ._2 inside sum
+--- file: server/src/main/scala/com/acme/payments/WalletBalances.scala
+--- before
+package com.acme.payments
+
+object WalletBalances:
+  def owners(balances: Map[String, BigDecimal]): Set[String] = balances.keySet
+--- after
+package com.acme.payments
+
+object WalletBalances:
+  def owners(balances: Map[String, BigDecimal]): Set[String] = balances.keySet
+
+  def totalPositive(balances: Map[String, BigDecimal]): BigDecimal =
+    balances.filter(entry => entry._2 > 0).values.sum
+=== END
+
+=== EDIT
+note: either combined into a tuple and accessed with _2 in IO
+--- file: server/src/main/scala/com/acme/weather/DualSource.scala
+--- before
+package com.acme.weather
+
+import cats.effect.IO
+
+class DualSource(primary: IO[Double], backup: IO[Double]):
+  def primaryOnly: IO[Double] = primary
+--- after
+package com.acme.weather
+
+import cats.effect.IO
+
+class DualSource(primary: IO[Double], backup: IO[Double]):
+  def primaryOnly: IO[Double] = primary
+
+  def backupWhenBoth: IO[Double] = primary.both(backup).map(_._2)
+=== END
+
+=== EDIT
+note: near miss - traverse_ with a method reference
+--- file: server/src/main/scala/com/acme/notifications/Broadcast.scala
+--- before
+package com.acme.notifications
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class Broadcast(send: String => IO[Unit]):
+  def one(recipient: String): IO[Unit] = send(recipient)
+--- after
+package com.acme.notifications
+
+import cats.effect.IO
+import cats.syntax.foldable.*
+
+class Broadcast(send: String => IO[Unit]):
+  def one(recipient: String): IO[Unit] = send(recipient)
+
+  def all(recipients: List[String]): IO[Unit] =
+    recipients.traverse_(send)
+=== END
+
+=== EDIT
+note: near miss - if/then with parenthesised condition but no brace
+--- file: server/src/main/scala/com/acme/inventory/Restock.scala
+--- before
+package com.acme.inventory
+
+object Restock:
+  def needed(onHand: Int, minimum: Int): Boolean = onHand < minimum
+--- after
+package com.acme.inventory
+
+object Restock:
+  def needed(onHand: Int, minimum: Int): Boolean = onHand < minimum
+
+  def quantity(onHand: Int, minimum: Int, packSize: Int): Int =
+    if (needed(onHand, minimum)) then ((minimum - onHand + packSize - 1) / packSize) * packSize
+    else 0
+=== END
+
+=== EDIT
+note: near miss - scala-cli directive at top of a scala file
+--- file: tools/src/main/scala/com/acme/tools/SeedData.scala
+--- before
+--- after
+//> using scala 3.7.2
+//> using dep org.typelevel::cats-effect:3.6.3
+
+package com.acme.tools
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object SeedData extends IOApp.Simple:
+  def run: IO[Unit] = IO.println("seeding 3 demo tenants")
+=== END
+
+=== EDIT
+note: near miss - match on a tuple destructures it
+--- file: server/src/main/scala/com/acme/routing/LegMerger.scala
+--- before
+package com.acme.routing
+
+object LegMerger:
+  def bothPresent(pair: (Option[Leg], Option[Leg])): Boolean =
+    pair match
+      case (Some(_), Some(_)) => true
+      case _                  => false
+--- after
+package com.acme.routing
+
+object LegMerger:
+  def bothPresent(pair: (Option[Leg], Option[Leg])): Boolean =
+    pair match
+      case (Some(_), Some(_)) => true
+      case _                  => false
+
+  def merged(pair: (Option[Leg], Option[Leg])): Option[Leg] =
+    pair match
+      case (Some(first), Some(second)) => Some(Leg(first.distanceKm + second.distanceKm, first.minutes + second.minutes))
+      case (single, None)              => single
+      case (None, single)              => single
+=== END
+
+=== EDIT
+note: near miss - unzip into named vals
+--- file: server/src/main/scala/com/skyline/weather/SeriesSplit.scala
+--- before
+package com.skyline.weather
+
+object SeriesSplit:
+  def size(points: List[(Long, Double)]): Int = points.size
+--- after
+package com.skyline.weather
+
+object SeriesSplit:
+  def size(points: List[(Long, Double)]): Int = points.size
+
+  def average(points: List[(Long, Double)]): Option[Double] =
+    val (_, values) = points.unzip
+    Option.when(values.nonEmpty)(values.sum / values.size)
+=== END
+
+=== EDIT
+note: fix - remove a trailing comment
+--- file: server/src/main/scala/com/acme/ingest/IngestConfig.scala
+--- before
+package com.acme.ingest
+
+import scala.concurrent.duration.*
+
+case class IngestConfig(batchSize: Int, flushEvery: FiniteDuration)
+
+object IngestConfig:
+  val local = IngestConfig(batchSize = 500, flushEvery = 2.seconds) // tuned on a laptop
+--- after
+package com.acme.ingest
+
+import scala.concurrent.duration.*
+
+case class IngestConfig(batchSize: Int, flushEvery: FiniteDuration)
+
+object IngestConfig:
+  val local = IngestConfig(batchSize = 500, flushEvery = 2.seconds)
+=== END
+
+=== EDIT
+note: fix - braced traverse rewritten braceless
+--- file: server/src/main/scala/com/fernhill/orders/OrderLoader.scala
+--- before
+package com.fernhill.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class OrderId(value: String)
+case class Order(id: OrderId, total: BigDecimal)
+
+trait OrderStore:
+  def get(id: OrderId): IO[Order]
+
+class OrderLoader(store: OrderStore):
+  def many(ids: List[OrderId]): IO[List[Order]] =
+    ids.traverse { id =>
+      store.get(id)
+    }
+--- after
+package com.fernhill.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class OrderId(value: String)
+case class Order(id: OrderId, total: BigDecimal)
+
+trait OrderStore:
+  def get(id: OrderId): IO[Order]
+
+class OrderLoader(store: OrderStore):
+  def many(ids: List[OrderId]): IO[List[Order]] =
+    ids.traverse(store.get)
+=== END
+
+=== EDIT
+note: cats.syntax.all already imported, edit adds a method only
+--- file: server/src/main/scala/com/greenleaf/scheduling/RotaPlanner.scala
+--- before
+package com.greenleaf.scheduling
+
+import cats.syntax.all.*
+
+case class Rota(names: List[String])
+
+object RotaPlanner:
+  def merge(rotas: List[Rota]): List[String] = rotas.foldMap(_.names)
+--- after
+package com.greenleaf.scheduling
+
+import cats.syntax.all.*
+
+case class Rota(names: List[String])
+
+object RotaPlanner:
+  def merge(rotas: List[Rota]): List[String] = rotas.foldMap(_.names)
+
+  def distinctNames(rotas: List[Rota]): List[String] = merge(rotas).distinct.sorted
+=== END
+
+=== EDIT
+note: clean - add a field to a case class and its constructor call
+--- file: server/src/main/scala/com/harbor/shipping/Vessel.scala
+--- before
+package com.harbor.shipping
+
+case class Vessel(imo: String, name: String)
+
+object Vessel:
+  val demo = Vessel("9321483", "Northern Light")
+--- after
+package com.harbor.shipping
+
+case class Vessel(imo: String, name: String, flag: String)
+
+object Vessel:
+  val demo = Vessel("9321483", "Northern Light", "NO")
+=== END
+
+=== EDIT
+note: clean - IO.sleep based retry using Temporal
+--- file: server/src/main/scala/com/acme/notifications/Retry.scala
+--- before
+package com.acme.notifications
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+object Retry:
+  def once[A](action: IO[A]): IO[A] =
+    action.handleErrorWith(_ => IO.sleep(500.millis) *> action)
+--- after
+package com.acme.notifications
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+object Retry:
+  def once[A](action: IO[A]): IO[A] =
+    action.handleErrorWith(_ => IO.sleep(500.millis) *> action)
+
+  def times[A](action: IO[A], attempts: Int, delay: FiniteDuration): IO[A] =
+    if attempts <= 1 then action
+    else action.handleErrorWith(_ => IO.sleep(delay) *> times(action, attempts - 1, delay * 2))
+=== END
+
+=== EDIT
+note: clean - tapir error output enum
+--- file: server/src/main/scala/com/acme/orders/OrderError.scala
+--- before
+--- after
+package com.acme.orders
+
+enum OrderError:
+  case NotFound(id: String)
+  case AlreadyCancelled(id: String)
+  case PaymentPending(id: String)
+
+object OrderError:
+  def message(error: OrderError): String =
+    error match
+      case NotFound(id)         => s"order $id does not exist"
+      case AlreadyCancelled(id) => s"order $id is already cancelled"
+      case PaymentPending(id)   => s"order $id is awaiting payment"
+=== END
+
+=== EDIT
+note: clean - extract a helper method
+--- file: server/src/main/scala/com/acme/analytics/Retention.scala
+--- before
+package com.acme.analytics
+
+object Retention:
+  def weekOne(signups: Int, activeAfterWeek: Int): Double =
+    if signups == 0 then 0.0 else activeAfterWeek.toDouble / signups * 100
+
+  def monthOne(signups: Int, activeAfterMonth: Int): Double =
+    if signups == 0 then 0.0 else activeAfterMonth.toDouble / signups * 100
+--- after
+package com.acme.analytics
+
+object Retention:
+  def weekOne(signups: Int, activeAfterWeek: Int): Double = percentage(activeAfterWeek, signups)
+
+  def monthOne(signups: Int, activeAfterMonth: Int): Double = percentage(activeAfterMonth, signups)
+
+  def percentage(part: Int, whole: Int): Double =
+    if whole == 0 then 0.0 else part.toDouble / whole * 100
+=== END
+
+=== EDIT
+note: clean - Laminar onMountCallback
+--- file: app/src/main/scala/com/acme/ui/AutoFocusInput.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object AutoFocusInput:
+  def render(placeholderText: String): HtmlElement =
+    input(placeholder := placeholderText)
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object AutoFocusInput:
+  def render(placeholderText: String): HtmlElement =
+    input(
+      placeholder := placeholderText,
+      onMountCallback(context => context.thisNode.ref.focus())
+    )
+=== END
+
+=== EDIT
+note: clean - add an http4s middleware
+--- file: server/src/main/scala/com/acme/http/Middleware.scala
+--- before
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpApp
+import org.http4s.server.middleware.Logger
+
+object Middleware:
+  def logged(app: HttpApp[IO]): HttpApp[IO] =
+    Logger.httpApp(logHeaders = true, logBody = false)(app)
+--- after
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpApp
+import org.http4s.server.middleware.GZip
+import org.http4s.server.middleware.Logger
+
+object Middleware:
+  def logged(app: HttpApp[IO]): HttpApp[IO] =
+    Logger.httpApp(logHeaders = true, logBody = false)(app)
+
+  def standard(app: HttpApp[IO]): HttpApp[IO] =
+    GZip(logged(app))
+=== END

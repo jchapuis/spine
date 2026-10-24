@@ -1,0 +1,65 @@
+#!/bin/sh
+# What abide's per-edit checks did, from every project's .abide/events.jsonl (worktrees log into their main
+# checkout's file, see abide-enable).
+#
+#   abide-stats                  totals per project, all time
+#   abide-stats --since 2026-10-01
+#   abide-stats --by day|week    one row per period instead of per project
+#
+# decisions   rule verdicts given (one per rule per check)
+# blocks      checks that stopped an edit (a rule answered act)
+# corrected   blocks followed, in the same session, by a passing check of one of the same files
+# warnings    verdicts in the flag band (reported to the agent, edit not stopped)
+# time        wall time the checks took, as the agent waited on them
+set -eu
+
+SINCE=""
+BY="project"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --since) SINCE="$2"; shift 2 ;;
+    --by) BY="$2"; shift 2 ;;
+    *) echo "usage: abide-stats [--since YYYY-MM-DD] [--by project|day|week]" >&2; exit 2 ;;
+  esac
+done
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+SPINE_ROOT=$(cd -- "$SCRIPT_DIR/../../../.." && pwd -P)
+LOGS=$(find "$SPINE_ROOT/projects" -maxdepth 3 -path '*/.abide/events.jsonl' -type f | sort)
+[ -n "$LOGS" ] || { echo "abide-stats: no .abide/events.jsonl under $SPINE_ROOT/projects" >&2; exit 1; }
+
+# shellcheck disable=SC2086
+jq -rn --arg since "$SINCE" --arg by "$BY" --arg projects "$SPINE_ROOT/projects/" '
+  def week: strptime("%Y-%m-%dT%H:%M:%S") | mktime | strftime("%G-W%V");
+  def bucket: if $by == "day" then .at[0:10] elif $by == "week" then (.at[0:19] | week) else .project end;
+  def seconds: (. / 1000 * 10 | round) / 10;
+  def corrected:
+    group_by(.sessionId // "")
+    | map(sort_by(.at) as $session
+        | [range(0; $session | length) as $index
+            | $session[$index] as $blocked
+            | select($blocked.blocked)
+            | select(any($session[$index + 1:][];
+                (.blocked | not) and ((.files // []) - ((.files // []) - ($blocked.files // [])) | length) > 0))]
+        | length)
+    | add // 0;
+  [inputs
+    | select(.kind == "check" and (.at >= $since))
+    | . + {project: (input_filename | ltrimstr($projects) | split("/")[0])}]
+  | group_by(bucket)
+  | map({
+      key: (.[0] | bucket),
+      checks: length,
+      decisions: (map(.verdicts | length) | add),
+      blocks: (map(select(.blocked)) | length),
+      corrected: corrected,
+      warnings: (map(.verdicts[] | select(.band == "flag")) | length),
+      time: (map(.latencyMs) | add | seconds),
+      median: (map(.latencyMs) | sort | .[length / 2 | floor] | seconds)
+    })
+  | (["", "checks", "decisions", "blocks", "corrected", "warnings", "time s", "median s"] | @tsv),
+    (.[] | [.key, .checks, .decisions, .blocks, .corrected, .warnings, .time, .median] | @tsv),
+    (["total",
+      (map(.checks) | add), (map(.decisions) | add), (map(.blocks) | add), (map(.corrected) | add),
+      (map(.warnings) | add), (map(.time) | add | . * 10 | round / 10), ""] | @tsv)
+' $LOGS | column -t -s "$(printf '\t')"

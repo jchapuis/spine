@@ -1,0 +1,631 @@
+=== EDIT
+note: private val fixture with ascription in a munit suite
+--- file: server/src/test/scala/com/payflow/payments/CurrencyConverterSuite.scala
+--- before
+package com.payflow.payments
+
+import munit.FunSuite
+
+class CurrencyConverterSuite extends FunSuite:
+  test("chf converts to itself"):
+    assertEquals(CurrencyConverter.toChf(BigDecimal(10), "CHF"), Some(BigDecimal(10)))
+--- after
+package com.payflow.payments
+
+import munit.FunSuite
+
+class CurrencyConverterSuite extends FunSuite:
+  private val tenFrancs: BigDecimal = BigDecimal(10)
+
+  test("chf converts to itself"):
+    assertEquals(CurrencyConverter.toChf(tenFrancs, "CHF"), Some(tenFrancs))
+
+  test("unknown currency is rejected"):
+    assertEquals(CurrencyConverter.toChf(tenFrancs, "XYZ"), None)
+=== END
+=== EDIT
+note: local def inside an extension method body declares its return type
+--- file: server/src/main/scala/com/codeshop/text/SlugSyntax.scala
+--- before
+package com.codeshop.text
+
+extension (title: String)
+  def slug: String =
+    title.toLowerCase.replaceAll("[^a-z0-9]+", "-")
+--- after
+package com.codeshop.text
+
+extension (title: String)
+  def slug: String =
+    def trimDashes(value: String): String = value.dropWhile(_ == '-').reverse.dropWhile(_ == '-').reverse
+    trimDashes(title.toLowerCase.replaceAll("[^a-z0-9]+", "-"))
+=== END
+=== EDIT
+note: extension group members keep their return types, they are public API not locals
+--- file: server/src/main/scala/com/volta/energy/KwhSyntax.scala
+--- before
+package com.volta.energy
+
+extension (kwh: Double)
+  def toWh: Double = kwh * 1000
+--- after
+package com.volta.energy
+
+extension (kwh: Double)
+  def toWh: Double = kwh * 1000
+  def toMwh: Double = kwh / 1000
+  def label: String = f"$kwh%.2f kWh"
+=== END
+=== EDIT
+note: private def returning a Resource in a wiring module
+--- file: server/src/main/scala/com/acme/billing/BillingModule.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Resource
+import org.http4s.client.Client
+import org.http4s.ember.client.EmberClientBuilder
+
+object BillingModule:
+  def make: Resource[IO, Client[IO]] =
+    EmberClientBuilder.default[IO].build
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Resource
+import org.http4s.client.Client
+import org.http4s.ember.client.EmberClientBuilder
+import scala.concurrent.duration.*
+
+object BillingModule:
+  def make: Resource[IO, Client[IO]] =
+    httpClient(10.seconds)
+
+  private def httpClient(timeout: FiniteDuration): Resource[IO, Client[IO]] =
+    EmberClientBuilder.default[IO].withTimeout(timeout).build
+=== END
+=== EDIT
+note: local val ascription inside Resource.make acquire block
+--- file: server/src/main/scala/com/quanta/telemetry/MetricsExporter.scala
+--- before
+package com.quanta.telemetry
+
+import cats.effect.IO
+import cats.effect.Resource
+
+class MetricsExporter(push: String => IO[Unit]):
+  def resource(endpoint: String): Resource[IO, Unit] =
+    Resource.make(push(s"open $endpoint"))(_ => push(s"close $endpoint"))
+--- after
+package com.quanta.telemetry
+
+import cats.effect.IO
+import cats.effect.Resource
+
+class MetricsExporter(push: String => IO[Unit]):
+  def resource(endpoint: String): Resource[IO, Unit] =
+    Resource.make(
+      IO.defer:
+        val target: String = endpoint.stripSuffix("/")
+        push(s"open $target")
+    )(_ => push(s"close $endpoint"))
+=== END
+=== EDIT
+note: protected val in a trait with a function type ascription
+--- file: server/src/main/scala/com/tempo/scheduling/Rescheduler.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.LocalDate
+
+trait Rescheduler:
+  def next(from: LocalDate): LocalDate
+--- after
+package com.tempo.scheduling
+
+import java.time.LocalDate
+import java.time.DayOfWeek
+
+trait Rescheduler:
+  protected val isWorkday: LocalDate => Boolean =
+    date => date.getDayOfWeek != DayOfWeek.SATURDAY && date.getDayOfWeek != DayOfWeek.SUNDAY
+
+  def next(from: LocalDate): LocalDate
+=== END
+=== EDIT
+note: abstract protected def declaration without a body, nothing to infer from
+--- file: server/src/main/scala/com/beacon/notifications/ChannelSender.scala
+--- before
+package com.beacon.notifications
+
+import cats.effect.IO
+
+abstract class ChannelSender:
+  def send(recipient: String, text: String): IO[Unit] =
+    deliver(format(recipient, text))
+--- after
+package com.beacon.notifications
+
+import cats.effect.IO
+
+abstract class ChannelSender:
+  def send(recipient: String, text: String): IO[Unit] =
+    deliver(format(recipient, text))
+
+  protected def format(recipient: String, text: String): String
+  protected def deliver(payload: String): IO[Unit]
+=== END
+=== EDIT
+note: private def returning Option with a type parameter in a lookup helper
+--- file: server/src/main/scala/com/harbor/booking/BerthIndex.scala
+--- before
+package com.harbor.booking
+
+class BerthIndex(berths: List[Berth]):
+  def byId(id: String): Option[Berth] =
+    berths.find(_.id == id)
+--- after
+package com.harbor.booking
+
+class BerthIndex(berths: List[Berth]):
+  def byId(id: String): Option[Berth] =
+    firstMatch(berths)(_.id == id)
+
+  def largest: Option[Berth] =
+    berths.maxByOption(_.lengthMeters)
+
+  private def firstMatch[A](items: List[A])(predicate: A => Boolean): Option[A] =
+    items.find(predicate)
+=== END
+=== EDIT
+note: clean edit, swaps IO.pure for IO.delay in an adapter
+--- file: server/src/main/scala/com/fleetline/fleet/OdometerAdapter.scala
+--- before
+package com.fleetline.fleet
+
+import cats.effect.IO
+
+class OdometerAdapter(read: String => Long):
+  def kilometers(vehicleId: String): IO[Long] =
+    IO.pure(read(vehicleId))
+--- after
+package com.fleetline.fleet
+
+import cats.effect.IO
+
+class OdometerAdapter(read: String => Long):
+  def kilometers(vehicleId: String): IO[Long] =
+    IO.blocking(read(vehicleId))
+=== END
+=== EDIT
+note: local val ascription inside a for-comprehension yield block
+--- file: server/src/main/scala/com/acme/ledger/StatementService.scala
+--- before
+package com.acme.ledger
+
+import cats.effect.IO
+
+class StatementService(entries: String => IO[List[Entry]]):
+  def statement(account: String): IO[String] =
+    for
+      items <- entries(account)
+    yield s"$account: ${items.map(_.cents).sum}"
+--- after
+package com.acme.ledger
+
+import cats.effect.IO
+
+class StatementService(entries: String => IO[List[Entry]]):
+  def statement(account: String): IO[String] =
+    for
+      items <- entries(account)
+    yield
+      val totalCents: Long = items.map(_.cents).sum
+      s"$account: ${totalCents / 100}.${totalCents % 100}"
+=== END
+=== EDIT
+note: Laminar object private val EventBus ascribed
+--- file: app/src/main/scala/com/codeshop/search/ui/SearchBox.scala
+--- before
+package com.codeshop.search.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  def apply(): HtmlElement =
+    input(typ := "search", placeholder := "Search")
+--- after
+package com.codeshop.search.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  private val queries: EventBus[String] = new EventBus[String]
+
+  val querySignal = queries.events.debounce(300).startWith("")
+
+  def apply(): HtmlElement =
+    input(typ := "search", placeholder := "Search", onInput.mapToValue --> queries.writer)
+=== END
+=== EDIT
+note: given instance with type is not a val, no fire
+--- file: server/src/main/scala/com/acme/billing/InvoiceCodecs.scala
+--- before
+package com.acme.billing
+
+import io.circe.Encoder
+
+object InvoiceCodecs:
+  given Encoder[LineItem] = Encoder.forProduct3("sku", "quantity", "unitCents")(l => (l.sku, l.quantity, l.unitCents))
+--- after
+package com.acme.billing
+
+import io.circe.Encoder
+
+object InvoiceCodecs:
+  given Encoder[LineItem] = Encoder.forProduct3("sku", "quantity", "unitCents")(l => (l.sku, l.quantity, l.unitCents))
+  given lineItems: Encoder[List[LineItem]] = Encoder.encodeList[LineItem]
+=== END
+=== EDIT
+note: private def in a test suite builds fixtures with an ascribed return
+--- file: server/src/test/scala/com/harbor/booking/BookingServiceSuite.scala
+--- before
+package com.harbor.booking
+
+import munit.CatsEffectSuite
+
+class BookingServiceSuite extends CatsEffectSuite:
+  test("assigns the tightest berth"):
+    BookingService(List(Berth("A", 12), Berth("B", 9))).assign(8).map(_.map(_.id)).assertEquals(Some("B"))
+--- after
+package com.harbor.booking
+
+import munit.CatsEffectSuite
+
+class BookingServiceSuite extends CatsEffectSuite:
+  test("assigns the tightest berth"):
+    service(12, 9).assign(8).map(_.map(_.id)).assertEquals(Some("B"))
+
+  test("no berth when the boat is too long"):
+    service(12, 9).assign(20).assertEquals(None)
+
+  private def service(lengths: Int*): BookingService =
+    BookingService(lengths.toList.zipWithIndex.map((len, i) => Berth(s"B$i", len)))
+=== END
+=== EDIT
+note: local var with Long ascription in a retry counter
+--- file: server/src/main/scala/com/quanta/telemetry/SampleRate.scala
+--- before
+package com.quanta.telemetry
+
+object SampleRate:
+  def keep(ids: List[Long], every: Int): List[Long] =
+    ids.zipWithIndex.collect { case (id, i) if i % every == 0 => id }
+--- after
+package com.quanta.telemetry
+
+object SampleRate:
+  def keep(ids: List[Long], every: Int): List[Long] =
+    var lastKept: Long = -1L
+    ids.filter: id =>
+      val keepIt = id - lastKept >= every
+      if keepIt then lastKept = id
+      keepIt
+=== END
+=== EDIT
+note: private val ascription in a companion object of a case class
+--- file: server/src/main/scala/com/volta/energy/MeterId.scala
+--- before
+package com.volta.energy
+
+case class MeterId(value: String)
+
+object MeterId:
+  def parse(raw: String): Option[MeterId] =
+    Option.when(raw.startsWith("MTR-") && raw.length == 12)(MeterId(raw))
+--- after
+package com.volta.energy
+
+case class MeterId(value: String)
+
+object MeterId:
+  private val prefix: String = "MTR-"
+  private val expectedLength: Int = 12
+
+  def parse(raw: String): Option[MeterId] =
+    Option.when(raw.startsWith(prefix) && raw.length == expectedLength)(MeterId(raw))
+=== END
+=== EDIT
+note: private vals in a companion added without ascriptions
+--- file: server/src/main/scala/com/orbit/maps/TileId.scala
+--- before
+package com.orbit.maps
+
+case class TileId(zoom: Int, x: Int, y: Int)
+
+object TileId:
+  def parse(raw: String): Option[TileId] =
+    raw.split('/').toList.flatMap(_.toIntOption) match
+      case List(z, x, y) if z <= 22 => Some(TileId(z, x, y))
+      case _                         => None
+--- after
+package com.orbit.maps
+
+case class TileId(zoom: Int, x: Int, y: Int)
+
+object TileId:
+  private val maxZoom = 22
+  private val separator = '/'
+
+  def parse(raw: String): Option[TileId] =
+    raw.split(separator).toList.flatMap(_.toIntOption) match
+      case List(z, x, y) if z <= maxZoom => Some(TileId(z, x, y))
+      case _                              => None
+=== END
+=== EDIT
+note: local val ascription in a partial function case body inside collect
+--- file: server/src/main/scala/com/greenleaf/inventory/RestockAdvisor.scala
+--- before
+package com.greenleaf.inventory
+
+case class Stock(sku: String, onHand: Int, reorderAt: Int)
+
+object RestockAdvisor:
+  def advise(stock: List[Stock]): List[String] =
+    stock.filter(s => s.onHand <= s.reorderAt).map(_.sku)
+--- after
+package com.greenleaf.inventory
+
+case class Stock(sku: String, onHand: Int, reorderAt: Int)
+
+object RestockAdvisor:
+  def advise(stock: List[Stock]): List[String] =
+    stock.collect:
+      case s if s.onHand <= s.reorderAt =>
+        val shortfall: Int = s.reorderAt - s.onHand
+        s"${s.sku} (+$shortfall)"
+=== END
+=== EDIT
+note: protected def in a Tapir logic trait with Either result
+--- file: server/src/main/scala/com/lumen/auth/LoginLogic.scala
+--- before
+package com.lumen.auth
+
+import cats.effect.IO
+
+case class Credentials(username: String, password: String)
+
+trait LoginLogic:
+  def login(credentials: Credentials): IO[Either[String, String]]
+--- after
+package com.lumen.auth
+
+import cats.effect.IO
+
+case class Credentials(username: String, password: String)
+
+trait LoginLogic:
+  def login(credentials: Credentials): IO[Either[String, String]]
+
+  protected def checkShape(credentials: Credentials): Either[String, Credentials] =
+    Either.cond(credentials.username.nonEmpty && credentials.password.length >= 8, credentials, "malformed credentials")
+=== END
+=== EDIT
+note: pre-existing local ascription left as is, edit adds a new line without one
+--- file: server/src/main/scala/com/fleetline/fleet/RangeEstimator.scala
+--- before
+package com.fleetline.fleet
+
+object RangeEstimator:
+  def kilometers(batteryKwh: Double, consumptionPer100: Double): Double =
+    val usable: Double = batteryKwh * 0.9
+    usable / consumptionPer100 * 100
+--- after
+package com.fleetline.fleet
+
+object RangeEstimator:
+  def kilometers(batteryKwh: Double, consumptionPer100: Double, coldWeather: Boolean): Double =
+    val usable: Double = batteryKwh * 0.9
+    val winterFactor = if coldWeather then 0.8 else 1.0
+    usable / consumptionPer100 * 100 * winterFactor
+=== END
+=== EDIT
+note: clean edit, new tapir endpoint definition as public val
+--- file: server/src/main/scala/com/skyline/weather/WeatherEndpoints.scala
+--- before
+--- after
+package com.skyline.weather
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import sttp.tapir.generic.auto.*
+
+object WeatherEndpoints:
+  val current: PublicEndpoint[String, String, String, Any] =
+    endpoint.get
+      .in("weather" / path[String]("stationId"))
+      .errorOut(stringBody)
+      .out(stringBody)
+=== END
+=== EDIT
+note: private def ascribed with a Map return and a multi-line signature in a pricing engine
+--- file: server/src/main/scala/com/acme/pricing/PriceBook.scala
+--- before
+package com.acme.pricing
+
+case class Price(sku: String, cents: Long, region: String)
+
+class PriceBook(prices: List[Price]):
+  def forRegion(region: String): List[Price] =
+    prices.filter(_.region == region)
+--- after
+package com.acme.pricing
+
+case class Price(sku: String, cents: Long, region: String)
+
+class PriceBook(prices: List[Price]):
+  def forRegion(region: String): List[Price] =
+    prices.filter(_.region == region)
+
+  def cheapest(region: String): Map[String, Long] =
+    lowestBySku(forRegion(region), discountPercent = 0)
+
+  private def lowestBySku(
+      regional: List[Price],
+      discountPercent: Int
+  ): Map[String, Long] =
+    regional.groupMapReduce(_.sku)(p => p.cents * (100 - discountPercent) / 100)(_ min _)
+=== END
+=== EDIT
+note: local def with Boolean return inside a validation method
+--- file: server/src/main/scala/com/lumen/auth/UsernameRules.scala
+--- before
+package com.lumen.auth
+
+object UsernameRules:
+  def valid(username: String): Boolean =
+    username.length >= 3 && username.forall(_.isLetterOrDigit)
+--- after
+package com.lumen.auth
+
+object UsernameRules:
+  def valid(username: String): Boolean =
+    def reserved(name: String): Boolean = Set("admin", "root", "system").contains(name.toLowerCase)
+    username.length >= 3 && username.forall(_.isLetterOrDigit) && !reserved(username)
+=== END
+=== EDIT
+note: ascription removed from protected val in favour of inference (fix edit)
+--- file: server/src/main/scala/com/acme/catalog/CatalogBase.scala
+--- before
+package com.acme.catalog
+
+abstract class CatalogBase:
+  protected val pageSize: Int = 50
+
+  def pages(total: Int): Int = (total + pageSize - 1) / pageSize
+--- after
+package com.acme.catalog
+
+abstract class CatalogBase:
+  protected val pageSize = 50
+
+  def pages(total: Int): Int = (total + pageSize - 1) / pageSize
+=== END
+=== EDIT
+note: comment-free string mentioning ": Int =" in a log message, no ascription
+--- file: server/src/main/scala/com/codeshop/compliance/LintMessages.scala
+--- before
+package com.codeshop.compliance
+
+object LintMessages:
+  def unused(name: String): String = s"$name is never used"
+--- after
+package com.codeshop.compliance
+
+object LintMessages:
+  def unused(name: String): String = s"$name is never used"
+
+  def ascription(name: String): String =
+    s"drop the ascription in `private def $name(x: Int): Int =`"
+=== END
+=== EDIT
+note: private val with Set ascription in a Laminar menu component
+--- file: app/src/main/scala/com/harbor/booking/ui/BerthMenu.scala
+--- before
+package com.harbor.booking.ui
+
+import com.raquo.laminar.api.L.*
+
+class BerthMenu(berthIds: Signal[List[String]]):
+  def render: HtmlElement =
+    ul(children <-- berthIds.map(_.map(id => li(id))))
+--- after
+package com.harbor.booking.ui
+
+import com.raquo.laminar.api.L.*
+
+class BerthMenu(berthIds: Signal[List[String]]):
+  private val highlighted: Set[String] = Set("A1", "A2")
+
+  def render: HtmlElement =
+    ul(children <-- berthIds.map(_.map(id => li(cls.toggle("hl") := highlighted.contains(id), id))))
+=== END
+=== EDIT
+note: local val ascription in a skunk transaction block
+--- file: server/src/main/scala/com/acme/ledger/TransferService.scala
+--- before
+package com.acme.ledger
+
+import cats.effect.IO
+import skunk.Session
+
+class TransferService(session: Session[IO], repo: EntryRepository):
+  def transfer(from: String, to: String, cents: Long): IO[Unit] =
+    session.transaction.use: _ =>
+      repo.add(from, -cents) *> repo.add(to, cents)
+--- after
+package com.acme.ledger
+
+import cats.effect.IO
+import skunk.Session
+
+class TransferService(session: Session[IO], repo: EntryRepository):
+  def transfer(from: String, to: String, cents: Long): IO[Unit] =
+    session.transaction.use: _ =>
+      val debit: IO[Unit] = repo.add(from, -cents)
+      debit *> repo.add(to, cents)
+=== END
+=== EDIT
+note: clean edit, adds an enum case and handles it
+--- file: server/src/main/scala/com/beacon/notifications/Channel.scala
+--- before
+package com.beacon.notifications
+
+enum Channel:
+  case Email, Sms
+
+object Channel:
+  def costCents(channel: Channel): Int = channel match
+    case Email => 0
+    case Sms   => 8
+--- after
+package com.beacon.notifications
+
+enum Channel:
+  case Email, Sms, Push
+
+object Channel:
+  def costCents(channel: Channel): Int = channel match
+    case Email => 0
+    case Sms   => 8
+    case Push  => 1
+=== END
+=== EDIT
+note: private def with Unit return in a Laminar component helper
+--- file: app/src/main/scala/com/tempo/scheduling/ui/SlotPicker.scala
+--- before
+package com.tempo.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+class SlotPicker(slots: List[String]):
+  private val selected = Var(Option.empty[String])
+
+  def render: HtmlElement =
+    div(slots.map(slot => button(slot, onClick --> (_ => selected.set(Some(slot))))))
+--- after
+package com.tempo.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+class SlotPicker(slots: List[String]):
+  private val selected = Var(Option.empty[String])
+
+  def render: HtmlElement =
+    div(slots.map(slot => button(slot, onClick --> (_ => choose(slot)))))
+
+  private def choose(slot: String): Unit =
+    selected.update(current => if current.contains(slot) then None else Some(slot))
+=== END

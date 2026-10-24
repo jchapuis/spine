@@ -1,0 +1,633 @@
+=== EDIT
+note: inventory reservation with var map inside class
+--- file: server/src/main/scala/com/greenleaf/inventory/ReservationBook.scala
+--- before
+package com.greenleaf.inventory
+
+class ReservationBook:
+  def reserved(sku: String): Int = 0
+--- after
+package com.greenleaf.inventory
+
+class ReservationBook:
+  private var reservations = Map.empty[String, Int]
+
+  def reserved(sku: String): Int = reservations.getOrElse(sku, 0)
+
+  def reserve(sku: String, quantity: Int): Unit =
+    reservations = reservations.updated(sku, reserved(sku) + quantity)
+=== END
+=== EDIT
+note: reservations held in Ref, clean
+--- file: server/src/main/scala/com/greenleaf/inventory/HoldRegistry.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class HoldRegistry(holds: Ref[IO, Map[String, Int]]):
+  def held(sku: String): IO[Int] = holds.get.map(_.getOrElse(sku, 0))
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class HoldRegistry(holds: Ref[IO, Map[String, Int]]):
+  def held(sku: String): IO[Int] = holds.get.map(_.getOrElse(sku, 0))
+
+  def hold(sku: String, quantity: Int): IO[Unit] =
+    holds.update(current => current.updated(sku, current.getOrElse(sku, 0) + quantity))
+=== END
+=== EDIT
+note: while loop pulling messages until a sentinel
+--- file: server/src/main/scala/com/acme/messaging/MailboxReader.scala
+--- before
+package com.acme.messaging
+
+trait Mailbox:
+  def next(): Option[String]
+
+object MailboxReader:
+  def head(mailbox: Mailbox): Option[String] = mailbox.next()
+--- after
+package com.acme.messaging
+
+import scala.collection.mutable.ArrayBuffer
+
+trait Mailbox:
+  def next(): Option[String]
+
+object MailboxReader:
+  def head(mailbox: Mailbox): Option[String] = mailbox.next()
+
+  def readUntilStop(mailbox: Mailbox): Vector[String] =
+    val messages = ArrayBuffer.empty[String]
+    var current = mailbox.next()
+    while current.exists(_ != "STOP") do
+      messages ++= current
+      current = mailbox.next()
+    messages.toVector
+=== END
+=== EDIT
+note: read until stop with unfold, clean
+--- file: server/src/main/scala/com/acme/messaging/InboxReader.scala
+--- before
+package com.acme.messaging
+
+trait Inbox:
+  def next(): Option[String]
+
+object InboxReader:
+  def head(inbox: Inbox): Option[String] = inbox.next()
+--- after
+package com.acme.messaging
+
+trait Inbox:
+  def next(): Option[String]
+
+object InboxReader:
+  def head(inbox: Inbox): Option[String] = inbox.next()
+
+  def readUntilStop(inbox: Inbox): Vector[String] =
+    Iterator.continually(inbox.next()).takeWhile(_.exists(_ != "STOP")).flatten.toVector
+=== END
+=== EDIT
+note: sealed trait for HTTP retry decision
+--- file: server/src/main/scala/com/acme/http/RetryDecision.scala
+--- before
+package com.acme.http
+
+object RetryDecision
+--- after
+package com.acme.http
+
+import scala.concurrent.duration.FiniteDuration
+
+sealed trait RetryDecision
+
+object RetryDecision:
+  case class RetryAfter(delay: FiniteDuration) extends RetryDecision
+  case object GiveUp extends RetryDecision
+=== END
+=== EDIT
+note: return inside traverse lambda in IO code
+--- file: server/src/main/scala/com/acme/orders/OrderImporter.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class OrderImporter(save: String => IO[Unit]):
+  def importAll(orderIds: List[String]): IO[Unit] =
+    orderIds.traverse(save).void
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class OrderImporter(save: String => IO[Unit]):
+  def importAll(orderIds: List[String]): IO[Unit] =
+    orderIds.traverse: orderId =>
+      if orderId.isBlank then return IO.unit
+      save(orderId)
+    .void
+=== END
+=== EDIT
+note: skip blanks with filter, clean
+--- file: server/src/main/scala/com/acme/orders/CustomerImporter.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class CustomerImporter(save: String => IO[Unit]):
+  def importAll(customerIds: List[String]): IO[Unit] =
+    customerIds.traverse(save).void
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class CustomerImporter(save: String => IO[Unit]):
+  def importAll(customerIds: List[String]): IO[Unit] =
+    customerIds.filterNot(_.isBlank).traverse_(save)
+=== END
+=== EDIT
+note: frontend dropdown open state as var outside signal graph
+--- file: app/src/main/scala/com/orbit/ui/Dropdown.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Dropdown:
+  def apply(options: List[String]): HtmlElement =
+    select(options.map(label => option(label)))
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Dropdown:
+  def apply(options: List[String]): HtmlElement =
+    var selectedIndex = -1
+    select(
+      options.map(label => option(label)),
+      onChange.mapToValue --> (value => selectedIndex = options.indexOf(value))
+    )
+=== END
+=== EDIT
+note: dropdown with Var selected value, clean
+--- file: app/src/main/scala/com/orbit/ui/LanguagePicker.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object LanguagePicker:
+  def apply(languages: List[String]): HtmlElement =
+    select(languages.map(code => option(code)))
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object LanguagePicker:
+  def apply(languages: List[String], selected: Var[String]): HtmlElement =
+    select(
+      languages.map(code => option(code, value := code)),
+      controlled(value <-- selected.signal, onChange.mapToValue --> selected.writer)
+    )
+=== END
+=== EDIT
+note: sealed trait for ws messages with nested case classes in companion
+--- file: server/src/main/scala/com/acme/realtime/ServerMessage.scala
+--- before
+--- after
+package com.acme.realtime
+
+import io.circe.Json
+
+sealed trait ServerMessage
+
+object ServerMessage:
+  case class Snapshot(state: Json) extends ServerMessage
+  case class Patch(path: String, value: Json) extends ServerMessage
+  case object Heartbeat extends ServerMessage
+=== END
+=== EDIT
+note: ws messages as enum deriving codec, clean
+--- file: server/src/main/scala/com/acme/realtime/ClientMessage.scala
+--- before
+--- after
+package com.acme.realtime
+
+import io.circe.Codec
+
+enum ClientMessage derives Codec.AsObject:
+  case Subscribe(topic: String)
+  case Unsubscribe(topic: String)
+  case Ping
+=== END
+=== EDIT
+note: var for running checksum in a loop over bytes
+--- file: server/src/main/scala/com/datahive/storage/Crc.scala
+--- before
+package com.datahive.storage
+
+object Crc:
+  val polynomial = 0xedb88320L
+--- after
+package com.datahive.storage
+
+object Crc:
+  val polynomial = 0xedb88320L
+
+  def xorAll(bytes: Array[Byte]): Int =
+    var accumulator = 0
+    for byte <- bytes do accumulator ^= byte
+    accumulator
+=== END
+=== EDIT
+note: while loop shifting bits in a bit counter
+--- file: server/src/main/scala/com/datahive/storage/Bits.scala
+--- before
+package com.datahive.storage
+
+object Bits:
+  def isPowerOfTwo(value: Long): Boolean = value > 0 && (value & (value - 1)) == 0
+--- after
+package com.datahive.storage
+
+object Bits:
+  def isPowerOfTwo(value: Long): Boolean = value > 0 && (value & (value - 1)) == 0
+
+  def highestBit(value: Long): Int =
+    var shifted = value
+    var position = -1
+    while shifted != 0 do
+      shifted = shifted >>> 1
+      position += 1
+    position
+=== END
+=== EDIT
+note: highest bit via java builtin, fix
+--- file: server/src/main/scala/com/datahive/storage/BitOps.scala
+--- before
+package com.datahive.storage
+
+object BitOps:
+  def highestBit(value: Long): Int =
+    var shifted = value
+    var position = -1
+    while shifted != 0 do
+      shifted = shifted >>> 1
+      position += 1
+    position
+--- after
+package com.datahive.storage
+
+object BitOps:
+  def highestBit(value: Long): Int =
+    63 - java.lang.Long.numberOfLeadingZeros(value)
+=== END
+=== EDIT
+note: early return in a for-yield helper of a service
+--- file: server/src/main/scala/com/skyline/weather/ForecastService.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+case class Forecast(region: String, highCelsius: Double)
+
+class ForecastService(load: String => IO[Option[Forecast]]):
+  def forRegion(region: String): IO[Option[Forecast]] = load(region)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+
+case class Forecast(region: String, highCelsius: Double)
+
+class ForecastService(load: String => IO[Option[Forecast]]):
+  def forRegion(region: String): IO[Option[Forecast]] = load(region)
+
+  def isHeatwave(region: String): IO[Boolean] =
+    if region.isEmpty then return IO.pure(false)
+    forRegion(region).map(_.exists(_.highCelsius > 32))
+=== END
+=== EDIT
+note: heatwave check without early return, clean
+--- file: server/src/main/scala/com/skyline/weather/FrostService.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+case class Outlook(region: String, lowCelsius: Double)
+
+class FrostService(load: String => IO[Option[Outlook]]):
+  def forRegion(region: String): IO[Option[Outlook]] = load(region)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+
+case class Outlook(region: String, lowCelsius: Double)
+
+class FrostService(load: String => IO[Option[Outlook]]):
+  def forRegion(region: String): IO[Option[Outlook]] = load(region)
+
+  def isFrost(region: String): IO[Boolean] =
+    if region.isEmpty then IO.pure(false)
+    else forRegion(region).map(_.exists(_.lowCelsius < 0))
+=== END
+=== EDIT
+note: sealed abstract class with constructor args for map projections
+--- file: server/src/main/scala/com/cartograph/maps/Projection.scala
+--- before
+--- after
+package com.cartograph.maps
+
+sealed abstract class Projection(val epsg: Int, val name: String)
+
+case object WebMercator extends Projection(3857, "Web Mercator")
+case object Wgs84 extends Projection(4326, "WGS 84")
+case object SwissLv95 extends Projection(2056, "CH1903+ / LV95")
+=== END
+=== EDIT
+note: projections as parameterised enum, clean
+--- file: server/src/main/scala/com/cartograph/maps/Datum.scala
+--- before
+--- after
+package com.cartograph.maps
+
+enum Datum(val epsg: Int):
+  case WebMercator extends Datum(3857)
+  case Wgs84 extends Datum(4326)
+  case SwissLv95 extends Datum(2056)
+
+object Datum:
+  def byEpsg(code: Int): Option[Datum] = values.find(_.epsg == code)
+=== END
+=== EDIT
+note: refactor test to use local val instead of var, fix
+--- file: server/src/test/scala/com/acme/billing/InvoiceTotalsSuite.scala
+--- before
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+  test("sums line items"):
+    var items = List(LineItem("a", 2, 100L))
+    items = LineItem("b", 1, 50L) :: items
+    assertEquals(InvoiceTotals.totalCents(items), 250L)
+--- after
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+  test("sums line items"):
+    val items = List(LineItem("b", 1, 50L), LineItem("a", 2, 100L))
+    assertEquals(InvoiceTotals.totalCents(items), 250L)
+=== END
+=== EDIT
+note: var used in munit fixture setup
+--- file: server/src/test/scala/com/acme/notifications/SmsSenderSuite.scala
+--- before
+package com.acme.notifications
+
+import munit.FunSuite
+
+class SmsSenderSuite extends FunSuite:
+  test("sends once"):
+    assert(SmsSender(_ => true).sendOnce("hi"))
+--- after
+package com.acme.notifications
+
+import munit.FunSuite
+
+class SmsSenderSuite extends FunSuite:
+  test("sends once"):
+    assert(SmsSender(_ => true).sendOnce("hi"))
+
+  test("gives up after max attempts"):
+    var attempts = 0
+    val sender = SmsSender: _ =>
+      attempts += 1
+      false
+    assert(!sender.sendWithRetry("hi", 3))
+    assertEquals(attempts, 3)
+=== END
+=== EDIT
+note: add circe codec, clean
+--- file: server/src/main/scala/com/acme/orders/OrderDto.scala
+--- before
+package com.acme.orders
+
+case class OrderDto(id: String, totalCents: Long)
+--- after
+package com.acme.orders
+
+import io.circe.Codec
+
+case class OrderDto(id: String, totalCents: Long, currency: String) derives Codec.AsObject
+=== END
+=== EDIT
+note: add logging to service method, clean
+--- file: server/src/main/scala/com/tempo/scheduling/ReminderService.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class ReminderService(send: String => IO[Unit])(using logger: Logger[IO]):
+  def remind(userId: String): IO[Unit] = send(userId)
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class ReminderService(send: String => IO[Unit])(using logger: Logger[IO]):
+  def remind(userId: String): IO[Unit] =
+    logger.info(s"Sending reminder to $userId") *> send(userId)
+=== END
+=== EDIT
+note: while loop with nested condition in matrix fill
+--- file: server/src/main/scala/com/northwind/routing/DistanceMatrix.scala
+--- before
+package com.northwind.routing
+
+object DistanceMatrix:
+  def size(stops: Vector[String]): Int = stops.size * stops.size
+--- after
+package com.northwind.routing
+
+object DistanceMatrix:
+  def size(stops: Vector[String]): Int = stops.size * stops.size
+
+  def build(stops: Vector[String], distance: (String, String) => Double): Array[Array[Double]] =
+    val matrix = Array.ofDim[Double](stops.size, stops.size)
+    for row <- stops.indices do
+      var column = 0
+      while column < stops.size do
+        matrix(row)(column) = distance(stops(row), stops(column))
+        column += 1
+    matrix
+=== END
+=== EDIT
+note: matrix via tabulate, clean
+--- file: server/src/main/scala/com/northwind/routing/TravelTimes.scala
+--- before
+package com.northwind.routing
+
+object TravelTimes:
+  def size(stops: Vector[String]): Int = stops.size * stops.size
+--- after
+package com.northwind.routing
+
+object TravelTimes:
+  def size(stops: Vector[String]): Int = stops.size * stops.size
+
+  def build(stops: Vector[String], minutes: (String, String) => Double): Vector[Vector[Double]] =
+    Vector.tabulate(stops.size, stops.size)((row, column) => minutes(stops(row), stops(column)))
+=== END
+=== EDIT
+note: sealed trait for feature flag source
+--- file: server/src/main/scala/com/acme/config/FlagSource.scala
+--- before
+package com.acme.config
+
+object FlagSource:
+  val envPrefix = "FLAG_"
+--- after
+package com.acme.config
+
+sealed trait FlagSource
+case class FromEnv(variable: String) extends FlagSource
+case class FromFile(path: String) extends FlagSource
+case object Hardcoded extends FlagSource
+
+object FlagSource:
+  val envPrefix = "FLAG_"
+=== END
+=== EDIT
+note: rename field in file with pre-existing return; edit elsewhere
+--- file: server/src/main/scala/com/legacy/search/QueryParser.scala
+--- before
+package com.legacy.search
+
+case class Query(terms: List[String], limit: Int)
+
+object QueryParser:
+  def parse(raw: String): Option[Query] =
+    if raw.isBlank then return None
+    Some(Query(raw.split(' ').toList, 20))
+--- after
+package com.legacy.search
+
+case class Query(terms: List[String], maxResults: Int)
+
+object QueryParser:
+  def parse(raw: String): Option[Query] =
+    if raw.isBlank then return None
+    Some(Query(raw.split(' ').toList, 20))
+=== END
+=== EDIT
+note: return in default parameter guard within an object method on Laminar side
+--- file: app/src/main/scala/com/orbit/ui/Formatters.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Formatters:
+  def price(cents: Long): String = f"${cents / 100.0}%.2f"
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Formatters:
+  def price(cents: Long): String = f"${cents / 100.0}%.2f"
+
+  def priceLabel(cents: Long): HtmlElement =
+    if cents == 0 then return span(cls := "free", "Free")
+    span(cls := "price", price(cents))
+=== END
+=== EDIT
+note: var assigned in try block for legacy parse
+--- file: server/src/main/scala/com/legacy/config/PortParser.scala
+--- before
+package com.legacy.config
+
+object PortParser:
+  val fallbackPort = 8080
+--- after
+package com.legacy.config
+
+object PortParser:
+  val fallbackPort = 8080
+
+  def parse(raw: String): Int =
+    var port = fallbackPort
+    try port = raw.trim.toInt
+    catch case _: NumberFormatException => ()
+    port
+=== END
+=== EDIT
+note: rule kind sealed trait in test helpers
+--- file: server/src/test/scala/com/acme/rules/Generators.scala
+--- before
+package com.acme.rules
+
+import org.scalacheck.Gen
+
+object Generators:
+  val literal: Gen[Int] = Gen.choose(-100, 100)
+--- after
+package com.acme.rules
+
+import org.scalacheck.Gen
+
+object Generators:
+  val literal: Gen[Int] = Gen.choose(-100, 100)
+
+  sealed trait Shape
+  case class Leaf(value: Int) extends Shape
+  case class Branch(left: Shape, right: Shape) extends Shape
+=== END
+=== EDIT
+note: add a test for enum values, clean
+--- file: server/src/test/scala/com/keystone/auth/RoleSuite.scala
+--- before
+package com.keystone.auth
+
+import munit.FunSuite
+
+class RoleSuite extends FunSuite:
+  test("admin can write"):
+    assert(Role.Admin.canWrite)
+--- after
+package com.keystone.auth
+
+import munit.FunSuite
+
+class RoleSuite extends FunSuite:
+  test("admin can write"):
+    assert(Role.Admin.canWrite)
+
+  test("viewer and auditor are read only"):
+    assertEquals(Role.values.filterNot(_.canWrite).toList, List(Role.Viewer, Role.Auditor))
+=== END

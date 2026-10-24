@@ -1,0 +1,791 @@
+=== EDIT
+note: add a lookup that returns null when the invoice is unknown
+--- file: server/src/main/scala/com/acme/billing/InvoiceCache.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.kernel.Ref
+
+class InvoiceCache(state: Ref[IO, Map[InvoiceId, Invoice]]):
+
+  def put(invoice: Invoice): IO[Unit] =
+    state.update(_.updated(invoice.id, invoice))
+
+  def size: IO[Int] =
+    state.get.map(_.size)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.kernel.Ref
+
+class InvoiceCache(state: Ref[IO, Map[InvoiceId, Invoice]]):
+
+  def put(invoice: Invoice): IO[Unit] =
+    state.update(_.updated(invoice.id, invoice))
+
+  def size: IO[Int] =
+    state.get.map(_.size)
+
+  def find(id: InvoiceId): IO[Invoice] =
+    state.get.map(_.getOrElse(id, null))
+=== END
+
+=== EDIT
+note: throw when a route has no waypoints
+--- file: server/src/main/scala/com/northwind/routing/RoutePlanner.scala
+--- before
+package com.northwind.routing
+
+import cats.syntax.foldable.*
+
+object RoutePlanner:
+
+  def totalDistance(route: Route): Kilometers =
+    route.legs.foldMap(_.distance)
+
+  def firstStop(route: Route): Waypoint =
+    route.waypoints.head
+--- after
+package com.northwind.routing
+
+import cats.syntax.foldable.*
+
+object RoutePlanner:
+
+  def totalDistance(route: Route): Kilometers =
+    route.legs.foldMap(_.distance)
+
+  def firstStop(route: Route): Waypoint =
+    route.waypoints.headOption match
+      case Some(stop) => stop
+      case None       => throw new IllegalStateException(s"route ${route.id} has no waypoints")
+=== END
+
+=== EDIT
+note: cast the decoded payload to the event type
+--- file: server/src/main/scala/com/skyline/weather/StationEventDecoder.scala
+--- before
+package com.skyline.weather
+
+import io.circe.Json
+import io.circe.parser.parse
+
+object StationEventDecoder:
+
+  def raw(payload: String): Either[String, Json] =
+    parse(payload).left.map(_.message)
+--- after
+package com.skyline.weather
+
+import io.circe.Json
+import io.circe.parser.parse
+
+object StationEventDecoder:
+
+  def raw(payload: String): Either[String, Json] =
+    parse(payload).left.map(_.message)
+
+  def reading(event: Any): StationReading =
+    event.asInstanceOf[StationReading]
+=== END
+
+=== EDIT
+note: filter shipments by type with isInstanceOf
+--- file: server/src/main/scala/com/stockly/inventory/ShipmentFilter.scala
+--- before
+package com.stockly.inventory
+
+object ShipmentFilter:
+
+  def outbound(shipments: List[Shipment]): List[Shipment] =
+    shipments.filter(_.direction == Direction.Outbound)
+--- after
+package com.stockly.inventory
+
+object ShipmentFilter:
+
+  def outbound(shipments: List[Shipment]): List[Shipment] =
+    shipments.filter(_.direction == Direction.Outbound)
+
+  def palletised(shipments: List[Shipment]): List[Shipment] =
+    shipments.filter(_.packaging.isInstanceOf[Packaging.Pallet])
+=== END
+
+=== EDIT
+note: close the socket in finalize
+--- file: server/src/main/scala/com/telio/messaging/BrokerSocket.scala
+--- before
+package com.telio.messaging
+
+import java.net.Socket
+
+class BrokerSocket(host: String, port: Int):
+
+  private val socket = new Socket(host, port)
+
+  def send(bytes: Array[Byte]): Unit =
+    socket.getOutputStream.write(bytes)
+--- after
+package com.telio.messaging
+
+import java.net.Socket
+
+class BrokerSocket(host: String, port: Int):
+
+  private val socket = new Socket(host, port)
+
+  def send(bytes: Array[Byte]): Unit =
+    socket.getOutputStream.write(bytes)
+
+  override def finalize(): Unit =
+    socket.close()
+=== END
+
+=== EDIT
+note: build the batch with fromListUnsafe after a nonEmpty guard
+--- file: server/src/main/scala/com/acme/payments/SettlementBatcher.scala
+--- before
+package com.acme.payments
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class SettlementBatcher(gateway: SettlementGateway):
+
+  def submit(batch: NonEmptyList[Settlement]): IO[BatchId] =
+    gateway.submit(batch)
+--- after
+package com.acme.payments
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class SettlementBatcher(gateway: SettlementGateway):
+
+  def submit(batch: NonEmptyList[Settlement]): IO[BatchId] =
+    gateway.submit(batch)
+
+  def submitAll(settlements: List[Settlement]): IO[Option[BatchId]] =
+    if settlements.isEmpty then IO.pure(None)
+    else submit(NonEmptyList.fromListUnsafe(settlements)).map(Some(_))
+=== END
+
+=== EDIT
+note: return Option instead of null for unknown station
+--- file: server/src/main/scala/com/skyline/weather/StationRegistry.scala
+--- before
+package com.skyline.weather
+
+class StationRegistry(stations: Map[StationCode, Station]):
+
+  def all: List[Station] =
+    stations.values.toList.sortBy(_.name)
+--- after
+package com.skyline.weather
+
+class StationRegistry(stations: Map[StationCode, Station]):
+
+  def all: List[Station] =
+    stations.values.toList.sortBy(_.name)
+
+  def find(code: StationCode): Option[Station] =
+    stations.get(code)
+=== END
+
+=== EDIT
+note: raise a typed error instead of throwing on a missing tenant
+--- file: server/src/main/scala/com/gatekeep/auth/TenantResolver.scala
+--- before
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class TenantResolver(repository: TenantRepository):
+
+  def resolve(host: String): IO[Tenant] =
+    repository.findByHost(host).flatMap:
+      case Some(tenant) => IO.pure(tenant)
+      case None         => IO(throw new NoSuchElementException(s"no tenant for $host"))
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class TenantResolver(repository: TenantRepository):
+
+  def resolve(host: String): IO[Tenant] =
+    repository.findByHost(host).flatMap:
+      case Some(tenant) => IO.pure(tenant)
+      case None         => IO.raiseError(AuthError.UnknownTenant(host))
+=== END
+
+=== EDIT
+note: pattern match on the shape instead of isInstanceOf
+--- file: server/src/main/scala/com/cartograph/maps/LayerStyler.scala
+--- before
+package com.cartograph.maps
+
+object LayerStyler:
+
+  def strokeWidth(feature: Feature): Int =
+    feature.geometry match
+      case _: Geometry.Line    => 2
+      case _: Geometry.Polygon => 1
+      case _: Geometry.Point   => 0
+--- after
+package com.cartograph.maps
+
+object LayerStyler:
+
+  def strokeWidth(feature: Feature): Int =
+    feature.geometry match
+      case _: Geometry.Line    => 2
+      case _: Geometry.Polygon => 1
+      case _: Geometry.Point   => 0
+
+  def fillable(feature: Feature): Boolean =
+    feature.geometry match
+      case _: Geometry.Polygon => true
+      case _                   => false
+=== END
+
+=== EDIT
+note: use NonEmptyList.fromList and surface the empty case
+--- file: server/src/main/scala/com/planwise/scheduling/ShiftRoster.scala
+--- before
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+
+object ShiftRoster:
+
+  def onCall(shifts: List[Shift]): List[Shift] =
+    shifts.filter(_.onCall)
+--- after
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+
+object ShiftRoster:
+
+  def onCall(shifts: List[Shift]): List[Shift] =
+    shifts.filter(_.onCall)
+
+  def onCallRoster(shifts: List[Shift]): Either[RosterError, NonEmptyList[Shift]] =
+    NonEmptyList.fromList(onCall(shifts)).toRight(RosterError.NobodyOnCall)
+=== END
+
+=== EDIT
+note: add a null check on the header value from the servlet-style request
+--- file: server/src/main/scala/com/gatekeep/auth/BearerExtractor.scala
+--- before
+package com.gatekeep.auth
+
+import org.http4s.Request
+import org.http4s.headers.Authorization
+
+object BearerExtractor:
+
+  def token[F[_]](request: Request[F]): Option[Authorization] =
+    request.headers.get[Authorization]
+--- after
+package com.gatekeep.auth
+
+import org.http4s.Request
+import org.http4s.headers.Authorization
+
+object BearerExtractor:
+
+  def token[F[_]](request: Request[F]): Option[Authorization] =
+    request.headers.get[Authorization]
+
+  def rawToken(header: String): Option[String] =
+    if header == null || !header.startsWith("Bearer ") then None
+    else Some(header.drop(7))
+=== END
+
+=== EDIT
+note: rename a field in the order DTO
+--- file: server/src/main/scala/com/acme/orders/OrderDto.scala
+--- before
+package com.acme.orders
+
+import io.circe.Codec
+
+case class OrderDto(id: String, customer: String, lines: List[OrderLineDto]) derives Codec.AsObject
+--- after
+package com.acme.orders
+
+import io.circe.Codec
+
+case class OrderDto(id: String, customerId: String, lines: List[OrderLineDto]) derives Codec.AsObject
+=== END
+
+=== EDIT
+note: throw from a validation helper on negative quantity
+--- file: server/src/main/scala/com/stockly/inventory/StockAdjustment.scala
+--- before
+package com.stockly.inventory
+
+case class StockAdjustment(sku: Sku, delta: Int, reason: AdjustmentReason)
+
+object StockAdjustment:
+
+  def restock(sku: Sku, quantity: Int): StockAdjustment =
+    StockAdjustment(sku, quantity, AdjustmentReason.Restock)
+--- after
+package com.stockly.inventory
+
+case class StockAdjustment(sku: Sku, delta: Int, reason: AdjustmentReason)
+
+object StockAdjustment:
+
+  def restock(sku: Sku, quantity: Int): StockAdjustment =
+    if quantity <= 0 then
+      throw new IllegalArgumentException(s"restock quantity must be positive, got $quantity")
+    StockAdjustment(sku, quantity, AdjustmentReason.Restock)
+=== END
+
+=== EDIT
+note: downcast the throwable to inspect the SQL state
+--- file: server/src/main/scala/com/ledgerly/billing/LedgerRepository.scala
+--- before
+package com.ledgerly.billing
+
+import cats.effect.IO
+import skunk.Session
+import skunk.exception.PostgresErrorException
+
+class LedgerRepository(session: Session[IO]):
+
+  def append(entry: LedgerEntry): IO[Unit] =
+    session.execute(LedgerSql.insert)(entry).void
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import skunk.Session
+import skunk.exception.PostgresErrorException
+
+class LedgerRepository(session: Session[IO]):
+
+  def append(entry: LedgerEntry): IO[Unit] =
+    session.execute(LedgerSql.insert)(entry).void.handleErrorWith: error =>
+      val state = error.asInstanceOf[PostgresErrorException].code
+      IO.raiseError(LedgerError.WriteFailed(state))
+=== END
+
+=== EDIT
+note: recover only Postgres errors with a typed pattern match
+--- file: server/src/main/scala/com/ledgerly/billing/AccountRepository.scala
+--- before
+package com.ledgerly.billing
+
+import cats.effect.IO
+import skunk.Session
+
+class AccountRepository(session: Session[IO]):
+
+  def open(account: Account): IO[Unit] =
+    session.execute(AccountSql.insert)(account).void
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import skunk.Session
+import skunk.exception.PostgresErrorException
+
+class AccountRepository(session: Session[IO]):
+
+  def open(account: Account): IO[Unit] =
+    session.execute(AccountSql.insert)(account).void.recoverWith:
+      case error: PostgresErrorException if error.code == "23505" =>
+        IO.raiseError(AccountError.AlreadyExists(account.id))
+=== END
+
+=== EDIT
+note: add a log line mentioning "null" in a message string
+--- file: server/src/main/scala/com/telio/messaging/InboundMapper.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class InboundMapper(using logger: Logger[IO]):
+
+  def map(frame: Frame): IO[Option[Message]] =
+    IO.pure(frame.body.map(Message(frame.topic, _)))
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class InboundMapper(using logger: Logger[IO]):
+
+  def map(frame: Frame): IO[Option[Message]] =
+    frame.body match
+      case Some(body) => IO.pure(Some(Message(frame.topic, body)))
+      case None       => logger.warn(s"frame on ${frame.topic} had a null body, dropping").as(None)
+=== END
+
+=== EDIT
+note: Laminar component checks event target with isInstanceOf
+--- file: app/src/main/scala/com/cartograph/maps/ui/LayerToggle.scala
+--- before
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+
+object LayerToggle:
+
+  def apply(layer: Var[Boolean], label: String): HtmlElement =
+    label(
+      input(typ := "checkbox", controlled(checked <-- layer.signal, onClick.mapToChecked --> layer.writer)),
+      span(label)
+    )
+--- after
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+
+object LayerToggle:
+
+  def apply(layer: Var[Boolean], text: String): HtmlElement =
+    label(
+      input(typ := "checkbox", controlled(checked <-- layer.signal, onClick.mapToChecked --> layer.writer)),
+      span(text),
+      onClick.filter(_.target.isInstanceOf[dom.HTMLSpanElement]) --> (_ => layer.update(!_))
+    )
+=== END
+
+=== EDIT
+note: add retry config to the weather client
+--- file: server/src/main/scala/com/skyline/weather/ForecastClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class ForecastClient(client: Client[IO], baseUri: ForecastUri):
+
+  def hourly(location: Location): IO[List[HourlyForecast]] =
+    client.expect[List[HourlyForecast]](baseUri.hourly(location))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+import org.http4s.client.middleware.{Retry, RetryPolicy}
+import scala.concurrent.duration.*
+
+class ForecastClient(client: Client[IO], baseUri: ForecastUri):
+
+  private val retrying = Retry(RetryPolicy[IO](RetryPolicy.exponentialBackoff(2.seconds, 3)))(client)
+
+  def hourly(location: Location): IO[List[HourlyForecast]] =
+    retrying.expect[List[HourlyForecast]](baseUri.hourly(location))
+=== END
+
+=== EDIT
+note: replace fromListUnsafe with fromList, raising on empty input
+--- file: server/src/main/scala/com/planwise/scheduling/SlotAllocator.scala
+--- before
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class SlotAllocator(calendar: CalendarAlgebra[IO]):
+
+  def allocate(requests: List[SlotRequest]): IO[Allocation] =
+    calendar.allocate(NonEmptyList.fromListUnsafe(requests))
+--- after
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class SlotAllocator(calendar: CalendarAlgebra[IO]):
+
+  def allocate(requests: List[SlotRequest]): IO[Allocation] =
+    NonEmptyList.fromList(requests) match
+      case Some(batch) => calendar.allocate(batch)
+      case None        => IO.raiseError(SchedulingError.NoRequests)
+=== END
+
+=== EDIT
+note: add a test for the empty invoice total
+--- file: server/src/test/scala/com/acme/billing/InvoiceTotalsSuite.scala
+--- before
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+
+  test("total sums line amounts"):
+    assertEquals(InvoiceTotals.total(InvoiceFixtures.twoLines), Amount(4200))
+--- after
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+
+  test("total sums line amounts"):
+    assertEquals(InvoiceTotals.total(InvoiceFixtures.twoLines), Amount(4200))
+
+  test("total of an empty invoice is zero"):
+    assertEquals(InvoiceTotals.total(InvoiceFixtures.empty), Amount(0))
+=== END
+
+=== EDIT
+note: default the coupon to null in a case class
+--- file: server/src/main/scala/com/acme/payments/CheckoutRequest.scala
+--- before
+package com.acme.payments
+
+import io.circe.Codec
+
+case class CheckoutRequest(cartId: CartId, currency: Currency) derives Codec.AsObject
+--- after
+package com.acme.payments
+
+import io.circe.Codec
+
+case class CheckoutRequest(cartId: CartId, currency: Currency, coupon: CouponCode = null) derives Codec.AsObject
+=== END
+
+=== EDIT
+note: throw inside a for-comprehension when the quote is stale
+--- file: server/src/main/scala/com/fxdesk/payments/QuoteService.scala
+--- before
+package com.fxdesk.payments
+
+import cats.effect.{Clock, IO}
+
+class QuoteService(quotes: QuoteRepository):
+
+  def latest(pair: CurrencyPair): IO[Quote] =
+    quotes.latest(pair)
+--- after
+package com.fxdesk.payments
+
+import cats.effect.{Clock, IO}
+
+class QuoteService(quotes: QuoteRepository):
+
+  def latest(pair: CurrencyPair): IO[Quote] =
+    for
+      quote <- quotes.latest(pair)
+      now   <- Clock[IO].realTimeInstant
+      _      = if quote.expiresAt.isBefore(now) then throw QuoteError.Stale(pair)
+    yield quote
+=== END
+
+=== EDIT
+note: generic helper casts the decoded value
+--- file: server/src/main/scala/com/stockly/inventory/CatalogImport.scala
+--- before
+package com.stockly.inventory
+
+import fs2.Stream
+import cats.effect.IO
+
+object CatalogImport:
+
+  def rows(lines: Stream[IO, String]): Stream[IO, CatalogRow] =
+    lines.drop(1).map(CatalogRow.parse).collect:
+      case Right(row) => row
+--- after
+package com.stockly.inventory
+
+import fs2.Stream
+import cats.effect.IO
+
+object CatalogImport:
+
+  def rows(lines: Stream[IO, String]): Stream[IO, CatalogRow] =
+    lines.drop(1).map(CatalogRow.parse).collect:
+      case Right(row) => row
+
+  def column[A](row: Map[String, Any], name: String): A =
+    row(name).asInstanceOf[A]
+=== END
+
+=== EDIT
+note: finalize override on a wrapper around a native handle
+--- file: server/src/main/scala/com/cartograph/maps/TileRenderer.scala
+--- before
+package com.cartograph.maps
+
+class TileRenderer(handle: NativeRenderHandle):
+
+  def render(tile: TileCoordinate): Array[Byte] =
+    handle.render(tile.zoom, tile.x, tile.y)
+--- after
+package com.cartograph.maps
+
+class TileRenderer(handle: NativeRenderHandle):
+
+  def render(tile: TileCoordinate): Array[Byte] =
+    handle.render(tile.zoom, tile.x, tile.y)
+
+  override protected def finalize(): Unit =
+    handle.release()
+    super.finalize()
+=== END
+
+=== EDIT
+note: acquire the renderer as a Resource instead of relying on finalize
+--- file: server/src/main/scala/com/cartograph/maps/TileRendererResource.scala
+--- before
+--- after
+package com.cartograph.maps
+
+import cats.effect.{IO, Resource}
+
+object TileRendererResource:
+
+  def make(config: RenderConfig): Resource[IO, TileRenderer] =
+    Resource
+      .make(IO.blocking(NativeRenderHandle.open(config)))(handle => IO.blocking(handle.release()))
+      .map(TileRenderer(_))
+=== END
+
+=== EDIT
+note: tests build a NonEmptyList fixture with fromListUnsafe
+--- file: server/src/test/scala/com/planwise/scheduling/ShiftRosterSuite.scala
+--- before
+package com.planwise.scheduling
+
+import munit.FunSuite
+
+class ShiftRosterSuite extends FunSuite:
+
+  test("onCall keeps only on-call shifts"):
+    assertEquals(ShiftRoster.onCall(ShiftFixtures.week), ShiftFixtures.onCallWeek)
+--- after
+package com.planwise.scheduling
+
+import cats.data.NonEmptyList
+import munit.FunSuite
+
+class ShiftRosterSuite extends FunSuite:
+
+  test("onCall keeps only on-call shifts"):
+    assertEquals(ShiftRoster.onCall(ShiftFixtures.week), ShiftFixtures.onCallWeek)
+
+  test("onCallRoster returns every on-call shift"):
+    val expected = NonEmptyList.fromListUnsafe(ShiftFixtures.onCallWeek)
+    assertEquals(ShiftRoster.onCallRoster(ShiftFixtures.week), Right(expected))
+=== END
+
+=== EDIT
+note: add an endpoint description to the tapir definition
+--- file: server/src/main/scala/com/gatekeep/auth/SessionEndpoints.scala
+--- before
+package com.gatekeep.auth
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object SessionEndpoints:
+
+  val logout: PublicEndpoint[SessionToken, AuthError, Unit, Any] =
+    endpoint.post.in("sessions" / "logout").in(jsonBody[SessionToken]).errorOut(jsonBody[AuthError])
+--- after
+package com.gatekeep.auth
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object SessionEndpoints:
+
+  val logout: PublicEndpoint[SessionToken, AuthError, Unit, Any] =
+    endpoint.post
+      .in("sessions" / "logout")
+      .in(jsonBody[SessionToken])
+      .errorOut(jsonBody[AuthError])
+      .description("Revoke the given session token")
+=== END
+
+=== EDIT
+note: compare with null in a Laminar input handler
+--- file: app/src/main/scala/com/planwise/scheduling/ui/SlotPicker.scala
+--- before
+package com.planwise.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+object SlotPicker:
+
+  def apply(selected: Var[Option[String]], slots: List[String]): HtmlElement =
+    select(
+      slots.map(slot => option(value := slot, slot)),
+      onChange.mapToValue --> (value => selected.set(Some(value)))
+    )
+--- after
+package com.planwise.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+object SlotPicker:
+
+  def apply(selected: Var[Option[String]], slots: List[String]): HtmlElement =
+    select(
+      slots.map(slot => option(value := slot, slot)),
+      onChange.mapToValue --> (value => selected.set(if value == null || value.isEmpty then None else Some(value)))
+    )
+=== END
+
+=== EDIT
+note: identifiers containing throwable and nullable only
+--- file: server/src/main/scala/com/telio/messaging/DeliveryOutcome.scala
+--- before
+package com.telio.messaging
+
+enum DeliveryOutcome:
+  case Delivered(messageId: MessageId)
+  case Rejected(reason: String)
+--- after
+package com.telio.messaging
+
+enum DeliveryOutcome:
+  case Delivered(messageId: MessageId)
+  case Rejected(reason: String)
+  case Failed(throwable: Throwable, nullableReceipt: Option[Receipt])
+=== END
+
+=== EDIT
+note: isInstanceOf check in a test assertion
+--- file: server/src/test/scala/com/gatekeep/auth/TenantResolverSuite.scala
+--- before
+package com.gatekeep.auth
+
+import munit.CatsEffectSuite
+
+class TenantResolverSuite extends CatsEffectSuite:
+
+  test("resolve returns the tenant for a known host"):
+    TenantResolverFixtures.resolver.resolve("acme.example").assertEquals(TenantFixtures.acme)
+--- after
+package com.gatekeep.auth
+
+import munit.CatsEffectSuite
+
+class TenantResolverSuite extends CatsEffectSuite:
+
+  test("resolve returns the tenant for a known host"):
+    TenantResolverFixtures.resolver.resolve("acme.example").assertEquals(TenantFixtures.acme)
+
+  test("resolve fails with UnknownTenant for an unknown host"):
+    TenantResolverFixtures.resolver.resolve("nobody.example").attempt.map: result =>
+      assert(result.left.exists(_.isInstanceOf[AuthError.UnknownTenant]))
+=== END

@@ -1,0 +1,95 @@
+#!/usr/bin/env node
+// Per-edit abide checks for serena's MCP edit tools, which abide does not know.
+//
+//   abide-serena pre  <abide-hook.js>   PreToolUse: remember what the tool is about to change
+//   abide-serena post <abide-hook.js>   PostToolUse: hand each changed file to abide as a Write
+//
+// abide reads Claude Code's Edit/Write/MultiEdit payloads only, so an edit made through serena (replace_content,
+// replace_symbol_body, rename_symbol, ...) got no edit-time check, just the end-of-turn one. abide's Write path needs
+// nothing but the file's content before and after, so this records the "before" in PreToolUse and replays the change
+// as a Write in PostToolUse. abide's own output (a block, a notice) passes straight back to the agent.
+//
+// Single-file tools name their file in relative_path. rename_symbol and safe_delete_symbol also rewrite references
+// elsewhere, so for those the "before" is a `git stash create` snapshot and the changed files come from git.
+import { spawnSync, execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+const MULTI_FILE_TOOLS = new Set(["rename_symbol", "safe_delete_symbol"]);
+const MAX_FILES = 20;
+
+const [phase, abideHook] = process.argv.slice(2);
+if (!["pre", "post"].includes(phase) || !abideHook) {
+  process.stderr.write("usage: abide-serena pre|post <abide-hook.js>\n");
+  process.exit(1);
+}
+
+const input = JSON.parse(readFileSync(0, "utf8"));
+const tool = input.tool_name.split("__").at(-1);
+const stateDir = path.join(tmpdir(), "abide-serena");
+const stateFile = path.join(stateDir, `${input.session_id}-${input.tool_use_id}.json`);
+
+const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+const repoRoot = (cwd) => git(cwd, "rev-parse", "--show-toplevel");
+const readOrNull = (file) => (existsSync(file) ? readFileSync(file, "utf8") : null);
+
+// serena resolves relative_path against its project root, which is the session's repository.
+const targetFile = () => {
+  const rel = input.tool_input.relative_path;
+  const fromCwd = path.resolve(input.cwd, rel);
+  return existsSync(fromCwd) ? fromCwd : path.resolve(repoRoot(input.cwd), rel);
+};
+
+if (phase === "pre") {
+  const root = repoRoot(input.cwd);
+  const state = MULTI_FILE_TOOLS.has(tool)
+    ? { root, ref: git(root, "stash", "create") || git(root, "rev-parse", "HEAD") }
+    : { root, files: { [targetFile()]: readOrNull(targetFile()) } };
+  mkdirSync(stateDir, { recursive: true });
+  writeFileSync(stateFile, JSON.stringify(state));
+  process.exit(0);
+}
+
+if (!existsSync(stateFile)) {
+  process.stderr.write(`abide-serena: no pre-edit snapshot for ${input.tool_use_id}, so this edit is unchecked\n`);
+  process.exit(0);
+}
+const state = JSON.parse(readFileSync(stateFile, "utf8"));
+rmSync(stateFile);
+
+const before = state.ref
+  ? Object.fromEntries(
+      git(state.root, "diff", "--name-only", state.ref)
+        .split("\n")
+        .filter(Boolean)
+        .map((rel) => [path.join(state.root, rel), git(state.root, "show", `${state.ref}:${rel}`)]),
+    )
+  : state.files;
+
+const changed = Object.entries(before)
+  .map(([file, original]) => ({ file, original, after: readOrNull(file) }))
+  .filter(({ original, after }) => after !== null && after !== original);
+if (changed.length > MAX_FILES)
+  process.stderr.write(`abide-serena: ${changed.length} files changed, checking the first ${MAX_FILES}\n`);
+
+const outputs = changed.slice(0, MAX_FILES).map(({ file, original, after }, i) => {
+  const asWrite = {
+    ...input,
+    tool_name: "Write",
+    tool_use_id: changed.length === 1 ? input.tool_use_id : `${input.tool_use_id}#${i}`,
+    tool_input: { file_path: file, content: after },
+    tool_response: { filePath: file, originalFile: original },
+  };
+  const run = spawnSync("node", [abideHook, "post-tool-use"], { input: JSON.stringify(asWrite), encoding: "utf8" });
+  if (run.stderr) process.stderr.write(run.stderr);
+  return run.stdout.trim() ? JSON.parse(run.stdout) : {};
+});
+
+const blocks = outputs.filter((o) => o.decision === "block");
+const notices = outputs.map((o) => o.systemMessage).filter(Boolean);
+const merged = {
+  ...(blocks.length > 0 ? { decision: "block", reason: blocks.map((o) => o.reason).join("\n\n") } : {}),
+  ...(notices.length > 0 ? { systemMessage: notices.join("\n") } : {}),
+};
+if (Object.keys(merged).length > 0) process.stdout.write(`${JSON.stringify(merged)}\n`);

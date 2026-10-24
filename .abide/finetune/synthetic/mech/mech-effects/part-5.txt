@@ -1,0 +1,241 @@
+=== EDIT
+note: unbounded parallel tile warmup
+--- file: server/src/main/scala/com/acme/geo/TileWarmer.scala
+--- before
+package com.acme.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+object TileWarmer:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).evalMap(handle).compile.drain
+--- after
+package com.acme.geo
+
+import cats.effect.IO
+import fs2.Stream
+
+object TileWarmer:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMapUnbounded(handle).compile.drain
+=== END
+=== EDIT
+note: unordered unbounded push fanout
+--- file: server/src/main/scala/com/ridely/push/PushFanout.scala
+--- before
+package com.ridely.push
+
+import cats.effect.IO
+import fs2.Stream
+
+object PushFanout:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMap(4)(handle).compile.drain
+--- after
+package com.ridely.push
+
+import cats.effect.IO
+import fs2.Stream
+
+object PushFanout:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMapUnorderedUnbounded(handle).compile.drain
+=== END
+=== EDIT
+note: braceless unbounded call
+--- file: server/src/main/scala/com/brewly/orders/OrderSync.scala
+--- before
+package com.brewly.orders
+
+import cats.effect.IO
+import fs2.Stream
+
+object OrderSync:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).evalMap(handle).compile.drain
+--- after
+package com.brewly.orders
+
+import cats.effect.IO
+import fs2.Stream
+
+object OrderSync:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMapUnbounded: item =>
+      handle(item).compile.drain
+=== END
+=== EDIT
+note: bounded unordered is fine
+--- file: server/src/main/scala/com/nimbus/weather/StationPoller.scala
+--- before
+package com.nimbus.weather
+
+import cats.effect.IO
+import fs2.Stream
+
+object StationPoller:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).evalMap(handle).compile.drain
+--- after
+package com.nimbus.weather
+
+import cats.effect.IO
+import fs2.Stream
+
+object StationPoller:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMapUnordered(8)(handle).compile.drain
+=== END
+=== EDIT
+note: bounded parEvalMap is fine
+--- file: server/src/main/scala/com/lumen/search/IndexFeeder.scala
+--- before
+package com.lumen.search
+
+import cats.effect.IO
+import fs2.Stream
+
+object IndexFeeder:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).evalMap(handle).compile.drain
+--- after
+package com.lumen.search
+
+import cats.effect.IO
+import fs2.Stream
+
+object IndexFeeder:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMap(16)(handle).compile.drain
+=== END
+=== EDIT
+note: fix: bound the parallelism
+--- file: server/src/main/scala/com/tracko/fleet/BeaconIngest.scala
+--- before
+package com.tracko.fleet
+
+import cats.effect.IO
+import fs2.Stream
+
+object BeaconIngest:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMapUnbounded(handle).compile.drain
+--- after
+package com.tracko.fleet
+
+import cats.effect.IO
+import fs2.Stream
+
+object BeaconIngest:
+  def run(items: List[String], handle: String => IO[Unit]): IO[Unit] =
+    Stream.emits(items).parEvalMap(32)(handle).compile.drain
+=== END
+=== EDIT
+note: Session.single in production db wiring
+--- file: server/src/main/scala/com/parkr/billing/Db.scala
+--- before
+package com.parkr.billing
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Db:
+  def session(host: String, user: String, database: String): Resource[IO, Session[IO]] =
+    Session.pooled[IO](host = host, user = user, database = database)
+--- after
+package com.parkr.billing
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Db:
+  def session(host: String, user: String, database: String): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.single[IO](host = host, user = user, database = database)
+=== END
+=== EDIT
+note: new production module using Session.single
+--- file: server/src/main/scala/com/voltgrid/meters/MeterDb.scala
+--- before
+--- after
+package com.voltgrid.meters
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object MeterDb:
+  def session(host: String, user: String, database: String): Resource[IO, Session[IO]] =
+    Session.single[IO](host = host, user = user, database = database)
+=== END
+=== EDIT
+note: fix: switch to pooled sessions
+--- file: server/src/main/scala/com/harbor/ports/PortDb.scala
+--- before
+package com.harbor.ports
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object PortDb:
+  def session(host: String, user: String, database: String): Resource[IO, Session[IO]] =
+    Session.single[IO](host = host, user = user, database = database)
+--- after
+package com.harbor.ports
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object PortDb:
+  def session(host: String, user: String, database: String): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](host = host, user = user, database = database, max = 8)
+=== END
+=== EDIT
+note: Session.single in a test is allowed
+--- file: server/src/test/scala/com/tixly/events/EventRepositorySuiteDb.scala
+--- before
+--- after
+package com.tixly.events
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object EventRepositorySuiteDb:
+  def session(host: String, user: String, database: String): Resource[IO, Session[IO]] =
+    Session.single[IO](host = host, user = user, database = database)
+=== END
+=== EDIT
+note: pooled session in production is fine
+--- file: server/src/main/scala/com/learnhub/courses/CourseDb.scala
+--- before
+--- after
+package com.learnhub.courses
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object CourseDb:
+  def session(host: String, user: String, database: String): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](host = host, user = user, database = database, max = 4)
+=== END
+=== EDIT
+note: Session.single in it/ fixture
+--- file: server/src/it/scala/com/medidose/doses/DoseDbFixture.scala
+--- before
+--- after
+package com.medidose.doses
+
+import cats.effect.{IO, Resource}
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object DoseDbFixture:
+  def session(host: String, user: String, database: String): Resource[IO, Session[IO]] =
+    Session.single[IO](host = host, user = user, database = database)
+=== END

@@ -1,0 +1,821 @@
+=== EDIT
+note: add a helper that maps invoice lines with a braced lambda
+--- file: server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+--- before
+package com.acme.billing
+
+import cats.syntax.foldable.*
+
+case class InvoiceLine(sku: String, quantity: Int, unitPrice: BigDecimal)
+
+object InvoiceTotals:
+  def subtotal(lines: List[InvoiceLine]): BigDecimal =
+    lines.foldMap(line => line.unitPrice * line.quantity)
+--- after
+package com.acme.billing
+
+import cats.syntax.foldable.*
+
+case class InvoiceLine(sku: String, quantity: Int, unitPrice: BigDecimal)
+
+object InvoiceTotals:
+  def subtotal(lines: List[InvoiceLine]): BigDecimal =
+    lines.foldMap(line => line.unitPrice * line.quantity)
+
+  def skus(lines: List[InvoiceLine]): List[String] =
+    lines.map { line => line.sku.trim.toUpperCase }
+=== END
+
+=== EDIT
+note: route lookup uses flatMap with braces over a multi-line body
+--- file: server/src/main/scala/com/northwind/routing/RouteResolver.scala
+--- before
+package com.northwind.routing
+
+import cats.effect.IO
+
+case class Stop(id: String, lat: Double, lon: Double)
+case class Route(id: String, stops: List[Stop])
+
+trait RouteStore:
+  def find(id: String): IO[Option[Route]]
+
+class RouteResolver(store: RouteStore):
+  def stopsOf(routeId: String): IO[List[Stop]] =
+    store.find(routeId).map(_.fold(List.empty[Stop])(_.stops))
+--- after
+package com.northwind.routing
+
+import cats.effect.IO
+
+case class Stop(id: String, lat: Double, lon: Double)
+case class Route(id: String, stops: List[Stop])
+
+trait RouteStore:
+  def find(id: String): IO[Option[Route]]
+
+class RouteResolver(store: RouteStore):
+  def stopsOf(routeId: String): IO[List[Stop]] =
+    store.find(routeId).map(_.fold(List.empty[Stop])(_.stops))
+
+  def firstStop(routeId: String): IO[Option[Stop]] =
+    stopsOf(routeId).flatMap { stops =>
+      IO.pure(stops.headOption)
+    }
+=== END
+
+=== EDIT
+note: partial-function collect in braces over weather readings
+--- file: server/src/main/scala/com/skyline/weather/ReadingFilter.scala
+--- before
+package com.skyline.weather
+
+enum Reading:
+  case Temperature(celsius: Double)
+  case Humidity(percent: Double)
+  case Missing
+
+object ReadingFilter:
+  def humidities(readings: List[Reading]): List[Double] =
+    readings.collect:
+      case Reading.Humidity(percent) => percent
+--- after
+package com.skyline.weather
+
+enum Reading:
+  case Temperature(celsius: Double)
+  case Humidity(percent: Double)
+  case Missing
+
+object ReadingFilter:
+  def humidities(readings: List[Reading]): List[Double] =
+    readings.collect:
+      case Reading.Humidity(percent) => percent
+
+  def temperatures(readings: List[Reading]): List[Double] =
+    readings.collect { case Reading.Temperature(celsius) => celsius }
+=== END
+
+=== EDIT
+note: mapN with braces to build a validated address
+--- file: server/src/main/scala/com/acme/inventory/WarehouseAddress.scala
+--- before
+package com.acme.inventory
+
+import cats.data.ValidatedNel
+import cats.syntax.validated.*
+
+case class WarehouseAddress(street: String, city: String)
+
+object WarehouseAddress:
+  def nonBlank(field: String, value: String): ValidatedNel[String, String] =
+    if value.isBlank then s"$field is blank".invalidNel else value.validNel
+--- after
+package com.acme.inventory
+
+import cats.data.ValidatedNel
+import cats.syntax.apply.*
+import cats.syntax.validated.*
+
+case class WarehouseAddress(street: String, city: String)
+
+object WarehouseAddress:
+  def nonBlank(field: String, value: String): ValidatedNel[String, String] =
+    if value.isBlank then s"$field is blank".invalidNel else value.validNel
+
+  def parse(street: String, city: String): ValidatedNel[String, WarehouseAddress] =
+    (nonBlank("street", street), nonBlank("city", city)).mapN { (validStreet, validCity) =>
+      WarehouseAddress(validStreet, validCity)
+    }
+=== END
+
+=== EDIT
+note: guard against empty token with Java-style parenthesised if
+--- file: server/src/main/scala/com/acme/auth/TokenParser.scala
+--- before
+package com.acme.auth
+
+case class BearerToken(value: String)
+
+object TokenParser:
+  def parse(header: String): Either[String, BearerToken] =
+    val raw = header.stripPrefix("Bearer ").trim
+    Right(BearerToken(raw))
+--- after
+package com.acme.auth
+
+case class BearerToken(value: String)
+
+object TokenParser:
+  def parse(header: String): Either[String, BearerToken] =
+    val raw = header.stripPrefix("Bearer ").trim
+    if (raw.isEmpty) {
+      Left("missing bearer token")
+    } else {
+      Right(BearerToken(raw))
+    }
+=== END
+
+=== EDIT
+note: discount tier selection with parenthesised braced ifs
+--- file: server/src/main/scala/com/brightcart/payments/DiscountTier.scala
+--- before
+package com.brightcart.payments
+
+enum Tier:
+  case Bronze, Silver, Gold
+
+object DiscountTier:
+  def rate(tier: Tier): BigDecimal =
+    tier match
+      case Tier.Bronze => BigDecimal("0.00")
+      case Tier.Silver => BigDecimal("0.05")
+      case Tier.Gold   => BigDecimal("0.10")
+--- after
+package com.brightcart.payments
+
+enum Tier:
+  case Bronze, Silver, Gold
+
+object DiscountTier:
+  def rate(tier: Tier): BigDecimal =
+    tier match
+      case Tier.Bronze => BigDecimal("0.00")
+      case Tier.Silver => BigDecimal("0.05")
+      case Tier.Gold   => BigDecimal("0.10")
+
+  def tierFor(lifetimeSpend: BigDecimal): Tier =
+    if (lifetimeSpend >= 5000) {
+      Tier.Gold
+    } else if (lifetimeSpend >= 1000) {
+      Tier.Silver
+    } else {
+      Tier.Bronze
+    }
+=== END
+
+=== EDIT
+note: explain the retry budget with a line comment
+--- file: server/src/main/scala/com/acme/scheduling/RetryPolicy.scala
+--- before
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+case class RetryPolicy(maxAttempts: Int, backoff: FiniteDuration)
+
+object RetryPolicy:
+  val standard = RetryPolicy(maxAttempts = 5, backoff = 200.millis)
+--- after
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+case class RetryPolicy(maxAttempts: Int, backoff: FiniteDuration)
+
+object RetryPolicy:
+  // five attempts keeps the worst case under two seconds
+  val standard = RetryPolicy(maxAttempts = 5, backoff = 200.millis)
+=== END
+
+=== EDIT
+note: add scaladoc to a new repository method
+--- file: server/src/main/scala/com/tidewater/maps/TileRepository.scala
+--- before
+package com.tidewater.maps
+
+import cats.effect.IO
+
+case class TileKey(zoom: Int, x: Int, y: Int)
+
+trait TileRepository:
+  def load(key: TileKey): IO[Option[Array[Byte]]]
+--- after
+package com.tidewater.maps
+
+import cats.effect.IO
+
+case class TileKey(zoom: Int, x: Int, y: Int)
+
+trait TileRepository:
+  def load(key: TileKey): IO[Option[Array[Byte]]]
+
+  /** Stores the rendered tile, replacing any previous version. */
+  def store(key: TileKey, bytes: Array[Byte]): IO[Unit]
+=== END
+
+=== EDIT
+note: trailing TODO comment on a new endpoint field
+--- file: server/src/main/scala/com/acme/inventory/StockEndpoints.scala
+--- before
+package com.acme.inventory
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import sttp.tapir.generic.auto.*
+import io.circe.generic.auto.*
+
+case class StockLevel(sku: String, onHand: Int)
+
+object StockEndpoints:
+  val level = endpoint.get
+    .in("stock" / path[String]("sku"))
+    .out(jsonBody[StockLevel])
+--- after
+package com.acme.inventory
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import sttp.tapir.generic.auto.*
+import io.circe.generic.auto.*
+
+case class StockLevel(sku: String, onHand: Int)
+
+object StockEndpoints:
+  val level = endpoint.get
+    .in("stock" / path[String]("sku"))
+    .out(jsonBody[StockLevel])
+    .errorOut(stringBody) // TODO typed error once the catalogue lands
+=== END
+
+=== EDIT
+note: commented-out code left behind after a refactor
+--- file: server/src/main/scala/com/acme/billing/LateFee.scala
+--- before
+package com.acme.billing
+
+import java.time.LocalDate
+
+object LateFee:
+  def daysLate(due: LocalDate, paid: LocalDate): Long =
+    java.time.temporal.ChronoUnit.DAYS.between(due, paid).max(0)
+--- after
+package com.acme.billing
+
+import java.time.LocalDate
+
+object LateFee:
+  def daysLate(due: LocalDate, paid: LocalDate): Long =
+    java.time.temporal.ChronoUnit.DAYS.between(due, paid).max(0)
+
+  def fee(due: LocalDate, paid: LocalDate, dailyRate: BigDecimal): BigDecimal =
+    /* dailyRate * daysLate(due, paid).min(30) */
+    dailyRate * daysLate(due, paid)
+=== END
+
+=== EDIT
+note: switch to the catch-all cats syntax import
+--- file: server/src/main/scala/com/acme/payments/SettlementService.scala
+--- before
+package com.acme.payments
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class Settlement(merchantId: String, amount: BigDecimal)
+
+class SettlementService(ledger: Ledger):
+  def settleAll(settlements: List[Settlement]): IO[List[String]] =
+    settlements.traverse(ledger.post)
+
+trait Ledger:
+  def post(settlement: Settlement): IO[String]
+--- after
+package com.acme.payments
+
+import cats.effect.IO
+import cats.syntax.all.*
+
+case class Settlement(merchantId: String, amount: BigDecimal)
+
+class SettlementService(ledger: Ledger):
+  def settleAll(settlements: List[Settlement]): IO[List[String]] =
+    settlements.traverse(ledger.post)
+
+  def settleAllParallel(settlements: List[Settlement]): IO[List[String]] =
+    settlements.parTraverse(ledger.post)
+
+trait Ledger:
+  def post(settlement: Settlement): IO[String]
+=== END
+
+=== EDIT
+note: new file importing cats.syntax.all for validation
+--- file: server/src/main/scala/com/greenleaf/scheduling/ShiftValidator.scala
+--- before
+--- after
+package com.greenleaf.scheduling
+
+import cats.data.ValidatedNel
+import cats.syntax.all.*
+
+import java.time.LocalTime
+
+case class Shift(start: LocalTime, end: LocalTime, staff: Int)
+
+object ShiftValidator:
+  def validate(shift: Shift): ValidatedNel[String, Shift] =
+    (
+      Either.cond(shift.start.isBefore(shift.end), shift.start, "shift ends before it starts").toValidatedNel,
+      Either.cond(shift.staff > 0, shift.staff, "shift has no staff").toValidatedNel
+    ).mapN((_, _) => shift)
+=== END
+
+=== EDIT
+note: read pair components positionally
+--- file: server/src/main/scala/com/acme/inventory/ReorderPlanner.scala
+--- before
+package com.acme.inventory
+
+case class Sku(code: String)
+
+object ReorderPlanner:
+  def shortfalls(levels: Map[Sku, Int], minimums: Map[Sku, Int]): List[Sku] =
+    minimums.keys.filter(sku => levels.getOrElse(sku, 0) < minimums(sku)).toList
+--- after
+package com.acme.inventory
+
+case class Sku(code: String)
+
+object ReorderPlanner:
+  def shortfalls(levels: Map[Sku, Int], minimums: Map[Sku, Int]): List[Sku] =
+    minimums.keys.filter(sku => levels.getOrElse(sku, 0) < minimums(sku)).toList
+
+  def largestShortfall(levels: Map[Sku, Int], minimums: Map[Sku, Int]): Option[Sku] =
+    minimums.toList
+      .map(entry => entry._1 -> (entry._2 - levels.getOrElse(entry._1, 0)))
+      .maxByOption(_._2)
+      .map(_._1)
+=== END
+
+=== EDIT
+note: sortBy on tuple second element
+--- file: server/src/main/scala/com/skyline/weather/StationRanking.scala
+--- before
+package com.skyline.weather
+
+case class Station(id: String, name: String)
+
+object StationRanking:
+  def byName(stations: List[Station]): List[Station] =
+    stations.sortBy(_.name)
+--- after
+package com.skyline.weather
+
+case class Station(id: String, name: String)
+
+object StationRanking:
+  def byName(stations: List[Station]): List[Station] =
+    stations.sortBy(_.name)
+
+  def wettest(rainfall: List[(Station, Double)]): List[Station] =
+    rainfall.sortBy(_._2).reverse.map((station, _) => station)
+=== END
+
+=== EDIT
+note: zipWithIndex and pull the index with ._2
+--- file: app/src/main/scala/com/acme/ui/LeaderboardView.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Player(name: String, score: Int)
+
+object LeaderboardView:
+  def render(players: Signal[List[Player]]): HtmlElement =
+    ol(
+      children <-- players.map(_.map(player => li(player.name)))
+    )
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Player(name: String, score: Int)
+
+object LeaderboardView:
+  def render(players: Signal[List[Player]]): HtmlElement =
+    ol(
+      children <-- players.map(_.zipWithIndex.map(entry => li(s"${entry._2 + 1}. ${entry._1.name}")))
+    )
+=== END
+
+=== EDIT
+note: near miss - braceless map lambda
+--- file: server/src/main/scala/com/acme/billing/CreditNotes.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+
+case class CreditNote(id: String, amount: BigDecimal)
+
+trait CreditNoteStore:
+  def all: IO[List[CreditNote]]
+
+class CreditNotes(store: CreditNoteStore):
+  def total: IO[BigDecimal] =
+    store.all.map(_.map(_.amount).sum)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+
+case class CreditNote(id: String, amount: BigDecimal)
+
+trait CreditNoteStore:
+  def all: IO[List[CreditNote]]
+
+class CreditNotes(store: CreditNoteStore):
+  def total: IO[BigDecimal] =
+    store.all.map(_.map(_.amount).sum)
+
+  def largeNotes(threshold: BigDecimal): IO[List[CreditNote]] =
+    store.all.map: notes =>
+      notes.filter(note => note.amount > threshold)
+=== END
+
+=== EDIT
+note: near miss - if then else instead of braces
+--- file: server/src/main/scala/com/acme/auth/PasswordPolicy.scala
+--- before
+package com.acme.auth
+
+object PasswordPolicy:
+  def longEnough(password: String): Boolean = password.length >= 12
+--- after
+package com.acme.auth
+
+object PasswordPolicy:
+  def longEnough(password: String): Boolean = password.length >= 12
+
+  def check(password: String): Either[String, String] =
+    if !longEnough(password) then Left("password too short")
+    else if password.forall(_.isLetter) then Left("password needs a digit or symbol")
+    else Right(password)
+=== END
+
+=== EDIT
+note: near miss - scala-cli directives in a script are allowed
+--- file: scripts/backfill-tiles.sc
+--- before
+--- after
+//> using scala 3.7.2
+//> using dep org.typelevel::cats-effect:3.6.3
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+
+val zoomLevels = List(10, 11, 12)
+
+val plan = IO.println(s"backfilling zoom levels ${zoomLevels.mkString(", ")}")
+=== END
+
+=== EDIT
+note: near miss - specific cats syntax imports
+--- file: server/src/main/scala/com/acme/routing/LegCombiner.scala
+--- before
+package com.acme.routing
+
+case class Leg(distanceKm: Double, minutes: Int)
+
+object LegCombiner:
+  def totalMinutes(legs: List[Leg]): Int = legs.map(_.minutes).sum
+--- after
+package com.acme.routing
+
+import cats.syntax.foldable.*
+
+case class Leg(distanceKm: Double, minutes: Int)
+
+object LegCombiner:
+  def totalMinutes(legs: List[Leg]): Int = legs.map(_.minutes).sum
+
+  def totalDistance(legs: List[Leg]): Double = legs.foldMap(_.distanceKm)
+=== END
+
+=== EDIT
+note: near miss - destructure a tuple instead of positional access
+--- file: server/src/main/scala/com/acme/payments/FxQuote.scala
+--- before
+package com.acme.payments
+
+case class Quote(base: String, counter: String, rate: BigDecimal)
+
+object FxQuote:
+  def parsePair(pair: String): Option[(String, String)] =
+    pair.split("/").toList match
+      case base :: counter :: Nil => Some(base -> counter)
+      case _                      => None
+--- after
+package com.acme.payments
+
+case class Quote(base: String, counter: String, rate: BigDecimal)
+
+object FxQuote:
+  def parsePair(pair: String): Option[(String, String)] =
+    pair.split("/").toList match
+      case base :: counter :: Nil => Some(base -> counter)
+      case _                      => None
+
+  def quote(pair: String, rate: BigDecimal): Option[Quote] =
+    parsePair(pair).map: (base, counter) =>
+      Quote(base, counter, rate)
+=== END
+
+=== EDIT
+note: near miss - string contains a URL with double slash
+--- file: server/src/main/scala/com/skyline/weather/ForecastClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+import org.http4s.Uri
+
+class ForecastClient(client: Client[IO], base: Uri):
+  def raw(station: String): IO[String] =
+    client.expect[String](base / "forecast" / station)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+import org.http4s.Uri
+import org.http4s.implicits.*
+
+class ForecastClient(client: Client[IO], base: Uri):
+  def raw(station: String): IO[String] =
+    client.expect[String](base / "forecast" / station)
+
+object ForecastClient:
+  val publicApi = uri"https://api.skyline.example/v2"
+=== END
+
+=== EDIT
+note: fix - replace braced filter with braceless form
+--- file: server/src/main/scala/com/acme/scheduling/SlotFinder.scala
+--- before
+package com.acme.scheduling
+
+import java.time.LocalDateTime
+
+case class Slot(start: LocalDateTime, booked: Boolean)
+
+object SlotFinder:
+  def free(slots: List[Slot]): List[Slot] =
+    slots.filter { slot => !slot.booked }
+--- after
+package com.acme.scheduling
+
+import java.time.LocalDateTime
+
+case class Slot(start: LocalDateTime, booked: Boolean)
+
+object SlotFinder:
+  def free(slots: List[Slot]): List[Slot] =
+    slots.filterNot(_.booked)
+=== END
+
+=== EDIT
+note: fix - remove an outdated comment
+--- file: server/src/main/scala/com/acme/maps/GeoHash.scala
+--- before
+package com.acme.maps
+
+object GeoHash:
+  // previously used precision 9
+  val precision = 7
+
+  def cellSize(precision: Int): Double = 180.0 / math.pow(2, precision * 2.5)
+--- after
+package com.acme.maps
+
+object GeoHash:
+  val precision = 7
+
+  def cellSize(precision: Int): Double = 180.0 / math.pow(2, precision * 2.5)
+=== END
+
+=== EDIT
+note: violation already in file, edit adds an unrelated method
+--- file: server/src/main/scala/com/acme/inventory/BinLocator.scala
+--- before
+package com.acme.inventory
+
+case class Bin(aisle: String, shelf: Int)
+
+object BinLocator:
+  def aisles(bins: List[Bin]): List[String] =
+    bins.map { bin => bin.aisle }.distinct
+--- after
+package com.acme.inventory
+
+case class Bin(aisle: String, shelf: Int)
+
+object BinLocator:
+  def aisles(bins: List[Bin]): List[String] =
+    bins.map { bin => bin.aisle }.distinct
+
+  def topShelf(bins: List[Bin]): Option[Int] =
+    bins.map(_.shelf).maxOption
+=== END
+
+=== EDIT
+note: clean - add a case to an enum
+--- file: server/src/main/scala/com/acme/payments/PaymentMethod.scala
+--- before
+package com.acme.payments
+
+enum PaymentMethod:
+  case Card, BankTransfer
+--- after
+package com.acme.payments
+
+enum PaymentMethod:
+  case Card, BankTransfer, Wallet
+=== END
+
+=== EDIT
+note: clean - new http4s route
+--- file: server/src/main/scala/com/acme/health/HealthRoutes.scala
+--- before
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object HealthRoutes:
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("ok")
+--- after
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object HealthRoutes:
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("ok")
+    case GET -> Root / "ready"  => Ok("ready")
+=== END
+
+=== EDIT
+note: clean - add an munit test
+--- file: server/src/test/scala/com/acme/billing/InvoiceTotalsSuite.scala
+--- before
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+  test("subtotal of no lines is zero"):
+    assertEquals(InvoiceTotals.subtotal(List.empty), BigDecimal(0))
+--- after
+package com.acme.billing
+
+import munit.FunSuite
+
+class InvoiceTotalsSuite extends FunSuite:
+  test("subtotal of no lines is zero"):
+    assertEquals(InvoiceTotals.subtotal(List.empty), BigDecimal(0))
+
+  test("subtotal multiplies quantity by unit price"):
+    val lines = List(InvoiceLine("A-1", 3, BigDecimal(2)), InvoiceLine("B-2", 1, BigDecimal(5)))
+    assertEquals(InvoiceTotals.subtotal(lines), BigDecimal(11))
+=== END
+
+=== EDIT
+note: clean - rename a parameter
+--- file: server/src/main/scala/com/northwind/routing/Distance.scala
+--- before
+package com.northwind.routing
+
+object Distance:
+  def haversine(a: (Double, Double), b: (Double, Double)): Double =
+    val (latA, lonA) = a
+    val (latB, lonB) = b
+    val dLat = math.toRadians(latB - latA)
+    val dLon = math.toRadians(lonB - lonA)
+    val h = math.pow(math.sin(dLat / 2), 2) + math.cos(math.toRadians(latA)) * math.cos(math.toRadians(latB)) * math.pow(math.sin(dLon / 2), 2)
+    2 * 6371.0 * math.asin(math.sqrt(h))
+--- after
+package com.northwind.routing
+
+object Distance:
+  def haversineKm(from: (Double, Double), to: (Double, Double)): Double =
+    val (latA, lonA) = from
+    val (latB, lonB) = to
+    val dLat = math.toRadians(latB - latA)
+    val dLon = math.toRadians(lonB - lonA)
+    val h = math.pow(math.sin(dLat / 2), 2) + math.cos(math.toRadians(latA)) * math.cos(math.toRadians(latB)) * math.pow(math.sin(dLon / 2), 2)
+    2 * 6371.0 * math.asin(math.sqrt(h))
+=== END
+
+=== EDIT
+note: clean - skunk query added to repository
+--- file: server/src/main/scala/com/acme/auth/UserRepository.scala
+--- before
+package com.acme.auth
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class UserRepository(session: Session[IO]):
+  private val byEmail: Query[String, String] =
+    sql"SELECT id FROM users WHERE email = $text".query(text)
+
+  def idFor(email: String): IO[Option[String]] =
+    session.option(byEmail)(email)
+--- after
+package com.acme.auth
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class UserRepository(session: Session[IO]):
+  private val byEmail: Query[String, String] =
+    sql"SELECT id FROM users WHERE email = $text".query(text)
+
+  private val countAll =
+    sql"SELECT count(*) FROM users".query(int8)
+
+  def idFor(email: String): IO[Option[String]] =
+    session.option(byEmail)(email)
+
+  def count: IO[Long] =
+    session.unique(countAll)
+=== END
+
+=== EDIT
+note: clean - extract a constant for a timeout
+--- file: server/src/main/scala/com/acme/maps/GeocoderClient.scala
+--- before
+package com.acme.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class GeocoderClient(lookup: String => IO[Option[(Double, Double)]]):
+  def geocode(address: String): IO[Option[(Double, Double)]] =
+    lookup(address).timeout(3.seconds)
+--- after
+package com.acme.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class GeocoderClient(lookup: String => IO[Option[(Double, Double)]]):
+  def geocode(address: String): IO[Option[(Double, Double)]] =
+    lookup(address).timeout(GeocoderClient.requestTimeout)
+
+object GeocoderClient:
+  val requestTimeout = 3.seconds
+=== END

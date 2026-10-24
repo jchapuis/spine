@@ -1,0 +1,610 @@
+=== EDIT
+note: new invoice DTO declared as final case class
+--- file: server/src/main/scala/com/acme/billing/InvoiceDto.scala
+--- before
+--- after
+package com.acme.billing
+
+import io.circe.Codec
+
+final case class InvoiceDto(
+    invoiceId: String,
+    customerId: String,
+    totalCents: Long,
+    currency: String
+) derives Codec.AsObject
+=== END
+=== EDIT
+note: service implementation marked final class
+--- file: server/src/main/scala/com/northwind/routing/RoutePlannerService.scala
+--- before
+--- after
+package com.northwind.routing
+
+import cats.effect.IO
+
+trait RoutePlanner:
+  def plan(origin: String, destination: String): IO[List[String]]
+
+final class RoutePlannerService(graph: Map[String, List[String]]) extends RoutePlanner:
+  def plan(origin: String, destination: String): IO[List[String]] =
+    IO.pure(graph.getOrElse(origin, Nil).filter(_ == destination))
+=== END
+=== EDIT
+note: final def on trait method to lock it
+--- file: server/src/main/scala/com/skyline/weather/TemperatureSource.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+trait TemperatureSource:
+  def celsius(stationId: String): IO[Double]
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+
+trait TemperatureSource:
+  def celsius(stationId: String): IO[Double]
+
+  final def fahrenheit(stationId: String): IO[Double] =
+    celsius(stationId).map(value => value * 9 / 5 + 32)
+=== END
+=== EDIT
+note: helper exposed with private[inventory]
+--- file: server/src/main/scala/com/greenleaf/inventory/SkuFormat.scala
+--- before
+package com.greenleaf.inventory
+
+object SkuFormat:
+  def display(sku: String): String = sku.toUpperCase
+--- after
+package com.greenleaf.inventory
+
+object SkuFormat:
+  def display(sku: String): String = normalise(sku).toUpperCase
+
+  private[inventory] def normalise(sku: String): String =
+    sku.trim.replaceAll("\\s+", "-")
+=== END
+=== EDIT
+note: add Default instance on config companion
+--- file: server/src/main/scala/com/acme/http/ClientSettings.scala
+--- before
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+case class ClientSettings(connectTimeout: FiniteDuration, maxConnections: Int)
+--- after
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+case class ClientSettings(connectTimeout: FiniteDuration, maxConnections: Int)
+
+object ClientSettings:
+  val Default = ClientSettings(connectTimeout = 5.seconds, maxConnections = 32)
+=== END
+=== EDIT
+note: silence unused warning with nowarn annotation
+--- file: server/src/main/scala/com/acme/orders/OrderEvents.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+
+class OrderEvents(publish: String => IO[Unit]):
+  def placed(orderId: String): IO[Unit] = publish(s"placed:$orderId")
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+import scala.annotation.nowarn
+
+class OrderEvents(publish: String => IO[Unit]):
+  def placed(orderId: String): IO[Unit] = publish(s"placed:$orderId")
+
+  @nowarn("msg=unused explicit parameter")
+  def cancelled(orderId: String, reason: String): IO[Unit] = publish(s"cancelled:$orderId")
+=== END
+=== EDIT
+note: drop final from case class, fix
+--- file: server/src/main/scala/com/portline/logistics/Berth.scala
+--- before
+package com.portline.logistics
+
+final case class Berth(code: String, lengthMeters: Double)
+--- after
+package com.portline.logistics
+
+case class Berth(code: String, lengthMeters: Double)
+=== END
+=== EDIT
+note: replace private[auth] with plain private
+--- file: server/src/main/scala/com/keystone/auth/TokenSigner.scala
+--- before
+package com.keystone.auth
+
+import java.util.Base64
+
+class TokenSigner(secret: Array[Byte]):
+  def sign(payload: String): String = encode(payload.getBytes ++ secret)
+
+  private[auth] def encode(bytes: Array[Byte]): String =
+    Base64.getUrlEncoder.encodeToString(bytes)
+--- after
+package com.keystone.auth
+
+import java.util.Base64
+
+class TokenSigner(secret: Array[Byte]):
+  def sign(payload: String): String = encode(payload.getBytes ++ secret)
+
+  private def encode(bytes: Array[Byte]): String =
+    Base64.getUrlEncoder.encodeToString(bytes)
+=== END
+=== EDIT
+note: remove Default companion and pass settings explicitly
+--- file: server/src/main/scala/com/acme/http/ServerSettings.scala
+--- before
+package com.acme.http
+
+case class ServerSettings(host: String, port: Int)
+
+object ServerSettings:
+  val Default = ServerSettings("0.0.0.0", 8080)
+--- after
+package com.acme.http
+
+case class ServerSettings(host: String, port: Int)
+=== END
+=== EDIT
+note: plain private helper and private[this], clean near miss
+--- file: server/src/main/scala/com/cartograph/maps/TileCache.scala
+--- before
+package com.cartograph.maps
+
+class TileCache(capacity: Int):
+  def fits(count: Int): Boolean = count <= capacity
+--- after
+package com.cartograph.maps
+
+class TileCache(capacity: Int):
+  private[this] val headroom = capacity / 10
+
+  def fits(count: Int): Boolean = count <= capacity - headroom
+
+  private def keyOf(zoom: Int, x: Int, y: Int): String = s"$zoom/$x/$y"
+=== END
+=== EDIT
+note: constant named DefaultTimeout, not a Default companion
+--- file: server/src/main/scala/com/tempo/scheduling/JobSettings.scala
+--- before
+package com.tempo.scheduling
+
+import scala.concurrent.duration.*
+
+case class JobSettings(timeout: FiniteDuration)
+--- after
+package com.tempo.scheduling
+
+import scala.concurrent.duration.*
+
+case class JobSettings(timeout: FiniteDuration, maxRetries: Int)
+
+object JobSettings:
+  val DefaultTimeout = 30.seconds
+  val defaultRetries = 3
+=== END
+=== EDIT
+note: add a stream method, clean
+--- file: server/src/main/scala/com/datahive/ingest/EventFeed.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+class EventFeed(poll: IO[List[String]]):
+  def events: Stream[IO, String] = Stream.repeatEval(poll).flatMap(Stream.emits)
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class EventFeed(poll: IO[List[String]]):
+  def events: Stream[IO, String] = Stream.repeatEval(poll).flatMap(Stream.emits)
+
+  def batched: Stream[IO, List[String]] =
+    events.groupWithin(100, 2.seconds).map(_.toList)
+=== END
+=== EDIT
+note: private final case class inside an object
+--- file: server/src/main/scala/com/acme/payments/StripeClient.scala
+--- before
+package com.acme.payments
+
+import cats.effect.IO
+
+class StripeClient(post: (String, String) => IO[String]):
+  def charge(customerId: String, amountCents: Long): IO[String] =
+    post("/charges", s"""{"customer":"$customerId","amount":$amountCents}""")
+--- after
+package com.acme.payments
+
+import cats.effect.IO
+import io.circe.Codec
+import io.circe.syntax.*
+
+class StripeClient(post: (String, String) => IO[String]):
+  def charge(customerId: String, amountCents: Long): IO[String] =
+    post("/charges", ChargeRequest(customerId, amountCents).asJson.noSpaces)
+
+object StripeClient:
+  private final case class ChargeRequest(customer: String, amount: Long) derives Codec.AsObject
+=== END
+=== EDIT
+note: override final def toString in a value class
+--- file: server/src/main/scala/com/keystone/auth/ApiKey.scala
+--- before
+package com.keystone.auth
+
+class ApiKey(val value: String)
+--- after
+package com.keystone.auth
+
+class ApiKey(val value: String):
+  override final def toString: String = s"ApiKey(${value.take(4)}****)"
+=== END
+=== EDIT
+note: protected[pkg] on base class method
+--- file: server/src/main/scala/com/acme/http/BaseClient.scala
+--- before
+package com.acme.http
+
+import cats.effect.IO
+
+abstract class BaseClient(baseUrl: String):
+  def get(path: String): IO[String]
+--- after
+package com.acme.http
+
+import cats.effect.IO
+
+abstract class BaseClient(baseUrl: String):
+  def get(path: String): IO[String]
+
+  protected[http] def urlFor(path: String): String =
+    s"${baseUrl.stripSuffix("/")}/${path.stripPrefix("/")}"
+=== END
+=== EDIT
+note: annotation.nowarn on match exhaustivity
+--- file: server/src/main/scala/com/portline/logistics/CargoClassifier.scala
+--- before
+package com.portline.logistics
+
+enum Cargo:
+  case Bulk, Container, Liquid, Vehicle
+
+object CargoClassifier:
+  def isPackaged(cargo: Cargo): Boolean = cargo == Cargo.Container
+--- after
+package com.portline.logistics
+
+enum Cargo:
+  case Bulk, Container, Liquid, Vehicle
+
+object CargoClassifier:
+  def isPackaged(cargo: Cargo): Boolean = cargo == Cargo.Container
+
+  @annotation.nowarn("msg=match may not be exhaustive")
+  def pumpRate(cargo: Cargo): Double = cargo match
+    case Cargo.Liquid => 1200.0
+    case Cargo.Bulk   => 400.0
+=== END
+=== EDIT
+note: fix exhaustivity instead of suppressing, near miss
+--- file: server/src/main/scala/com/portline/logistics/CraneSchedule.scala
+--- before
+package com.portline.logistics
+
+import scala.annotation.nowarn
+
+enum Load:
+  case Bulk, Container, Liquid
+
+object CraneSchedule:
+  @nowarn("msg=match may not be exhaustive")
+  def minutesPerUnit(load: Load): Int = load match
+    case Load.Container => 3
+    case Load.Bulk      => 7
+--- after
+package com.portline.logistics
+
+enum Load:
+  case Bulk, Container, Liquid
+
+object CraneSchedule:
+  def minutesPerUnit(load: Load): Option[Int] = load match
+    case Load.Container => Some(3)
+    case Load.Bulk      => Some(7)
+    case Load.Liquid    => None
+=== END
+=== EDIT
+note: final class wrapping a resource
+--- file: server/src/main/scala/com/datahive/storage/S3Uploader.scala
+--- before
+package com.datahive.storage
+
+import cats.effect.IO
+
+trait Uploader:
+  def upload(key: String, bytes: Array[Byte]): IO[Unit]
+--- after
+package com.datahive.storage
+
+import cats.effect.IO
+
+trait Uploader:
+  def upload(key: String, bytes: Array[Byte]): IO[Unit]
+
+final class S3Uploader(bucket: String, put: (String, String, Array[Byte]) => IO[Unit]) extends Uploader:
+  def upload(key: String, bytes: Array[Byte]): IO[Unit] = put(bucket, key, bytes)
+=== END
+=== EDIT
+note: def Default with explicit type in companion
+--- file: server/src/main/scala/com/acme/search/SearchOptions.scala
+--- before
+package com.acme.search
+
+case class SearchOptions(pageSize: Int, fuzzy: Boolean)
+--- after
+package com.acme.search
+
+case class SearchOptions(pageSize: Int, fuzzy: Boolean)
+
+object SearchOptions:
+  def Default: SearchOptions = SearchOptions(pageSize = 25, fuzzy = false)
+=== END
+=== EDIT
+note: pass options explicitly at call site, clean near miss
+--- file: server/src/main/scala/com/acme/search/ProductSearch.scala
+--- before
+package com.acme.search
+
+import cats.effect.IO
+
+case class Paging(pageSize: Int, fuzzy: Boolean)
+
+class ProductSearch(query: (String, Paging) => IO[List[String]]):
+  def byName(name: String, paging: Paging): IO[List[String]] = query(name, paging)
+--- after
+package com.acme.search
+
+import cats.effect.IO
+
+case class Paging(pageSize: Int, fuzzy: Boolean)
+
+class ProductSearch(query: (String, Paging) => IO[List[String]]):
+  def byName(name: String, paging: Paging): IO[List[String]] = query(name, paging)
+
+  def suggestions(prefix: String): IO[List[String]] =
+    byName(prefix, Paging(pageSize = 5, fuzzy = true))
+=== END
+=== EDIT
+note: tapir endpoint added, clean
+--- file: server/src/main/scala/com/acme/billing/BillingEndpoints.scala
+--- before
+package com.acme.billing
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object BillingEndpoints:
+  val getInvoice =
+    endpoint.get.in("invoices" / path[String]("invoiceId")).out(jsonBody[InvoiceDto])
+--- after
+package com.acme.billing
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+
+object BillingEndpoints:
+  val getInvoice =
+    endpoint.get.in("invoices" / path[String]("invoiceId")).out(jsonBody[InvoiceDto])
+
+  val listInvoices =
+    endpoint.get.in("invoices").in(query[Option[String]]("customerId")).out(jsonBody[List[InvoiceDto]])
+=== END
+=== EDIT
+note: final case class in test fixtures
+--- file: server/src/test/scala/com/acme/orders/OrderFixtures.scala
+--- before
+package com.acme.orders
+
+import org.scalacheck.Gen
+
+object OrderFixtures:
+  val orderId: Gen[String] = Gen.uuid.map(_.toString)
+--- after
+package com.acme.orders
+
+import org.scalacheck.Gen
+
+object OrderFixtures:
+  val orderId: Gen[String] = Gen.uuid.map(_.toString)
+
+  final case class SampleOrder(id: String, totalCents: Long)
+
+  val sampleOrder: Gen[SampleOrder] =
+    for
+      id    <- orderId
+      total <- Gen.choose(100L, 100000L)
+    yield SampleOrder(id, total)
+=== END
+=== EDIT
+note: change unrelated line in file that already has final class
+--- file: server/src/main/scala/com/legacy/mail/SmtpMailer.scala
+--- before
+package com.legacy.mail
+
+import cats.effect.IO
+
+final class SmtpMailer(host: String, port: Int):
+  def send(to: String, body: String): IO[Unit] =
+    IO.println(s"sending to $to via $host:$port")
+--- after
+package com.legacy.mail
+
+import cats.effect.IO
+
+final class SmtpMailer(host: String, port: Int):
+  def send(to: String, body: String): IO[Unit] =
+    IO.println(s"sending ${body.length} chars to $to via $host:$port")
+=== END
+=== EDIT
+note: private[this] immutable field, not qualified private
+--- file: server/src/main/scala/com/acme/metrics/Histogram.scala
+--- before
+package com.acme.metrics
+
+class Histogram(bucketBounds: Vector[Double]):
+  def bucketFor(value: Double): Int = bucketBounds.indexWhere(value <= _)
+--- after
+package com.acme.metrics
+
+class Histogram(bucketBounds: Vector[Double]):
+  private[this] val upper = bucketBounds.lastOption
+
+  def bucketFor(value: Double): Int = bucketBounds.indexWhere(value <= _)
+
+  def overflows(value: Double): Boolean = upper.exists(value > _)
+=== END
+=== EDIT
+note: private[maps] object for shared constants
+--- file: server/src/main/scala/com/cartograph/maps/Constants.scala
+--- before
+--- after
+package com.cartograph.maps
+
+private[maps] object Constants:
+  val earthRadiusKm = 6371.0
+  val maxZoom = 22
+  val tileSizePixels = 256
+=== END
+=== EDIT
+note: final def in abstract repository base
+--- file: server/src/main/scala/com/greenleaf/inventory/Repository.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+abstract class Repository[A]:
+  def findById(id: String): IO[Option[A]]
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+abstract class Repository[A]:
+  def findById(id: String): IO[Option[A]]
+
+  final def require(id: String): IO[A] =
+    findById(id).flatMap:
+      case Some(entity) => IO.pure(entity)
+      case None         => IO.raiseError(new NoSuchElementException(id))
+=== END
+=== EDIT
+note: add a skunk command, clean
+--- file: server/src/main/scala/com/acme/payments/PaymentQueries.scala
+--- before
+package com.acme.payments
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object PaymentQueries:
+  val byId: Query[String, Long] =
+    sql"SELECT amount_cents FROM payments WHERE id = $text".query(int8)
+--- after
+package com.acme.payments
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object PaymentQueries:
+  val byId: Query[String, Long] =
+    sql"SELECT amount_cents FROM payments WHERE id = $text".query(int8)
+
+  val markRefunded: Command[String] =
+    sql"UPDATE payments SET refunded = true WHERE id = $text".command
+=== END
+=== EDIT
+note: nowarn on deprecated java API call
+--- file: server/src/main/scala/com/legacy/time/DateParser.scala
+--- before
+package com.legacy.time
+
+import java.util.Date
+
+object DateParser:
+  def epochMillis(date: Date): Long = date.getTime
+--- after
+package com.legacy.time
+
+import java.util.Date
+import scala.annotation.nowarn
+
+object DateParser:
+  def epochMillis(date: Date): Long = date.getTime
+
+  @nowarn("cat=deprecation")
+  def year(date: Date): Int = date.getYear + 1900
+=== END
+=== EDIT
+note: replace deprecated API instead of suppressing, near miss
+--- file: server/src/main/scala/com/legacy/time/DateFormatter.scala
+--- before
+package com.legacy.time
+
+import java.util.Date
+
+object DateFormatter:
+  def epochMillis(date: Date): Long = date.getTime
+--- after
+package com.legacy.time
+
+import java.time.ZoneOffset
+import java.util.Date
+
+object DateFormatter:
+  def epochMillis(date: Date): Long = date.getTime
+
+  def year(date: Date): Int = date.toInstant.atZone(ZoneOffset.UTC).getYear
+=== END
+=== EDIT
+note: Default with type ascription inside companion of settings case class
+--- file: server/src/main/scala/com/skyline/weather/PollingConfig.scala
+--- before
+package com.skyline.weather
+
+import scala.concurrent.duration.*
+
+case class PollingConfig(interval: FiniteDuration, stations: List[String])
+--- after
+package com.skyline.weather
+
+import scala.concurrent.duration.*
+
+case class PollingConfig(interval: FiniteDuration, stations: List[String])
+
+object PollingConfig:
+  val Default: PollingConfig = PollingConfig(interval = 10.minutes, stations = List("GVA", "ZRH"))
+=== END

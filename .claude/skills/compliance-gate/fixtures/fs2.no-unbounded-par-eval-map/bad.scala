@@ -1,3 +1,5 @@
+package com.acme.pipeline
+
 import fs2.Stream
 import cats.effect.IO
 

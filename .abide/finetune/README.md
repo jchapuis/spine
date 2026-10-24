@@ -20,8 +20,12 @@ The model learns the rubric's exact question text. **Editing a question in `rubr
 The shipped run (`scala-v2c`) split the v1 examples (`gen-*`) and the v2 examples (`v2-*`) separately, then
 concatenated the partitions, so v1's held-out records stayed unseen.
 
-`real/` and `runs/` are gitignored. `real/` holds diffs from the projects' own history. Those diffs are only ever
-scored locally and are never used for training or sent to Modal.
+`real/` and `runs/` are gitignored. `real/` holds the 200 held-out evaluation diffs from all projects' history; they are
+only ever scored locally and are never used for training or sent to Modal.
+
+From v4 the mechanical groups also train on real history, mined by `mine_real_mech.py` into `synthetic/real-mech/`
+(gitignored: this repo is public, the source is not). Only repos cleared for a public model are mined: gritmaps,
+endless, endless-transaction. Never the TeraSol-SA repos. The evaluation commits are skipped.
 
 ## Results (scala-v2c)
 

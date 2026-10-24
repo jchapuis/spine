@@ -1,0 +1,706 @@
+=== EDIT
+note: new invoice service caches a tax rate in an ascribed private val
+--- file: server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+--- before
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.syntax.foldable.*
+
+case class LineItem(sku: String, quantity: Int, unitCents: Long)
+
+class InvoiceTotals(lines: List[LineItem]):
+  private val vatRate: BigDecimal = BigDecimal("0.077")
+
+  def netCents: Long =
+    lines.foldMap(line => line.quantity * line.unitCents)
+
+  def grossCents: IO[Long] =
+    IO.pure((BigDecimal(netCents) * (1 + vatRate)).toLongExact)
+=== END
+=== EDIT
+note: private helper added with explicit return type
+--- file: server/src/main/scala/com/northwind/routing/RouteScorer.scala
+--- before
+package com.northwind.routing
+
+case class Leg(fromStop: String, toStop: String, minutes: Int)
+
+object RouteScorer:
+  def score(legs: List[Leg]): Int =
+    legs.map(_.minutes).sum
+--- after
+package com.northwind.routing
+
+case class Leg(fromStop: String, toStop: String, minutes: Int)
+
+object RouteScorer:
+  def score(legs: List[Leg]): Int =
+    legs.map(_.minutes).sum + transferPenalty(legs)
+
+  private def transferPenalty(legs: List[Leg]): Int =
+    (legs.size - 1).max(0) * 5
+=== END
+=== EDIT
+note: local val inside method gets an Int ascription
+--- file: server/src/main/scala/com/skyline/weather/ForecastSummary.scala
+--- before
+package com.skyline.weather
+
+case class Reading(stationId: String, celsius: Double)
+
+object ForecastSummary:
+  def describe(readings: List[Reading]): String =
+    val hottest = readings.maxByOption(_.celsius)
+    hottest.fold("no data")(r => s"${r.stationId}: ${r.celsius}")
+--- after
+package com.skyline.weather
+
+case class Reading(stationId: String, celsius: Double)
+
+object ForecastSummary:
+  def describe(readings: List[Reading]): String =
+    val stationCount: Int = readings.map(_.stationId).distinct.size
+    val hottest = readings.maxByOption(_.celsius)
+    hottest.fold("no data")(r => s"${r.stationId}: ${r.celsius} across $stationCount stations")
+=== END
+=== EDIT
+note: private val written without ascription, uses typed empty constructor instead
+--- file: server/src/main/scala/com/greenleaf/inventory/StockLedger.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class StockLedger(store: Ref[IO, Map[String, Int]]):
+  def available(sku: String): IO[Int] =
+    store.get.map(_.getOrElse(sku, 0))
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class StockLedger(store: Ref[IO, Map[String, Int]]):
+  private val reserved = Set.empty[String]
+
+  def available(sku: String): IO[Int] =
+    store.get.map: stock =>
+      if reserved.contains(sku) then 0 else stock.getOrElse(sku, 0)
+=== END
+=== EDIT
+note: protected def with return type in an abstract base handler
+--- file: server/src/main/scala/com/lumen/auth/TokenVerifier.scala
+--- before
+package com.lumen.auth
+
+import cats.effect.IO
+
+abstract class TokenVerifier:
+  def verify(token: String): IO[Boolean]
+--- after
+package com.lumen.auth
+
+import cats.effect.IO
+
+abstract class TokenVerifier:
+  def verify(token: String): IO[Boolean]
+
+  protected def splitBearer(header: String): Option[String] =
+    header.split(" ").toList match
+      case "Bearer" :: token :: Nil => Some(token)
+      case _                        => None
+=== END
+=== EDIT
+note: public def keeps its return type, public API is allowed to ascribe
+--- file: server/src/main/scala/com/orbit/maps/TileIndex.scala
+--- before
+package com.orbit.maps
+
+case class Tile(zoom: Int, x: Int, y: Int)
+
+object TileIndex:
+  def parent(tile: Tile): Tile =
+    Tile(tile.zoom - 1, tile.x / 2, tile.y / 2)
+--- after
+package com.orbit.maps
+
+case class Tile(zoom: Int, x: Int, y: Int)
+
+object TileIndex:
+  def parent(tile: Tile): Tile =
+    Tile(tile.zoom - 1, tile.x / 2, tile.y / 2)
+
+  def children(tile: Tile): List[Tile] =
+    for
+      dx <- List(0, 1)
+      dy <- List(0, 1)
+    yield Tile(tile.zoom + 1, tile.x * 2 + dx, tile.y * 2 + dy)
+=== END
+=== EDIT
+note: private lazy val with Duration ascription added to a scheduler
+--- file: server/src/main/scala/com/tempo/scheduling/ReminderScheduler.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ReminderScheduler(send: String => IO[Unit]):
+  def schedule(userId: String): IO[Unit] =
+    IO.sleep(15.minutes) *> send(userId)
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ReminderScheduler(send: String => IO[Unit]):
+  private lazy val reminderDelay: FiniteDuration = 15.minutes
+
+  def schedule(userId: String): IO[Unit] =
+    IO.sleep(reminderDelay) *> send(userId)
+=== END
+=== EDIT
+note: local def inside a method declares its return type
+--- file: server/src/main/scala/com/payflow/payments/RefundPlanner.scala
+--- before
+package com.payflow.payments
+
+case class Charge(id: String, amountCents: Long)
+
+object RefundPlanner:
+  def plan(charges: List[Charge], refundCents: Long): List[(String, Long)] =
+    charges.map(c => c.id -> c.amountCents.min(refundCents))
+--- after
+package com.payflow.payments
+
+case class Charge(id: String, amountCents: Long)
+
+object RefundPlanner:
+  def plan(charges: List[Charge], refundCents: Long): List[(String, Long)] =
+    def capped(charge: Charge): Long = charge.amountCents.min(refundCents)
+    charges.map(c => c.id -> capped(c))
+=== END
+=== EDIT
+note: removes the ascription from a private val (fix edit)
+--- file: server/src/main/scala/com/acme/shipping/ParcelRates.scala
+--- before
+package com.acme.shipping
+
+class ParcelRates(zone: Int):
+  private val baseCents: Long = 450L
+
+  def quote(weightGrams: Int): Long =
+    baseCents + weightGrams / 100 * zone
+--- after
+package com.acme.shipping
+
+class ParcelRates(zone: Int):
+  private val baseCents = 450L
+
+  def quote(weightGrams: Int): Long =
+    baseCents + weightGrams / 100 * zone
+=== END
+=== EDIT
+note: clean edit, adds a field to a case class and threads it through
+--- file: server/src/main/scala/com/beacon/notifications/PushMessage.scala
+--- before
+package com.beacon.notifications
+
+case class PushMessage(deviceToken: String, title: String)
+
+object PushMessage:
+  def welcome(token: String): PushMessage =
+    PushMessage(token, "Welcome aboard")
+--- after
+package com.beacon.notifications
+
+case class PushMessage(deviceToken: String, title: String, badge: Int)
+
+object PushMessage:
+  def welcome(token: String): PushMessage =
+    PushMessage(token, "Welcome aboard", badge = 1)
+=== END
+=== EDIT
+note: private def with multi-line params and an IO return type
+--- file: server/src/main/scala/com/quanta/analytics/EventRollup.scala
+--- before
+package com.quanta.analytics
+
+import cats.effect.IO
+
+case class Event(name: String, userId: String, epochSeconds: Long)
+
+class EventRollup(fetch: String => IO[List[Event]]):
+  def dailyUsers(name: String): IO[Int] =
+    fetch(name).map(_.map(_.userId).distinct.size)
+--- after
+package com.quanta.analytics
+
+import cats.effect.IO
+
+case class Event(name: String, userId: String, epochSeconds: Long)
+
+class EventRollup(fetch: String => IO[List[Event]]):
+  def dailyUsers(name: String): IO[Int] =
+    fetch(name).map(events => distinctUsersSince(events, 0L))
+
+  private def distinctUsersSince(
+      events: List[Event],
+      fromEpoch: Long
+  ): Int =
+    events.filter(_.epochSeconds >= fromEpoch).map(_.userId).distinct.size
+=== END
+=== EDIT
+note: ascribed local val inside a for-comprehension body block in a test
+--- file: server/src/test/scala/com/greenleaf/inventory/StockLedgerSuite.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
+
+class StockLedgerSuite extends CatsEffectSuite:
+  test("unknown sku has zero stock"):
+    for
+      store <- Ref.of[IO, Map[String, Int]](Map.empty)
+      count <- StockLedger(store).available("SKU-1")
+    yield assertEquals(count, 0)
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
+
+class StockLedgerSuite extends CatsEffectSuite:
+  test("unknown sku has zero stock"):
+    for
+      store <- Ref.of[IO, Map[String, Int]](Map.empty)
+      count <- StockLedger(store).available("SKU-1")
+    yield assertEquals(count, 0)
+
+  test("known sku reports its stock"):
+    val seeded: Map[String, Int] = Map("SKU-2" -> 7)
+    for
+      store <- Ref.of[IO, Map[String, Int]](seeded)
+      count <- StockLedger(store).available("SKU-2")
+    yield assertEquals(count, 7)
+=== END
+=== EDIT
+note: pre-existing ascribed private val untouched, edit adds a public method
+--- file: server/src/main/scala/com/lumen/auth/PasswordPolicy.scala
+--- before
+package com.lumen.auth
+
+class PasswordPolicy:
+  private val minimumLength: Int = 12
+
+  def accepts(candidate: String): Boolean =
+    candidate.length >= minimumLength
+--- after
+package com.lumen.auth
+
+class PasswordPolicy:
+  private val minimumLength: Int = 12
+
+  def accepts(candidate: String): Boolean =
+    candidate.length >= minimumLength
+
+  def rejectionReason(candidate: String): Option[String] =
+    Option.when(!accepts(candidate))(s"at least $minimumLength characters required")
+=== END
+=== EDIT
+note: Laminar component adds a private val Var with ascription
+--- file: app/src/main/scala/com/orbit/maps/ui/LayerToggle.scala
+--- before
+package com.orbit.maps.ui
+
+import com.raquo.laminar.api.L.*
+
+class LayerToggle(label: String):
+  def render: HtmlElement =
+    button(label)
+--- after
+package com.orbit.maps.ui
+
+import com.raquo.laminar.api.L.*
+
+class LayerToggle(label: String):
+  private val enabled: Var[Boolean] = Var(false)
+
+  def render: HtmlElement =
+    button(
+      label,
+      cls.toggle("active") <-- enabled.signal,
+      onClick --> (_ => enabled.update(!_))
+    )
+=== END
+=== EDIT
+note: local var with ascription added inside a method body
+--- file: server/src/main/scala/com/tempo/scheduling/SlotPacker.scala
+--- before
+package com.tempo.scheduling
+
+case class Slot(startMinute: Int, lengthMinutes: Int)
+
+object SlotPacker:
+  def fits(slots: List[Slot], dayMinutes: Int): Boolean =
+    slots.map(_.lengthMinutes).sum <= dayMinutes
+--- after
+package com.tempo.scheduling
+
+case class Slot(startMinute: Int, lengthMinutes: Int)
+
+object SlotPacker:
+  def fits(slots: List[Slot], dayMinutes: Int): Boolean =
+    var used: Int = 0
+    slots.foreach(slot => used += slot.lengthMinutes)
+    used <= dayMinutes
+=== END
+=== EDIT
+note: recursive public def keeps return type, edit adds a private helper without one
+--- file: server/src/main/scala/com/quanta/analytics/Histogram.scala
+--- before
+package com.quanta.analytics
+
+object Histogram:
+  def buckets(values: List[Double], width: Double): Map[Int, Int] =
+    values.groupMapReduce(v => (v / width).toInt)(_ => 1)(_ + _)
+--- after
+package com.quanta.analytics
+
+object Histogram:
+  def buckets(values: List[Double], width: Double): Map[Int, Int] =
+    values.groupMapReduce(bucketOf(width))(_ => 1)(_ + _)
+
+  private def bucketOf(width: Double)(value: Double) =
+    (value / width).toInt
+=== END
+=== EDIT
+note: protected val with ascription in a base repository class
+--- file: server/src/main/scala/com/acme/catalog/BaseRepository.scala
+--- before
+package com.acme.catalog
+
+import skunk.Session
+import cats.effect.IO
+
+abstract class BaseRepository(session: Session[IO]):
+  def healthy: IO[Boolean] =
+    session.unique(skunk.sql"select true".query(skunk.codec.all.bool))
+--- after
+package com.acme.catalog
+
+import skunk.Session
+import cats.effect.IO
+
+abstract class BaseRepository(session: Session[IO]):
+  protected val schemaName: String = "catalog"
+
+  def healthy: IO[Boolean] =
+    session.unique(skunk.sql"select true".query(skunk.codec.all.bool))
+=== END
+=== EDIT
+note: private def with using clause and Either return type
+--- file: server/src/main/scala/com/payflow/payments/CardValidator.scala
+--- before
+package com.payflow.payments
+
+import cats.effect.Clock
+import cats.effect.IO
+
+object CardValidator:
+  def validate(number: String, expiryYear: Int)(using Clock[IO]): IO[Boolean] =
+    Clock[IO].realTimeInstant.map(_ => number.length == 16 && expiryYear > 2000)
+--- after
+package com.payflow.payments
+
+import cats.effect.Clock
+import cats.effect.IO
+
+object CardValidator:
+  def validate(number: String, expiryYear: Int)(using Clock[IO]): IO[Boolean] =
+    Clock[IO].realTimeInstant.map(_ => luhn(number).isRight && expiryYear > 2000)
+
+  private def luhn(number: String): Either[String, String] =
+    val digits = number.filter(_.isDigit).map(_.asDigit).reverse
+    val sum = digits.zipWithIndex.map((d, i) => if i % 2 == 1 then (d * 2) % 9 else d).sum
+    Either.cond(sum % 10 == 0, number, s"checksum failed for $number")
+=== END
+=== EDIT
+note: local val in a lambda block body ascribed
+--- file: server/src/main/scala/com/beacon/notifications/DigestBuilder.scala
+--- before
+package com.beacon.notifications
+
+case class Alert(topic: String, body: String)
+
+object DigestBuilder:
+  def build(alerts: List[Alert]): List[String] =
+    alerts.groupBy(_.topic).toList.map: (topic, items) =>
+      s"$topic (${items.size})"
+--- after
+package com.beacon.notifications
+
+case class Alert(topic: String, body: String)
+
+object DigestBuilder:
+  def build(alerts: List[Alert]): List[String] =
+    alerts.groupBy(_.topic).toList.map: (topic, items) =>
+      val preview: String = items.headOption.map(_.body.take(40)).getOrElse("-")
+      s"$topic (${items.size}): $preview"
+=== END
+=== EDIT
+note: clean edit, swap a filter for a partition in a public method
+--- file: server/src/main/scala/com/northwind/routing/StopFilter.scala
+--- before
+package com.northwind.routing
+
+case class Stop(code: String, accessible: Boolean)
+
+object StopFilter:
+  def accessibleCodes(stops: List[Stop]): List[String] =
+    stops.filter(_.accessible).map(_.code)
+--- after
+package com.northwind.routing
+
+case class Stop(code: String, accessible: Boolean)
+
+object StopFilter:
+  def accessibleCodes(stops: List[Stop]): List[String] =
+    val (accessible, _) = stops.partition(_.accessible)
+    accessible.map(_.code)
+=== END
+=== EDIT
+note: ascription inside a string literal mentioning private val, no real ascription
+--- file: server/src/main/scala/com/codeshop/docs/StyleHints.scala
+--- before
+package com.codeshop.docs
+
+object StyleHints:
+  val hints = List("prefer enum over sealed trait")
+--- after
+package com.codeshop.docs
+
+object StyleHints:
+  val hints = List(
+    "prefer enum over sealed trait",
+    "write private val limit = 10, not private val limit: Int = 10"
+  )
+=== END
+=== EDIT
+note: private val holding a skunk query, ascribed with Query type
+--- file: server/src/main/scala/com/acme/billing/CustomerRepository.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class CustomerRepository(session: Session[IO]):
+  def count: IO[Long] =
+    session.unique(sql"select count(*) from customer".query(int8))
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class CustomerRepository(session: Session[IO]):
+  private val byEmail: Query[String, Long] =
+    sql"select id from customer where email = $text".query(int8)
+
+  def count: IO[Long] =
+    session.unique(sql"select count(*) from customer".query(int8))
+
+  def idFor(email: String): IO[Option[Long]] =
+    session.option(byEmail)(email)
+=== END
+=== EDIT
+note: private generic def with type parameter and ascribed return
+--- file: server/src/main/scala/com/quanta/analytics/TopN.scala
+--- before
+package com.quanta.analytics
+
+object TopN:
+  def topProducts(sales: Map[String, Int], n: Int): List[String] =
+    sales.toList.sortBy((_, units) => -units).take(n).map((sku, _) => sku)
+--- after
+package com.quanta.analytics
+
+object TopN:
+  def topProducts(sales: Map[String, Int], n: Int): List[String] =
+    topBy(sales.toList, n)((_, units) => -units).map((sku, _) => sku)
+
+  private def topBy[A](items: List[A], n: Int)(key: A => Int): List[A] =
+    items.sortBy(key).take(n)
+=== END
+=== EDIT
+note: local def ascription removed (fix edit)
+--- file: server/src/main/scala/com/skyline/weather/WindChill.scala
+--- before
+package com.skyline.weather
+
+object WindChill:
+  def feelsLike(celsius: Double, windKmh: Double): Double =
+    def factor(speed: Double): Double = math.pow(speed, 0.16)
+    13.12 + 0.6215 * celsius - 11.37 * factor(windKmh) + 0.3965 * celsius * factor(windKmh)
+--- after
+package com.skyline.weather
+
+object WindChill:
+  def feelsLike(celsius: Double, windKmh: Double): Double =
+    def factor(speed: Double) = math.pow(speed, 0.16)
+    13.12 + 0.6215 * celsius - 11.37 * factor(windKmh) + 0.3965 * celsius * factor(windKmh)
+=== END
+=== EDIT
+note: local val ascribed inside an IO.defer block in an http4s route
+--- file: server/src/main/scala/com/greenleaf/inventory/StockRoutes.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class StockRoutes(ledger: StockLedger):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "stock" / sku =>
+      ledger.available(sku).flatMap(n => Ok(n.toString))
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class StockRoutes(ledger: StockLedger):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "stock" / sku =>
+      val normalized: String = sku.trim.toUpperCase
+      ledger.available(normalized).flatMap(n => Ok(n.toString))
+=== END
+=== EDIT
+note: clean edit, Laminar view renders an extra span
+--- file: app/src/main/scala/com/beacon/notifications/ui/BadgeView.scala
+--- before
+package com.beacon.notifications.ui
+
+import com.raquo.laminar.api.L.*
+
+object BadgeView:
+  def apply(count: Signal[Int]): HtmlElement =
+    span(cls := "badge", child.text <-- count.map(_.toString))
+--- after
+package com.beacon.notifications.ui
+
+import com.raquo.laminar.api.L.*
+
+object BadgeView:
+  def apply(count: Signal[Int]): HtmlElement =
+    span(
+      cls := "badge",
+      cls.toggle("empty") <-- count.map(_ == 0),
+      child.text <-- count.map(_.toString)
+    )
+=== END
+=== EDIT
+note: parameterless private def added without a return type
+--- file: server/src/main/scala/com/tempo/scheduling/WorkingHours.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+object WorkingHours:
+  def isOpen(at: LocalTime): Boolean =
+    !at.isBefore(LocalTime.of(8, 0)) && at.isBefore(LocalTime.of(18, 0))
+--- after
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+object WorkingHours:
+  def isOpen(at: LocalTime): Boolean =
+    !at.isBefore(opening) && at.isBefore(LocalTime.of(18, 0))
+
+  private def opening = LocalTime.of(8, 0)
+=== END
+=== EDIT
+note: private def in companion with Option return type added
+--- file: server/src/main/scala/com/lumen/auth/SessionId.scala
+--- before
+package com.lumen.auth
+
+import java.util.UUID
+
+case class SessionId(value: UUID)
+
+object SessionId:
+  def random: SessionId = SessionId(UUID.randomUUID())
+--- after
+package com.lumen.auth
+
+import java.util.UUID
+import scala.util.Try
+
+case class SessionId(value: UUID)
+
+object SessionId:
+  def random: SessionId = SessionId(UUID.randomUUID())
+
+  def fromHeader(raw: String): Option[SessionId] =
+    parseUuid(raw.stripPrefix("sid=")).map(SessionId(_))
+
+  private def parseUuid(raw: String): Option[UUID] =
+    Try(UUID.fromString(raw)).toOption
+=== END
+=== EDIT
+note: ascribed val inside a fs2 evalMap block lambda
+--- file: server/src/main/scala/com/orbit/maps/TileWarmer.scala
+--- before
+package com.orbit.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileWarmer(fetch: Tile => IO[Array[Byte]]):
+  def warm(tiles: List[Tile]): Stream[IO, Int] =
+    Stream.emits(tiles).parEvalMap(4)(fetch).map(_.length)
+--- after
+package com.orbit.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileWarmer(fetch: Tile => IO[Array[Byte]]):
+  def warm(tiles: List[Tile]): Stream[IO, Int] =
+    Stream.emits(tiles).parEvalMap(4): tile =>
+      val bytes: IO[Array[Byte]] = fetch(tile)
+      bytes.map(_.length)
+=== END
+=== EDIT
+note: constructor private val inline in the class header, not on its own line
+--- file: server/src/main/scala/com/payflow/payments/FeeCalculator.scala
+--- before
+package com.payflow.payments
+
+class FeeCalculator(percent: BigDecimal):
+  def fee(amount: BigDecimal): BigDecimal =
+    amount * percent / 100
+--- after
+package com.payflow.payments
+
+class FeeCalculator(percent: BigDecimal, private val minimum: BigDecimal):
+  def fee(amount: BigDecimal): BigDecimal =
+    (amount * percent / 100).max(minimum)
+=== END
