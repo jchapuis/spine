@@ -53,6 +53,7 @@ if [ "$UNINSTALL" = 1 ]; then
   jq "$STRIP" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
   if [ -n "$WORKTREE_HOOK" ] && grep -q "$WORKTREE_HOOK_MARKER" "$WORKTREE_HOOK" 2>/dev/null; then rm "$WORKTREE_HOOK"; fi
   [ -L "$PROJECT/.abide/rubric.json" ] && rm "$PROJECT/.abide/rubric.json"
+  [ -L "$PROJECT/.abide/events.jsonl" ] && rm "$PROJECT/.abide/events.jsonl"
   echo "abide-enable: removed abide hooks and the rubric link from $PROJECT"
   exit 0
 fi
@@ -62,6 +63,17 @@ jq --arg cmd "node \"$HOOK\"" --arg hook "\"$HOOK\"" --arg shim "node \"$SCRIPT_
 # The shared rubric (/projects-update makes the same link; an existing file or link is left alone).
 mkdir -p "$PROJECT/.abide"
 [ -e "$PROJECT/.abide/rubric.json" ] || ln -s "$SPINE_ROOT/.abide/rubric.json" "$PROJECT/.abide/rubric.json"
+
+# A worktree logs its checks into the main checkout's events.jsonl, so `abide report` there counts the checks made
+# in every worktree, and removing a worktree does not take its share of the stats with it.
+if [ "$IS_GIT" = 1 ]; then
+  MAIN=$(cd -- "$(dirname -- "$(git -C "$PROJECT" rev-parse --path-format=absolute --git-common-dir)")" && pwd -P)
+  if [ "$MAIN" != "$PROJECT" ] && [ ! -e "$PROJECT/.abide/events.jsonl" ] && [ ! -L "$PROJECT/.abide/events.jsonl" ]; then
+    mkdir -p "$MAIN/.abide"
+    touch "$MAIN/.abide/events.jsonl"
+    ln -s "$MAIN/.abide/events.jsonl" "$PROJECT/.abide/events.jsonl"
+  fi
+fi
 
 # Keep both out of the project's git status, locally only.
 # info/exclude is read from the common git dir only, so a worktree must write there, not to its own git dir.
