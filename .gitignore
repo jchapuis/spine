@@ -8,6 +8,9 @@ tasks
 .claude/*
 !.claude/skills/
 !.claude/commands/
+!.claude/hooks/
+!.claude/agents/
+!.claude/settings.json
 
 # Third-party skills installed from elsewhere — only skills written here are tracked.
 # Add a line when you install another one.

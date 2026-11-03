@@ -68,13 +68,68 @@ If the target is too large for two agents to cover, narrow the target — review
 rather than re-reviewing commits that already carry review history — instead of widening the fleet.
 
 When both return, merge into one report: dedupe overlapping findings, order by severity, keep each
-finding to one line, and separate confirmed defects from speculative concerns. Do not fix anything
-unless asked.
+finding to one line, and separate confirmed defects from speculative concerns.
 
-Two things to weigh rather than accept:
+## Triage: fix by default, ask only what is truly open
 
-- A finding that reads as an *accidental* revert or omission may be a deliberate decision the
-  reviewer could not see. Check the intent before acting — but if a reviewer misread it, the commit
-  message that let them is worth fixing too.
-- Findings that indict a design decision are the valuable ones. Surface them as decisions for the
-  user rather than quietly implementing around them.
+The user accepts nearly every suggestion, so asking about each one only slows the PR down. Sort
+every finding into one of three buckets:
+
+- **Fix.** This is the default. It applies to any confirmed finding whose fix you can name without
+  choosing between options: bugs, skill violations, mechanical-layer hits, duplication, stale docs,
+  jargon, and simplicity findings marked worth-it. Verify the finding against the code first, then
+  fix it yourself (the review workers cannot edit).
+- **Drop.** A speculative finding you cannot confirm from the code, or a taste-only simplicity note.
+  List it in the report as dropped, with the reason, and do nothing more.
+- **Decision.** Use this only when one of the following holds:
+  - The fix would reverse a recorded choice (README, ADR, task file, commit message, memory).
+  - There are two or more reasonable fixes with real trade-offs between them.
+  - The fix needs context that isn't in the repo, such as product intent, an outside constraint,
+    or what a partner expects.
+  - The fix goes well beyond the diff: a public API, a schema, or another project.
+  - It is a necessity (6b) finding that would delete work the stated intent asked for.
+
+  A finding that reads as an *accidental* revert or omission may have been deliberate. Check the
+  intent first. If it was deliberate, the finding is a decision, or a drop. If the reviewer
+  misread it, fix the commit message or comment that misled them.
+
+Do the fixes, run what the touched code needs (compile, the tests nearby, and the compliance-gate
+mechanical layer on the touched files), then **commit them as their own commit**
+(`fix: address /ck findings`). Leave decision items alone, and don't work around them quietly.
+
+## Stamp the review
+
+Write the reviewed sha to the stamp, using the target's checkout (its worktree, if it has one):
+
+```bash
+git -C <path> rev-parse HEAD > "$(git -C <path> rev-parse --absolute-git-dir)/ck-reviewed"
+```
+
+Stamp **after** the fix commit. Those fixes come straight from the findings, so they count as
+reviewed. The PR gate (`.claude/hooks/ck-gate.sh`) lets `gh pr create` through only when the
+stamp is HEAD. Otherwise it asks for `/ck <stamp>..HEAD`, which reviews only the newer commits.
+
+## Send decisions to the Plannotator Inbox
+
+Decisions never hold up the PR. Ask them in the inbox and keep going.
+
+**Always pass `project_path`** set to the repo's main checkout:
+`dirname "$(git -C <path> rev-parse --path-format=absolute --git-common-dir)"`, for example
+`/Users/jchapuis/Seafile/spine/projects/gritmaps`. Without it, the inbox files the message under the
+folder the session started in, which is usually the spine root. The message then lands in a separate
+spine project instead of beside the PR's guided review. A worktree path has the same problem.
+
+- If the branch already has a PR, use `plannotator_inbox` `send_message` with
+  `thread: "PR #<number>"`. That is the same thread its guided review lives in.
+- If it has none yet, write the decisions to `<git-dir>/ck-decisions.md`. Right after the PR opens,
+  send them to the `PR #<number>` thread together with the guided review, then delete the file.
+
+Ask each decision as a `:::question` block: what the finding is, at `file:line`, why it is open (which
+of the reasons above applies), the options, and your `Recommended:` pick. Use `Holds up:` only when
+merging should wait for the answer. When the answer arrives, apply it in a follow-up commit. That
+commit goes through the gate like any other.
+
+## Report
+
+End with a short summary of the fixes made (one line each), the decisions sent to the inbox, and
+the findings dropped with their reasons.
