@@ -20,9 +20,10 @@ tasks/              # Planning files (gitignored)
   commands/         # Custom slash commands available in Claude Code
   skills/           # Shared skill packages loaded by Claude on demand
   agents/           # Subagent types (review-worker, used by /ck)
-  hooks/            # ck-gate.sh: blocks PR creation until /ck has reviewed the branch
+  hooks/            # ck-gate.sh (blocks PR creation until /ck has reviewed the branch) and its tests
 .abide/
-  rubric.json       # Per-edit rules for abide, shared into every project (see the compliance-gate README)
+  rubric.json       # Per-edit rules for abide; this file is linked into every project
+  finetune/         # Training pipeline for the local model abide queries
 ```
 
 `projects/` and `tasks/` are gitignored. Only the scaffolding and tooling are tracked.
@@ -33,7 +34,7 @@ tasks/              # Planning files (gitignored)
 
 1. Clone or create the project repository under `projects/<name>/`.
 2. Open Claude Code from the Spine root and run `/projects-update`.
-   Claude will detect the new directory, ask you to confirm a three-letter prefix, update `projects/projects.md`, and create symlinks so the project inherits Spine's shared commands and skills.
+   Claude will detect the new directory, ask you to confirm a three-letter prefix, update `projects/projects.md`, and create symlinks so the project inherits Spine's shared commands, skills, agents and abide rubric.
 
 The symlinks created are:
 
@@ -44,9 +45,9 @@ projects/<name>/.claude/agents    →  ../../../.claude/agents
 projects/<name>/.abide/rubric.json  →  ../../../.abide/rubric.json
 ```
 
-Any Claude Code session opened inside a subproject automatically has access to the same slash commands, skills and agents as the Spine root.
+Once linked, a Claude Code session opened inside a subproject has the same slash commands, skills and agents as the Spine root. Re-run `/projects-update` whenever this list grows, so that existing projects pick up the new links.
 
-Hooks are the exception: project settings don't follow symlinks into the spine, so the PR gate is registered in the user settings instead (see [Review and PR flow](#review-and-pr-flow)).
+Hooks are the exception. They live in `settings.json`, which isn't linked, so the PR gate is registered in the user settings instead (see [Review and PR flow](#review-and-pr-flow)).
 
 ---
 
@@ -140,18 +141,21 @@ Code is checked at three points, each cheaper than the next one:
 
 | When | What | How |
 |------|------|-----|
-| Every edit | abide asks a local model the per-edit rules in `.abide/rubric.json` | Hook, once `abide-enable` has run in the project |
-| Every commit | `compliance-gate` mechanical layer (ripgrep, Scalafix, scalafmt) | Git pre-commit hook, plus `/go` runs the skill inline |
+| Every edit | [abide](https://github.com/coldteadotai/abide), a per-edit rule checker, asks a local model the rules in `.abide/rubric.json` | Claude Code hook, once `abide-enable` has run in the project |
+| Every commit | `compliance-gate` mechanical layer (ripgrep, Scalafix, scalafmt) | Git pre-commit hook, once `compliance-gate/bin/install-gate <project>` has run; `/go` also runs the skill inline |
 | Before the PR | `/ck`: `/code-review` and the full `compliance-gate` in two `review-worker` agents | `ck-gate.sh` blocks `gh pr create` until `/ck` has run |
 
-**The PR gate.** `/ck` writes the sha it reviewed up to into `<git-dir>/ck-reviewed` (one per
-worktree). `.claude/hooks/ck-gate.sh` is a `PreToolUse` hook on Bash. It blocks any command that
-opens a PR (`gh pr create`, or `gh api …/pulls` POSTs) unless that sha is HEAD. When newer commits
-sit on top of it, it asks for `/ck <sha>..HEAD`, so only the new work gets reviewed. It is registered
-in the user settings (`~/.claude-perso/settings.json`), so sessions in every project get it. On a
-machine without the spine, the hook does nothing. Its tests are `.claude/hooks/ck-gate.test.sh`.
-The gate covers only PRs that Claude opens. Before pushing follow-up commits to an open PR, run
-`/ck <sha>..HEAD` yourself.
+**The PR gate.**
+- `/ck` writes the last commit it reviewed into a stamp file, `<git-dir>/ck-reviewed`, one per
+  worktree.
+- `.claude/hooks/ck-gate.sh` is a `PreToolUse` hook on Bash. It blocks any command that opens a PR
+  (`gh pr create`, `gh api …/pulls` POSTs, the GraphQL `createPullRequest` call) unless the stamp is
+  HEAD. When newer commits sit on top of the stamp, it asks for `/ck <stamp>..HEAD`, so only the
+  new work gets reviewed. Its tests are in `.claude/hooks/ck-gate.test.sh`.
+- It is registered in the user settings (`~/.claude-perso/settings.json`), so sessions in every
+  project get it. On a machine without the spine, it does nothing.
+- It only covers PRs that Claude opens. Before pushing follow-up commits to an open PR, run
+  `/ck <stamp>..HEAD` yourself.
 
 **Fix by default.** `/ck` fixes every confirmed finding whose fix is clear, commits the fixes as
 one commit, and then writes the stamp. Findings it can't confirm are dropped, each with its
@@ -163,7 +167,7 @@ options, context the repo doesn't have, or a change that goes past the diff.
   coding until the plan is approved there.
 - **Inbox.** Questions for when you're away from the chat. Each repo has its own project in the
   inbox, and every PR gets one thread, `PR #<n>`, under the repo's main checkout. That thread holds
-  the guided review together with `/ck`'s open decisions, sent as one message. Answers come back
+  the guided review (a walkthrough of the diff in reading order) together with `/ck`'s open decisions, sent as one message. Answers come back
   into the session that asked, and the follow-up commit gets an incremental `/ck`.
 - **`/pr-guide`.** Puts a shareable, encrypted guided-review link in the PR description.
 
