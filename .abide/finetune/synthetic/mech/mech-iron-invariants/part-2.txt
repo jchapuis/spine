@@ -1,0 +1,698 @@
+=== EDIT
+note: skunk codec maps a column through refineUnsafe
+--- file: server/src/main/scala/com/stockpile/inventory/db/SkuCodecs.scala
+--- before
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+import skunk.Codec
+import skunk.codec.all.*
+
+object SkuCodecs:
+  val warehouseName: Codec[String] = varchar(64)
+--- after
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+import skunk.Codec
+import skunk.codec.all.*
+
+object SkuCodecs:
+  val warehouseName: Codec[String] = varchar(64)
+  val sku: Codec[String :| Match["[A-Z]{3}-[0-9]{4}"]] =
+    varchar(16).imap(_.refineUnsafe[Match["[A-Z]{3}-[0-9]{4}"]])(identity)
+=== END
+
+=== EDIT
+note: skunk codec uses eimap with refineEither for the sku column
+--- file: server/src/main/scala/com/stockpile/inventory/db/LotCodecs.scala
+--- before
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+import skunk.Codec
+import skunk.codec.all.*
+
+object LotCodecs:
+  val lotNumber: Codec[String] = varchar(32)
+--- after
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+import skunk.Codec
+import skunk.codec.all.*
+
+object LotCodecs:
+  val lotNumber: Codec[String :| Match["L[0-9]{6}"]] =
+    varchar(32).eimap(_.refineEither[Match["L[0-9]{6}"]])(identity)
+=== END
+
+=== EDIT
+note: circe decoder for a postcode via applyUnsafe
+--- file: server/src/main/scala/com/cartograph/geo/Postcode.scala
+--- before
+package com.cartograph.geo
+
+import io.circe.Decoder
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type Postcode = Postcode.T
+object Postcode extends RefinedSubtype[String, Match["[0-9]{4,5}"]]
+--- after
+package com.cartograph.geo
+
+import io.circe.Decoder
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type Postcode = Postcode.T
+object Postcode extends RefinedSubtype[String, Match["[0-9]{4,5}"]]:
+  given Decoder[Postcode] = Decoder.decodeString.map(Postcode.applyUnsafe)
+=== END
+
+=== EDIT
+note: circe decoder for a postcode using emap and either
+--- file: server/src/main/scala/com/cartograph/geo/Region.scala
+--- before
+package com.cartograph.geo
+
+import io.circe.Decoder
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type RegionCode = RegionCode.T
+object RegionCode extends RefinedSubtype[String, Match["[A-Z]{2}-[A-Z]{2,3}"]]
+--- after
+package com.cartograph.geo
+
+import io.circe.Decoder
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type RegionCode = RegionCode.T
+object RegionCode extends RefinedSubtype[String, Match["[A-Z]{2}-[A-Z]{2,3}"]]:
+  given Decoder[RegionCode] = Decoder.decodeString.emap(RegionCode.either)
+=== END
+
+=== EDIT
+note: tapir codec built with applyUnsafe for a path segment
+--- file: server/src/main/scala/com/orbit/routing/api/RouteEndpoints.scala
+--- before
+package com.orbit.routing.api
+
+import io.github.iltotore.iron.*
+import sttp.tapir.*
+
+object RouteEndpoints:
+  val byId: PublicEndpoint[String, Unit, RouteView, Any] =
+    endpoint.get.in("routes" / path[String]("id")).out(stringBody.map(RouteView(_))(_.raw))
+--- after
+package com.orbit.routing.api
+
+import io.github.iltotore.iron.*
+import sttp.tapir.*
+
+object RouteEndpoints:
+  given Codec[String, RouteKey, CodecFormat.TextPlain] =
+    Codec.string.map(
+      RouteKey.applyUnsafe(_)
+    )(_.value)
+
+  val byId: PublicEndpoint[RouteKey, Unit, RouteView, Any] =
+    endpoint.get.in("routes" / path[RouteKey]("id")).out(stringBody.map(RouteView(_))(_.raw))
+=== END
+
+=== EDIT
+note: bare alias for an account id over java.util.UUID fully qualified
+--- file: server/src/main/scala/com/ledgerly/payments/Accounts.scala
+--- before
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+trait Accounts:
+  def balance(account: java.util.UUID): IO[Money]
+--- after
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+object Accounts:
+  type AccountId = java.util.UUID
+
+trait Accounts:
+  def balance(account: Accounts.AccountId): IO[Money]
+=== END
+
+=== EDIT
+note: opaque type for an account id (not a bare alias)
+--- file: server/src/main/scala/com/ledgerly/payments/Wallet.scala
+--- before
+package com.ledgerly.payments
+
+import java.util.UUID
+
+case class Wallet(owner: UUID, balance: Money)
+--- after
+package com.ledgerly.payments
+
+import java.util.UUID
+
+opaque type WalletId = UUID
+
+object WalletId:
+  def apply(raw: UUID): WalletId = raw
+
+case class Wallet(id: WalletId, owner: UUID, balance: Money)
+=== END
+
+=== EDIT
+note: require in a for-comprehension step of a payment flow
+--- file: server/src/main/scala/com/ledgerly/payments/TransferService.scala
+--- before
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+class TransferService(accounts: Accounts, ledger: Ledger):
+
+  def transfer(from: AccountRef, to: AccountRef, amount: Money): IO[Unit] =
+    for
+      balance <- accounts.balance(from)
+      _ <- ledger.post(from, to, amount)
+    yield ()
+--- after
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+class TransferService(accounts: Accounts, ledger: Ledger):
+
+  def transfer(from: AccountRef, to: AccountRef, amount: Money): IO[Unit] =
+    for
+      balance <- accounts.balance(from)
+      _ <- IO(require(balance >= amount, s"insufficient funds on $from"))
+      _ <- ledger.post(from, to, amount)
+    yield ()
+=== END
+
+=== EDIT
+note: same transfer flow raising a typed error instead of require
+--- file: server/src/main/scala/com/ledgerly/payments/PayoutService.scala
+--- before
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+class PayoutService(accounts: Accounts, ledger: Ledger):
+
+  def payout(from: AccountRef, amount: Money): IO[Unit] =
+    for
+      balance <- accounts.balance(from)
+      _ <- ledger.withdraw(from, amount)
+    yield ()
+--- after
+package com.ledgerly.payments
+
+import cats.effect.IO
+
+class PayoutService(accounts: Accounts, ledger: Ledger):
+
+  def payout(from: AccountRef, amount: Money): IO[Unit] =
+    for
+      balance <- accounts.balance(from)
+      _ <- IO.raiseUnless(balance >= amount)(PayoutError.InsufficientFunds(from))
+      _ <- ledger.withdraw(from, amount)
+    yield ()
+=== END
+
+=== EDIT
+note: iron constraint test uses applyUnsafe directly in a munit suite
+--- file: server/src/test/scala/com/cartograph/geo/PostcodeSuite.scala
+--- before
+package com.cartograph.geo
+
+import munit.FunSuite
+
+class PostcodeSuite extends FunSuite:
+
+  test("rejects letters"):
+    assert(Postcode.option("12a4").isEmpty)
+--- after
+package com.cartograph.geo
+
+import io.github.iltotore.iron.*
+import munit.FunSuite
+
+class PostcodeSuite extends FunSuite:
+
+  test("rejects letters"):
+    assert(Postcode.option("12a4").isEmpty)
+
+  test("renders as the raw digits"):
+    assertEquals(Postcode.applyUnsafe("8001").value, "8001")
+=== END
+
+=== EDIT
+note: iron constraint test uses the compile-time constructor
+--- file: server/src/test/scala/com/cartograph/geo/RegionCodeSuite.scala
+--- before
+package com.cartograph.geo
+
+import munit.FunSuite
+
+class RegionCodeSuite extends FunSuite:
+
+  test("rejects lowercase"):
+    assert(RegionCode.option("ch-zh").isEmpty)
+--- after
+package com.cartograph.geo
+
+import io.github.iltotore.iron.*
+import munit.FunSuite
+
+class RegionCodeSuite extends FunSuite:
+
+  test("rejects lowercase"):
+    assert(RegionCode.option("ch-zh").isEmpty)
+
+  test("accepts canton codes"):
+    assertEquals(RegionCode.option("CH-ZH"), Some(RegionCode("CH-ZH")))
+=== END
+
+=== EDIT
+note: require in an integration test fixture
+--- file: server/src/it/scala/com/stockpile/inventory/WarehouseRepoIt.scala
+--- before
+package com.stockpile.inventory
+
+import munit.CatsEffectSuite
+
+class WarehouseRepoIt extends CatsEffectSuite:
+
+  test("inserts and reads back"):
+    Database.session.use: session =>
+      WarehouseRepo(session).insert(Seeds.north).void
+--- after
+package com.stockpile.inventory
+
+import munit.CatsEffectSuite
+
+class WarehouseRepoIt extends CatsEffectSuite:
+
+  test("inserts and reads back"):
+    Database.session.use: session =>
+      WarehouseRepo(session).insert(Seeds.north).flatMap: id =>
+        WarehouseRepo(session).find(id).map(found => require(found.contains(Seeds.north)))
+=== END
+
+=== EDIT
+note: assume on a literal inside a test fixture file
+--- file: server/src/test/scala/com/shelfwise/catalog/CatalogFixtures.scala
+--- before
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+
+object CatalogFixtures:
+  val books: Category = Category(Categories.uncategorised, "Books")
+--- after
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+
+object CatalogFixtures:
+  val books: Category = Category(Categories.uncategorised, "Books")
+  val garden: Category = Category("garden-tools".assume, "Garden")
+  val toys: Category = Category("toys-games".assume[SlugRule], "Toys")
+=== END
+
+=== EDIT
+note: assume on a runtime value already validated upstream (not a literal)
+--- file: server/src/main/scala/com/shelfwise/catalog/SlugNormaliser.scala
+--- before
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+
+object SlugNormaliser:
+  def normalise(title: String): String =
+    title.toLowerCase.replaceAll("[^a-z0-9]+", "-")
+--- after
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+
+object SlugNormaliser:
+  def normalise(title: String): String =
+    title.toLowerCase.replaceAll("[^a-z0-9]+", "-")
+
+  def slug(title: String): Option[Slug] =
+    normalise(title).refineOption[SlugRule]
+=== END
+
+=== EDIT
+note: generic Id alias in a small persistence module
+--- file: server/src/main/scala/com/tempo/scheduling/db/Rows.scala
+--- before
+package com.tempo.scheduling.db
+
+import java.time.LocalDateTime
+
+case class SlotRow(start: LocalDateTime, end: LocalDateTime)
+--- after
+package com.tempo.scheduling.db
+
+import java.time.LocalDateTime
+import java.util.UUID
+
+object Rows:
+  type Id = UUID
+
+case class SlotRow(id: Rows.Id, start: LocalDateTime, end: LocalDateTime)
+=== END
+
+=== EDIT
+note: rename an iron type and keep its constructor usage
+--- file: server/src/main/scala/com/tempo/scheduling/Duration.scala
+--- before
+package com.tempo.scheduling
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+type Minutes = Int :| Positive
+
+object Durations:
+  val standard: Minutes = 30
+--- after
+package com.tempo.scheduling
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+type SlotMinutes = Int :| Positive
+
+object Durations:
+  val standard: SlotMinutes = 30
+  val extended: SlotMinutes = 45
+=== END
+
+=== EDIT
+note: require on a percent in an object initializer for a feature flag rollout
+--- file: server/src/main/scala/com/pulse/flags/Rollout.scala
+--- before
+package com.pulse.flags
+
+case class Rollout(flag: FlagKey, percent: Int)
+
+object Rollout:
+  def full(flag: FlagKey): Rollout = Rollout(flag, 100)
+--- after
+package com.pulse.flags
+
+case class Rollout(flag: FlagKey, percent: Int)
+
+object Rollout:
+  def full(flag: FlagKey): Rollout = Rollout(flag, 100)
+
+  def partial(flag: FlagKey, percent: Int): Rollout =
+    require(percent >= 0 && percent <= 100)
+    Rollout(flag, percent)
+=== END
+
+=== EDIT
+note: rollout percent as an iron Interval type with either at the boundary
+--- file: server/src/main/scala/com/pulse/flags/Exposure.scala
+--- before
+package com.pulse.flags
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Exposure = Int :| Interval.Closed[0, 100]
+--- after
+package com.pulse.flags
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Exposure = Int :| Interval.Closed[0, 100]
+
+object Exposure:
+  def parse(raw: Int): Either[String, Exposure] = raw.refineEither[Interval.Closed[0, 100]]
+=== END
+
+=== EDIT
+note: add logging of feature flag changes, nothing iron-related
+--- file: server/src/main/scala/com/pulse/flags/FlagAudit.scala
+--- before
+package com.pulse.flags
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class FlagAudit(using Logger[IO]):
+  def changed(flag: FlagKey): IO[Unit] =
+    Logger[IO].info(s"flag $flag changed")
+--- after
+package com.pulse.flags
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class FlagAudit(using Logger[IO]):
+  def changed(flag: FlagKey): IO[Unit] =
+    Logger[IO].info(s"flag $flag changed")
+
+  def removed(flag: FlagKey): IO[Unit] =
+    Logger[IO].info(s"flag $flag removed")
+=== END
+
+=== EDIT
+note: refineUnsafe with a parenthesised constraint value in a weather station parser
+--- file: server/src/main/scala/com/skyline/weather/StationParser.scala
+--- before
+package com.skyline.weather
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+object StationParser:
+  def parse(line: String): Option[StationLine] =
+    line.split(';').toList match
+      case code :: name :: Nil => Some(StationLine(code, name))
+      case _ => None
+--- after
+package com.skyline.weather
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+object StationParser:
+  def parse(line: String): Option[StationLine] =
+    line.split(';').toList match
+      case code :: name :: Nil =>
+        Some(StationLine(code.trim.refineUnsafe[Match["[A-Z]{4}"]], name))
+      case _ => None
+=== END
+
+=== EDIT
+note: station code alias as a bare string id in a weather client
+--- file: server/src/main/scala/com/skyline/weather/StationClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class StationClient(http: Client[IO]):
+  def latest(station: String): IO[Observation] =
+    http.expect[Observation](s"/stations/$station/latest")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+type StationId = String
+
+class StationClient(http: Client[IO]):
+  def latest(station: StationId): IO[Observation] =
+    http.expect[Observation](s"/stations/$station/latest")
+=== END
+
+=== EDIT
+note: fix by turning the station id into a refined subtype
+--- file: server/src/main/scala/com/skyline/weather/ObservationClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+type ObservationId = String
+
+class ObservationClient(http: Client[IO]):
+  def get(id: ObservationId): IO[Observation] =
+    http.expect[Observation](s"/observations/$id")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+import org.http4s.client.Client
+
+type ObservationId = ObservationId.T
+object ObservationId extends RefinedSubtype[String, Match["[A-Z0-9]{8}"]]
+
+class ObservationClient(http: Client[IO]):
+  def get(id: ObservationId): IO[Observation] =
+    http.expect[Observation](s"/observations/$id")
+=== END
+
+=== EDIT
+note: require that a polygon ring is closed in a geometry helper
+--- file: server/src/main/scala/com/cartograph/maps/Polygon.scala
+--- before
+package com.cartograph.maps
+
+case class Polygon(ring: Vector[Coordinate]):
+  def area: Double = Geometry.shoelace(ring)
+--- after
+package com.cartograph.maps
+
+case class Polygon(ring: Vector[Coordinate]):
+  require(ring.headOption == ring.lastOption, "polygon ring must be closed")
+  require(ring.size >= 4, "polygon ring needs at least four points")
+  def area: Double = Geometry.shoelace(ring)
+=== END
+
+=== EDIT
+note: a method named requireNonBlank on a builder (identifier, not require call)
+--- file: server/src/main/scala/com/hivemind/forms/FieldRules.scala
+--- before
+package com.hivemind.forms
+
+import cats.data.ValidatedNel
+import cats.syntax.validated.*
+
+object FieldRules:
+  def maxLength(field: String, limit: Int)(value: String): ValidatedNel[FieldError, String] =
+    if value.length <= limit then value.validNel else FieldError.TooLong(field, limit).invalidNel
+--- after
+package com.hivemind.forms
+
+import cats.data.ValidatedNel
+import cats.syntax.validated.*
+
+object FieldRules:
+  def maxLength(field: String, limit: Int)(value: String): ValidatedNel[FieldError, String] =
+    if value.length <= limit then value.validNel else FieldError.TooLong(field, limit).invalidNel
+
+  def requireNonBlank(field: String)(value: String): ValidatedNel[FieldError, String] =
+    if value.trim.nonEmpty then value.validNel else FieldError.Blank(field).invalidNel
+=== END
+
+=== EDIT
+note: call the requireNonBlank validator from the signup form
+--- file: server/src/main/scala/com/hivemind/forms/SignupValidation.scala
+--- before
+package com.hivemind.forms
+
+import cats.data.ValidatedNel
+
+object SignupValidation:
+  def name(raw: String): ValidatedNel[FieldError, String] =
+    FieldRules.maxLength("name", 80)(raw)
+--- after
+package com.hivemind.forms
+
+import cats.data.ValidatedNel
+import cats.syntax.apply.*
+
+object SignupValidation:
+  def name(raw: String): ValidatedNel[FieldError, String] =
+    FieldRules.requireNonBlank("name")(raw) *> FieldRules.maxLength("name", 80)(raw)
+=== END
+
+=== EDIT
+note: applyUnsafe on a quota in a rate limiter wired at startup
+--- file: server/src/main/scala/com/hivemind/ratelimit/Limits.scala
+--- before
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+type RequestsPerMinute = RequestsPerMinute.T
+object RequestsPerMinute extends RefinedSubtype[Int, Positive]
+
+object Limits:
+  val anonymous: RequestsPerMinute = RequestsPerMinute(30)
+--- after
+package com.hivemind.ratelimit
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive
+
+type RequestsPerMinute = RequestsPerMinute.T
+object RequestsPerMinute extends RefinedSubtype[Int, Positive]
+
+object Limits:
+  val anonymous: RequestsPerMinute = RequestsPerMinute(30)
+  def fromEnv(raw: String): RequestsPerMinute = RequestsPerMinute.applyUnsafe(raw.toInt)
+=== END
+
+=== EDIT
+note: rate limit read from env with option and an explicit fallback error
+--- file: server/src/main/scala/com/hivemind/ratelimit/LimitConfig.scala
+--- before
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+
+object LimitConfig:
+  def anonymous: IO[RequestsPerMinute] = IO.pure(Limits.anonymous)
+--- after
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+
+object LimitConfig:
+  def anonymous: IO[RequestsPerMinute] = IO.pure(Limits.anonymous)
+
+  def authenticated(raw: String): IO[RequestsPerMinute] =
+    IO.fromOption(raw.toIntOption.flatMap(RequestsPerMinute.option))(ConfigError.InvalidLimit(raw))
+=== END
+
+=== EDIT
+note: integer counter alias, not an id
+--- file: server/src/main/scala/com/hivemind/ratelimit/Counters.scala
+--- before
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class Counters(state: Ref[IO, Map[ClientRef, Int]]):
+  def hit(client: ClientRef): IO[Int] =
+    state.modify(m => (m.updated(client, m.getOrElse(client, 0) + 1), m.getOrElse(client, 0) + 1))
+--- after
+package com.hivemind.ratelimit
+
+import cats.effect.IO
+import cats.effect.Ref
+
+type HitCount = Int
+
+class Counters(state: Ref[IO, Map[ClientRef, HitCount]]):
+  def hit(client: ClientRef): IO[HitCount] =
+    state.modify(m => (m.updated(client, m.getOrElse(client, 0) + 1), m.getOrElse(client, 0) + 1))
+=== END

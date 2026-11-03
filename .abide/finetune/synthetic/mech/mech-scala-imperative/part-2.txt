@@ -1,0 +1,649 @@
+=== EDIT
+note: laminar component tracks clicks in a var
+--- file: app/src/main/scala/com/brightway/ui/CartBadge.scala
+--- before
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object CartBadge:
+  def apply(count: Signal[Int]): HtmlElement =
+    span(cls := "cart-badge", child.text <-- count.map(_.toString))
+--- after
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object CartBadge:
+  def apply(count: Signal[Int]): HtmlElement =
+    var lastSeen = 0
+    span(
+      cls := "cart-badge",
+      child.text <-- count.map(_.toString),
+      count --> (current => lastSeen = current)
+    )
+=== END
+=== EDIT
+note: laminar component uses Var for state, clean
+--- file: app/src/main/scala/com/brightway/ui/QuantityPicker.scala
+--- before
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object QuantityPicker:
+  def apply(): HtmlElement =
+    div(cls := "quantity-picker")
+--- after
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object QuantityPicker:
+  def apply(): HtmlElement =
+    val quantity = Var(1)
+    div(
+      cls := "quantity-picker",
+      button("-", onClick --> (_ => quantity.update(current => math.max(1, current - 1)))),
+      span(child.text <-- quantity.signal.map(_.toString)),
+      button("+", onClick --> (_ => quantity.update(_ + 1)))
+    )
+=== END
+=== EDIT
+note: legacy braced while loop with parens
+--- file: server/src/main/scala/com/datahive/ingest/CsvLineSplitter.scala
+--- before
+package com.datahive.ingest
+
+object CsvLineSplitter:
+  def split(line: String): List[String] =
+    line.split(',').toList.map(_.trim)
+--- after
+package com.datahive.ingest
+
+object CsvLineSplitter:
+  def split(line: String): List[String] =
+    line.split(',').toList.map(_.trim)
+
+  def countFields(line: String): Int =
+    val characters = line.toCharArray
+    var index = 0
+    var commas = 0
+    while (index < characters.length) {
+      if characters(index) == ',' then commas += 1
+      index += 1
+    }
+    commas + 1
+=== END
+=== EDIT
+note: replace manual counting loop with count
+--- file: server/src/main/scala/com/datahive/ingest/TsvLineSplitter.scala
+--- before
+package com.datahive.ingest
+
+object TsvLineSplitter:
+  def countFields(line: String): Int =
+    var index = 0
+    var tabs = 0
+    while index < line.length do
+      if line.charAt(index) == '\t' then tabs += 1
+      index += 1
+    tabs + 1
+--- after
+package com.datahive.ingest
+
+object TsvLineSplitter:
+  def countFields(line: String): Int =
+    line.count(_ == '\t') + 1
+=== END
+=== EDIT
+note: subscription tier as sealed trait with plan data
+--- file: server/src/main/scala/com/acme/billing/SubscriptionTier.scala
+--- before
+--- after
+package com.acme.billing
+
+sealed trait SubscriptionTier:
+  def monthlyCents: Long
+
+object SubscriptionTier:
+  case object Free extends SubscriptionTier:
+    val monthlyCents = 0L
+  case object Pro extends SubscriptionTier:
+    val monthlyCents = 1900L
+  case class Enterprise(seats: Int) extends SubscriptionTier:
+    def monthlyCents: Long = seats * 1500L
+=== END
+=== EDIT
+note: subscription tier as parameterised enum
+--- file: server/src/main/scala/com/orbit/billing/Plan.scala
+--- before
+--- after
+package com.orbit.billing
+
+enum Plan(val monthlyCents: Long):
+  case Free extends Plan(0L)
+  case Pro extends Plan(1900L)
+  case Team extends Plan(4900L)
+
+object Plan:
+  def cheapestAbove(budgetCents: Long): Option[Plan] =
+    Plan.values.filter(_.monthlyCents >= budgetCents).minByOption(_.monthlyCents)
+=== END
+=== EDIT
+note: return inside for comprehension over options
+--- file: server/src/main/scala/com/cartograph/maps/GeocodeParser.scala
+--- before
+package com.cartograph.maps
+
+case class LatLon(latitude: Double, longitude: Double)
+
+object GeocodeParser:
+  def parse(text: String): Option[LatLon] =
+    text.split(',') match
+      case Array(lat, lon) => lat.trim.toDoubleOption.zip(lon.trim.toDoubleOption).map(LatLon.apply)
+      case _               => None
+--- after
+package com.cartograph.maps
+
+case class LatLon(latitude: Double, longitude: Double)
+
+object GeocodeParser:
+  def parse(text: String): Option[LatLon] =
+    text.split(',') match
+      case Array(lat, lon) => lat.trim.toDoubleOption.zip(lon.trim.toDoubleOption).map(LatLon.apply)
+      case _               => None
+
+  def parseAll(lines: List[String]): Option[List[LatLon]] =
+    val parsed = lines.map(parse)
+    if parsed.contains(None) then return None
+    Some(parsed.flatten)
+=== END
+=== EDIT
+note: parse all with traverse, clean
+--- file: server/src/main/scala/com/cartograph/maps/WaypointParser.scala
+--- before
+package com.cartograph.maps
+
+case class Waypoint(name: String, altitudeMeters: Int)
+
+object WaypointParser:
+  def parse(text: String): Option[Waypoint] =
+    text.split(':') match
+      case Array(name, altitude) => altitude.toIntOption.map(Waypoint(name, _))
+      case _                     => None
+--- after
+package com.cartograph.maps
+
+import cats.syntax.traverse.*
+
+case class Waypoint(name: String, altitudeMeters: Int)
+
+object WaypointParser:
+  def parse(text: String): Option[Waypoint] =
+    text.split(':') match
+      case Array(name, altitude) => altitude.toIntOption.map(Waypoint(name, _))
+      case _                     => None
+
+  def parseAll(lines: List[String]): Option[List[Waypoint]] =
+    lines.traverse(parse)
+=== END
+=== EDIT
+note: var holding latest config in a service
+--- file: server/src/main/scala/com/acme/config/FeatureFlags.scala
+--- before
+package com.acme.config
+
+class FeatureFlags(initial: Set[String]):
+  def isEnabled(flag: String): Boolean = initial.contains(flag)
+--- after
+package com.acme.config
+
+class FeatureFlags(initial: Set[String]):
+  private var enabled: Set[String] = initial
+
+  def isEnabled(flag: String): Boolean = enabled.contains(flag)
+
+  def enable(flag: String): Unit =
+    enabled = enabled + flag
+=== END
+=== EDIT
+note: string literal mentions while loop in error message
+--- file: server/src/main/scala/com/tempo/scheduling/JobErrors.scala
+--- before
+package com.tempo.scheduling
+
+enum JobError(val message: String):
+  case Timeout extends JobError("job timed out")
+--- after
+package com.tempo.scheduling
+
+enum JobError(val message: String):
+  case Timeout extends JobError("job timed out")
+  case Overlap extends JobError("job started while a previous run was still active; var lock held")
+=== END
+=== EDIT
+note: tail-recursive gcd replaces while loop
+--- file: server/src/main/scala/com/acme/math/Ratios.scala
+--- before
+package com.acme.math
+
+object Ratios:
+  def gcd(first: Long, second: Long): Long =
+    var a = first
+    var b = second
+    while b != 0 do
+      val remainder = a % b
+      a = b
+      b = remainder
+    a
+--- after
+package com.acme.math
+
+import scala.annotation.tailrec
+
+object Ratios:
+  @tailrec
+  def gcd(first: Long, second: Long): Long =
+    if second == 0 then first else gcd(second, first % second)
+=== END
+=== EDIT
+note: auth failure reasons sealed trait with case classes
+--- file: server/src/main/scala/com/keystone/auth/AuthFailure.scala
+--- before
+package com.keystone.auth
+
+object AuthFailure
+--- after
+package com.keystone.auth
+
+sealed trait AuthFailure
+
+object AuthFailure:
+  case class UnknownUser(username: String) extends AuthFailure
+  case class LockedOut(attempts: Int) extends AuthFailure
+  case object ExpiredToken extends AuthFailure
+=== END
+=== EDIT
+note: http4s route addition, clean
+--- file: server/src/main/scala/com/acme/health/HealthRoutes.scala
+--- before
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object HealthRoutes:
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("ok")
+--- after
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object HealthRoutes:
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("ok")
+    case GET -> Root / "ready"  => Ok("ready")
+=== END
+=== EDIT
+note: while loop consuming a blocking queue
+--- file: server/src/main/scala/com/datahive/ingest/QueueDrainer.scala
+--- before
+package com.datahive.ingest
+
+import java.util.concurrent.BlockingQueue
+
+class QueueDrainer(queue: BlockingQueue[String]):
+  def peek: Option[String] = Option(queue.peek())
+--- after
+package com.datahive.ingest
+
+import java.util.concurrent.BlockingQueue
+
+class QueueDrainer(queue: BlockingQueue[String]):
+  def peek: Option[String] = Option(queue.peek())
+
+  def drain(handle: String => Unit): Unit =
+    while !queue.isEmpty do
+      handle(queue.poll())
+=== END
+=== EDIT
+note: return Left early in validation chain
+--- file: server/src/main/scala/com/acme/payments/IbanValidator.scala
+--- before
+package com.acme.payments
+
+object IbanValidator:
+  def normalise(raw: String): String =
+    raw.filterNot(_.isWhitespace).toUpperCase
+--- after
+package com.acme.payments
+
+object IbanValidator:
+  def normalise(raw: String): String =
+    raw.filterNot(_.isWhitespace).toUpperCase
+
+  def validate(raw: String): Either[String, String] =
+    val iban = normalise(raw)
+    if iban.length < 15 then return Left(s"IBAN too short: ${iban.length}")
+    if !iban.take(2).forall(_.isLetter) then return Left("IBAN must start with a country code")
+    Right(iban)
+=== END
+=== EDIT
+note: validation with Either combinators, clean
+--- file: server/src/main/scala/com/acme/payments/BicValidator.scala
+--- before
+package com.acme.payments
+
+object BicValidator:
+  def normalise(raw: String): String =
+    raw.trim.toUpperCase
+--- after
+package com.acme.payments
+
+object BicValidator:
+  def normalise(raw: String): String =
+    raw.trim.toUpperCase
+
+  def validate(raw: String): Either[String, String] =
+    val bic = normalise(raw)
+    Either
+      .cond(bic.length == 8 || bic.length == 11, bic, s"BIC must have 8 or 11 characters, got ${bic.length}")
+      .filterOrElse(_.take(4).forall(_.isLetter), "BIC must start with a bank code")
+=== END
+=== EDIT
+note: var in for-loop computing running max
+--- file: server/src/main/scala/com/skyline/weather/PeakFinder.scala
+--- before
+package com.skyline.weather
+
+case class Reading(hour: Int, celsius: Double)
+
+object PeakFinder:
+  def average(readings: List[Reading]): Double =
+    readings.map(_.celsius).sum / readings.size
+--- after
+package com.skyline.weather
+
+case class Reading(hour: Int, celsius: Double)
+
+object PeakFinder:
+  def average(readings: List[Reading]): Double =
+    readings.map(_.celsius).sum / readings.size
+
+  def hottestHour(readings: List[Reading]): Option[Int] =
+    var best = Option.empty[Reading]
+    for reading <- readings do
+      if best.forall(_.celsius < reading.celsius) then best = Some(reading)
+    best.map(_.hour)
+=== END
+=== EDIT
+note: hottest hour via maxByOption, clean
+--- file: server/src/main/scala/com/skyline/weather/ColdFinder.scala
+--- before
+package com.skyline.weather
+
+case class HourlyReading(hour: Int, celsius: Double)
+
+object ColdFinder:
+  def average(readings: List[HourlyReading]): Double =
+    readings.map(_.celsius).sum / readings.size
+--- after
+package com.skyline.weather
+
+case class HourlyReading(hour: Int, celsius: Double)
+
+object ColdFinder:
+  def average(readings: List[HourlyReading]): Double =
+    readings.map(_.celsius).sum / readings.size
+
+  def coldestHour(readings: List[HourlyReading]): Option[Int] =
+    readings.minByOption(_.celsius).map(_.hour)
+=== END
+=== EDIT
+note: sealed trait for map layer kinds nested in object
+--- file: server/src/main/scala/com/cartograph/maps/LayerKind.scala
+--- before
+package com.cartograph.maps
+
+object Layers:
+  val defaultOpacity = 0.8
+--- after
+package com.cartograph.maps
+
+object Layers:
+  val defaultOpacity = 0.8
+
+  sealed trait LayerKind
+  case object Satellite extends LayerKind
+  case object Terrain extends LayerKind
+  case class Overlay(sourceUrl: String) extends LayerKind
+=== END
+=== EDIT
+note: enum with case class payloads for layer kinds
+--- file: server/src/main/scala/com/cartograph/maps/BaseLayer.scala
+--- before
+package com.cartograph.maps
+
+object BaseLayers:
+  val defaultZoom = 12
+--- after
+package com.cartograph.maps
+
+object BaseLayers:
+  val defaultZoom = 12
+
+enum BaseLayer:
+  case Satellite
+  case Terrain
+  case Overlay(sourceUrl: String, opacity: Double)
+=== END
+=== EDIT
+note: skunk query addition, clean
+--- file: server/src/main/scala/com/greenleaf/inventory/StockRepository.scala
+--- before
+package com.greenleaf.inventory
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object StockQueries:
+  val bySku: Query[String, Int] =
+    sql"SELECT on_hand FROM stock WHERE sku = $text".query(int4)
+--- after
+package com.greenleaf.inventory
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object StockQueries:
+  val bySku: Query[String, Int] =
+    sql"SELECT on_hand FROM stock WHERE sku = $text".query(int4)
+
+  val decrement: Command[(Int, String)] =
+    sql"UPDATE stock SET on_hand = on_hand - $int4 WHERE sku = $text".command
+=== END
+=== EDIT
+note: return in match arm of event handler
+--- file: server/src/main/scala/com/portline/logistics/EventRouter.scala
+--- before
+package com.portline.logistics
+
+enum PortEvent:
+  case Arrived(vessel: String)
+  case Departed(vessel: String)
+
+object EventRouter:
+  def describe(event: PortEvent): String = event.toString
+--- after
+package com.portline.logistics
+
+enum PortEvent:
+  case Arrived(vessel: String)
+  case Departed(vessel: String)
+
+object EventRouter:
+  def describe(event: PortEvent): String = event.toString
+
+  def vesselName(event: PortEvent): String =
+    event match
+      case PortEvent.Arrived(vessel)  => return vessel.toUpperCase
+      case PortEvent.Departed(vessel) => vessel
+=== END
+=== EDIT
+note: fix unrelated method in file with pre-existing while
+--- file: server/src/main/scala/com/legacy/crypto/Checksum.scala
+--- before
+package com.legacy.crypto
+
+object Checksum:
+  def adler(bytes: Array[Byte]): Long =
+    var a = 1L
+    var b = 0L
+    var index = 0
+    while index < bytes.length do
+      a = (a + (bytes(index) & 0xff)) % 65521
+      b = (b + a) % 65521
+      index += 1
+    (b << 16) | a
+
+  def hex(value: Long): String = value.toHexString
+--- after
+package com.legacy.crypto
+
+object Checksum:
+  def adler(bytes: Array[Byte]): Long =
+    var a = 1L
+    var b = 0L
+    var index = 0
+    while index < bytes.length do
+      a = (a + (bytes(index) & 0xff)) % 65521
+      b = (b + a) % 65521
+      index += 1
+    (b << 16) | a
+
+  def hex(value: Long): String = f"$value%08x"
+=== END
+=== EDIT
+note: lazy val cache instead of var memo, clean
+--- file: server/src/main/scala/com/acme/config/RegionTable.scala
+--- before
+package com.acme.config
+
+import scala.io.Source
+
+object RegionTable:
+  def load(path: String): Map[String, String] =
+    Source.fromFile(path).getLines().map(_.split('=')).collect:
+      case Array(code, name) => code -> name
+    .toMap
+--- after
+package com.acme.config
+
+import scala.io.Source
+
+object RegionTable:
+  def load(path: String): Map[String, String] =
+    Source.fromFile(path).getLines().map(_.split('=')).collect:
+      case Array(code, name) => code -> name
+    .toMap
+
+  lazy val bundled: Map[String, String] = load("regions.properties")
+=== END
+=== EDIT
+note: frontend form state var mutated on input
+--- file: app/src/main/scala/com/brightway/ui/SearchBox.scala
+--- before
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  def apply(onSearch: String => Unit): HtmlElement =
+    input(typ := "search", placeholder := "Search products")
+--- after
+package com.brightway.ui
+
+import com.raquo.laminar.api.L.*
+
+object SearchBox:
+  def apply(onSearch: String => Unit): HtmlElement =
+    var query = ""
+    form(
+      input(typ := "search", placeholder := "Search products", onInput.mapToValue --> (text => query = text)),
+      onSubmit.preventDefault --> (_ => onSearch(query))
+    )
+=== END
+=== EDIT
+note: priority as sealed trait in a scheduling domain
+--- file: server/src/main/scala/com/tempo/scheduling/Priority.scala
+--- before
+--- after
+package com.tempo.scheduling
+
+sealed trait Priority extends Product with Serializable
+
+object Priority:
+  case object Low extends Priority
+  case object Normal extends Priority
+  case object Urgent extends Priority
+
+  val ordered: List[Priority] = List(Low, Normal, Urgent)
+=== END
+=== EDIT
+note: rename variable while touching a file that already has a sealed trait
+--- file: server/src/main/scala/com/legacy/orders/OrderStatus.scala
+--- before
+package com.legacy.orders
+
+sealed trait OrderStatus
+case object Open extends OrderStatus
+case object Closed extends OrderStatus
+
+object OrderStatus:
+  def parse(s: String): Option[OrderStatus] =
+    s match
+      case "open"   => Some(Open)
+      case "closed" => Some(Closed)
+      case _        => None
+--- after
+package com.legacy.orders
+
+sealed trait OrderStatus
+case object Open extends OrderStatus
+case object Closed extends OrderStatus
+
+object OrderStatus:
+  def parse(raw: String): Option[OrderStatus] =
+    raw.trim.toLowerCase match
+      case "open"   => Some(Open)
+      case "closed" => Some(Closed)
+      case _        => None
+=== END
+=== EDIT
+note: retry loop with while over IO unsafe call
+--- file: server/src/main/scala/com/acme/notifications/SmsSender.scala
+--- before
+package com.acme.notifications
+
+class SmsSender(send: String => Boolean):
+  def sendOnce(message: String): Boolean = send(message)
+--- after
+package com.acme.notifications
+
+class SmsSender(send: String => Boolean):
+  def sendOnce(message: String): Boolean = send(message)
+
+  def sendWithRetry(message: String, maxAttempts: Int): Boolean =
+    var attempts = 1
+    while !send(message) do
+      if attempts >= maxAttempts then return false
+      attempts += 1
+    true
+=== END

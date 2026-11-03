@@ -1,3 +1,5 @@
+package com.acme.pipeline
+
 import cats.Monoid
 import cats.syntax.semigroup.*
 

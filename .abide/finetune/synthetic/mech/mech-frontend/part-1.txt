@@ -1,0 +1,1046 @@
+=== EDIT
+note: [pos laminar.json-stringify] log the invoice draft signal value as JSON while debugging the editor
+--- file: app/src/main/scala/com/acme/billing/InvoiceEditor.scala
+--- before
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object InvoiceEditor:
+  val draft = Var(InvoiceDraft.blank)
+
+  def render: HtmlElement =
+    div(
+      cls := "invoice-editor",
+      input(
+        placeholder := "Customer",
+        controlled(
+          value <-- draft.signal.map(_.customer),
+          onInput.mapToValue --> draft.updater[String]((d, name) => d.copy(customer = name))
+        )
+      )
+    )
+--- after
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object InvoiceEditor:
+  val draft = Var(InvoiceDraft.blank)
+
+  def render: HtmlElement =
+    div(
+      cls := "invoice-editor",
+      input(
+        placeholder := "Customer",
+        controlled(
+          value <-- draft.signal.map(_.customer),
+          onInput.mapToValue --> draft.updater[String]((d, name) => d.copy(customer = name))
+        )
+      ),
+      draft.signal --> Observer[InvoiceDraft]: d =>
+        js.Dynamic.global.console.debug(js.JSON.stringify(d.asInstanceOf[js.Any]))
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] persist the map viewport to localStorage by stringifying the DOM bounding rect
+--- file: app/src/main/scala/com/tidewave/maps/ViewportPersistence.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+
+object ViewportPersistence:
+  private val storageKey = "tidewave.viewport"
+
+  def restore: Option[String] =
+    Option(dom.window.localStorage.getItem(storageKey))
+
+  def binder(container: HtmlElement): Binder[HtmlElement] =
+    onMountCallback: ctx =>
+      ctx.thisNode.ref.classList.add("viewport-tracked")
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+import scala.scalajs.js
+
+object ViewportPersistence:
+  private val storageKey = "tidewave.viewport"
+
+  def restore: Option[String] =
+    Option(dom.window.localStorage.getItem(storageKey))
+
+  def binder(container: HtmlElement): Binder[HtmlElement] =
+    onMountCallback: ctx =>
+      ctx.thisNode.ref.classList.add("viewport-tracked")
+      val rect = ctx.thisNode.ref.getBoundingClientRect()
+      dom.window.localStorage.setItem(storageKey, js.JSON.stringify(rect))
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] send the forecast filter state to analytics as a JSON payload built from the Var
+--- file: app/src/main/scala/com/acme/weather/ForecastFilters.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ForecastFilters:
+  val units = Var(Units.Metric)
+  val horizonDays = Var(5)
+
+  def view(track: String => Unit): HtmlElement =
+    div(
+      cls := "forecast-filters",
+      select(
+        Units.values.toList.map(u => option(value := u.toString, u.label)),
+        onChange.mapToValue.map(Units.valueOf) --> units.writer
+      )
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object ForecastFilters:
+  val units = Var(Units.Metric)
+  val horizonDays = Var(5)
+
+  def view(track: String => Unit): HtmlElement =
+    div(
+      cls := "forecast-filters",
+      select(
+        Units.values.toList.map(u => option(value := u.toString, u.label)),
+        onChange.mapToValue.map(Units.valueOf) --> units.writer
+      ),
+      units.signal.combineWith(horizonDays.signal) --> Observer[(Units, Int)]: (u, days) =>
+        track(js.JSON.stringify(js.Dynamic.literal(units = u.toString, days = days)))
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] hide the payment confirmation toast after three seconds with a raw timer
+--- file: app/src/main/scala/com/tidewave/billing/PaymentToast.scala
+--- before
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PaymentToast:
+  val visible = Var(false)
+
+  def show(): Unit =
+    visible.set(true)
+
+  def render: HtmlElement =
+    div(
+      cls := "toast",
+      cls("toast--visible") <-- visible.signal,
+      "Payment received"
+    )
+--- after
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PaymentToast:
+  val visible = Var(false)
+
+  def show(): Unit =
+    visible.set(true)
+    js.timers.setTimeout(3000)(visible.set(false))
+
+  def render: HtmlElement =
+    div(
+      cls := "toast",
+      cls("toast--visible") <-- visible.signal,
+      "Payment received"
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] poll radar tiles every minute using setInterval on mount
+--- file: app/src/main/scala/com/acme/weather/RadarLayer.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class RadarLayer(fetchFrame: () => Unit):
+  val frameIndex = Var(0)
+
+  def element: HtmlElement =
+    div(
+      cls := "radar-layer",
+      child.text <-- frameIndex.signal.map(i => s"Frame $i"),
+      onMountCallback(_ => fetchFrame())
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class RadarLayer(fetchFrame: () => Unit):
+  val frameIndex = Var(0)
+
+  def element: HtmlElement =
+    div(
+      cls := "radar-layer",
+      child.text <-- frameIndex.signal.map(i => s"Frame $i"),
+      onMountCallback: _ =>
+        fetchFrame()
+        js.timers.setInterval(60000):
+          frameIndex.update(_ + 1)
+          fetchFrame()
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] debounce the map search box by scheduling a timeout per keystroke
+--- file: app/src/main/scala/com/tidewave/maps/PlaceSearch.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PlaceSearch:
+  val query = Var("")
+  val results = Var(List.empty[Place])
+
+  def render(search: String => Unit): HtmlElement =
+    div(
+      input(
+        typ := "search",
+        onInput.mapToValue --> query.writer
+      ),
+      ul(children <-- results.signal.map(_.map(p => li(p.name))))
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object PlaceSearch:
+  val query = Var("")
+  val results = Var(List.empty[Place])
+
+  def render(search: String => Unit): HtmlElement =
+    div(
+      input(
+        typ := "search",
+        onInput.mapToValue --> query.writer,
+        onInput.mapToValue --> Observer[String](q => js.timers.setTimeout(250)(search(q)))
+      ),
+      ul(children <-- results.signal.map(_.map(p => li(p.name))))
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] apply the selected currency inside a map by reading the Var with now()
+--- file: app/src/main/scala/com/acme/billing/LineItemsTable.scala
+--- before
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+
+class LineItemsTable(items: Signal[List[LineItem]], currency: Var[Currency]):
+  def render: HtmlElement =
+    table(
+      cls := "line-items",
+      tbody(
+        children <-- items.map(_.map(item => tr(td(item.label), td(item.amount.toString))))
+      )
+    )
+--- after
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+
+class LineItemsTable(items: Signal[List[LineItem]], currency: Var[Currency]):
+  def render: HtmlElement =
+    table(
+      cls := "line-items",
+      tbody(
+        children <-- items.map(_.map(item => tr(td(item.label), td(item.amount.toString))))
+      ),
+      tfoot(
+        child.text <-- items.map(xs => Money.format(xs.map(_.amount).sum, currency.now()))
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] filter marker clicks by the layer toggle read via now()
+--- file: app/src/main/scala/com/tidewave/maps/MarkerLayer.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+class MarkerLayer(markers: Signal[List[Marker]], selected: Observer[Marker]):
+  val showLabels = Var(true)
+
+  def render: HtmlElement =
+    div(
+      cls := "marker-layer",
+      children <-- markers.map(_.map(m => renderMarker(m)))
+    )
+
+  private def renderMarker(marker: Marker) =
+    div(
+      cls := "marker",
+      onClick.mapTo(marker) --> selected
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+class MarkerLayer(markers: Signal[List[Marker]], selected: Observer[Marker]):
+  val showLabels = Var(true)
+  val layerEnabled = Var(true)
+
+  def render: HtmlElement =
+    div(
+      cls := "marker-layer",
+      children <-- markers.map(_.map(m => renderMarker(m)))
+    )
+
+  private def renderMarker(marker: Marker) =
+    div(
+      cls := "marker",
+      onClick.mapTo(marker).filter(_ => layerEnabled.now()) --> selected
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] combine wind speed stream with unit preference via now() in collect
+--- file: app/src/main/scala/com/acme/weather/WindGauge.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+
+class WindGauge(readings: EventStream[Reading], unitPref: Var[SpeedUnit]):
+  def render: HtmlElement =
+    div(
+      cls := "wind-gauge",
+      child.text <-- readings.map(_.windKmh).startWith(0.0).map(v => f"$v%.1f km/h")
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+
+class WindGauge(readings: EventStream[Reading], unitPref: Var[SpeedUnit]):
+  def render: HtmlElement =
+    div(
+      cls := "wind-gauge",
+      child.text <-- readings
+        .collect { case r if r.windKmh >= 0 => SpeedUnit.convert(r.windKmh, unitPref.now()) }
+        .startWith("--")
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] render the invoice status badge by matching each status in child <-- map
+--- file: app/src/main/scala/com/acme/billing/StatusBadge.scala
+--- before
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+
+enum InvoiceStatus:
+  case Draft, Sent, Paid, Overdue
+
+object StatusBadge:
+  def render(status: Signal[InvoiceStatus]): HtmlElement =
+    span(
+      cls := "status-badge",
+      child.text <-- status.map(_.toString)
+    )
+--- after
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+
+enum InvoiceStatus:
+  case Draft, Sent, Paid, Overdue
+
+object StatusBadge:
+  def render(status: Signal[InvoiceStatus]): HtmlElement =
+    span(
+      cls := "status-badge",
+      child <-- status.map { case InvoiceStatus.Paid => span(cls := "ok", "Paid"); case other => span(cls := "pending", other.toString) }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] switch the map side panel between search results, place details and directions
+--- file: app/src/main/scala/com/tidewave/maps/SidePanel.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+enum PanelState:
+  case Results(places: List[Place])
+  case Details(place: Place)
+  case Directions(from: Place, to: Place)
+
+class SidePanel(state: Signal[PanelState]):
+  def render: HtmlElement =
+    aside(
+      cls := "side-panel"
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+enum PanelState:
+  case Results(places: List[Place])
+  case Details(place: Place)
+  case Directions(from: Place, to: Place)
+
+class SidePanel(state: Signal[PanelState]):
+  def render: HtmlElement =
+    aside(
+      cls := "side-panel",
+      child <-- state.map { case PanelState.Results(ps) => ResultsList(ps); case PanelState.Details(p) => PlaceCard(p); case PanelState.Directions(a, b) => RouteView(a, b) }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] show an optional severe-weather banner by matching the alert level with child.maybe
+--- file: app/src/main/scala/com/acme/weather/AlertBanner.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+
+enum AlertLevel:
+  case None, Advisory, Warning
+
+class AlertBanner(level: Signal[AlertLevel]):
+  def render: HtmlElement =
+    section(
+      cls := "alert-banner"
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+
+enum AlertLevel:
+  case None, Advisory, Warning
+
+class AlertBanner(level: Signal[AlertLevel]):
+  def render: HtmlElement =
+    section(
+      cls := "alert-banner",
+      child.maybe <-- level.map { case AlertLevel.None => scala.None; case AlertLevel.Advisory => Some(div("Advisory in effect")); case AlertLevel.Warning => Some(strong("Severe weather warning")) }
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] render billing pages by mapping the router's current page signal
+--- file: app/src/main/scala/com/acme/billing/BillingApp.scala
+--- before
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum BillingPage:
+  case Invoices, Customers, Settings
+
+class BillingApp(router: Router[BillingPage]):
+  def render: HtmlElement =
+    div(
+      cls := "billing-app",
+      nav(
+        BillingPage.values.toList.map(p => a(p.toString, onClick.mapTo(p) --> router.pushState))
+      )
+    )
+--- after
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum BillingPage:
+  case Invoices, Customers, Settings
+
+class BillingApp(router: Router[BillingPage]):
+  def render: HtmlElement =
+    div(
+      cls := "billing-app",
+      nav(
+        BillingPage.values.toList.map(p => a(p.toString, onClick.mapTo(p) --> router.pushState))
+      ),
+      child <-- router.currentPageSignal.map(renderPage)
+    )
+
+  private def renderPage(page: BillingPage) =
+    page match
+      case BillingPage.Invoices  => InvoiceList.render
+      case BillingPage.Customers => CustomerList.render
+      case BillingPage.Settings  => BillingSettings.render
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] highlight the active map tab by mapping currentPageSignal
+--- file: app/src/main/scala/com/tidewave/maps/MapTabs.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+class MapTabs(router: Router[MapPage]):
+  private val tabs = List(MapPage.Explore, MapPage.Saved, MapPage.Offline)
+
+  def render: HtmlElement =
+    ul(
+      cls := "map-tabs",
+      tabs.map: tab =>
+        li(
+          tab.title,
+          onClick.mapTo(tab) --> router.pushState
+        )
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+class MapTabs(router: Router[MapPage]):
+  private val tabs = List(MapPage.Explore, MapPage.Saved, MapPage.Offline)
+
+  def render: HtmlElement =
+    ul(
+      cls := "map-tabs",
+      tabs.map: tab =>
+        li(
+          tab.title,
+          cls("active") <-- router.currentPageSignal.map(_ == tab),
+          onClick.mapTo(tab) --> router.pushState
+        )
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] set the document title from the current weather page
+--- file: app/src/main/scala/com/acme/weather/WeatherShell.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+import org.scalajs.dom
+
+class WeatherShell(router: Router[WeatherPage], content: HtmlElement):
+  def render: HtmlElement =
+    div(
+      cls := "weather-shell",
+      header(h1("Forecast")),
+      content
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+import org.scalajs.dom
+
+class WeatherShell(router: Router[WeatherPage], content: HtmlElement):
+  def render: HtmlElement =
+    div(
+      cls := "weather-shell",
+      header(h1("Forecast")),
+      router.currentPageSignal.map(_.title) --> Observer[String](t => dom.document.title = s"$t | Forecast"),
+      content
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] reuse the server's InvoiceDto from the api package in the invoice list
+--- file: app/src/main/scala/com/acme/billing/InvoiceList.scala
+--- before
+package com.acme.billing
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceList:
+  val invoices = Var(List.empty[InvoiceRow])
+
+  def render: HtmlElement =
+    ul(
+      cls := "invoice-list",
+      children <-- invoices.signal.map(_.map(row => li(row.number, " ", row.total)))
+    )
+--- after
+package com.acme.billing
+
+import com.acme.api.InvoiceDto
+import com.raquo.laminar.api.L.*
+
+object InvoiceList:
+  val invoices = Var(List.empty[InvoiceDto])
+
+  def render: HtmlElement =
+    ul(
+      cls := "invoice-list",
+      children <-- invoices.signal.map(_.map(dto => li(dto.number, " ", dto.total.toString)))
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] decode forecast responses with codecs from the server api package
+--- file: app/src/main/scala/com/acme/weather/ForecastClient.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import io.circe.parser.decode
+
+object ForecastClient:
+  def load(city: String): EventStream[Either[String, Forecast]] =
+    FetchStream
+      .get(s"/forecast/$city")
+      .map(body => decode[Forecast](body).left.map(_.getMessage))
+--- after
+package com.acme.weather
+
+import com.acme.weather.api.ForecastResponse
+import com.acme.weather.api.ForecastResponse.given
+import com.raquo.laminar.api.L.*
+import io.circe.parser.decode
+
+object ForecastClient:
+  def load(city: String): EventStream[Either[String, ForecastResponse]] =
+    FetchStream
+      .get(s"/forecast/$city")
+      .map(body => decode[ForecastResponse](body).left.map(_.getMessage))
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] route geometry type pulled from tidewave.routing.api into the map overlay
+--- file: app/src/main/scala/com/tidewave/maps/RouteOverlay.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.tidewave.shared.model.LatLng
+
+class RouteOverlay(points: Signal[List[LatLng]]):
+  def render: HtmlElement =
+    div(
+      cls := "route-overlay",
+      child.text <-- points.map(ps => s"${ps.size} waypoints")
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.tidewave.routing.api.RouteGeometry
+import com.tidewave.shared.model.LatLng
+
+class RouteOverlay(points: Signal[List[LatLng]], geometry: Signal[Option[RouteGeometry]]):
+  def render: HtmlElement =
+    div(
+      cls := "route-overlay",
+      child.text <-- points.map(ps => s"${ps.size} waypoints"),
+      child.text <-- geometry.map(_.fold("")(g => s"${g.distanceKm} km"))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] currency read with withCurrentValueOf instead of now() inside the map
+--- file: app/src/main/scala/com/tidewave/billing/CartTotal.scala
+--- before
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+
+class CartTotal(lines: Signal[List[CartLine]], currency: Var[Currency]):
+  def render: HtmlElement =
+    div(
+      cls := "cart-total",
+      child.text <-- lines.map(_.size).map(n => s"$n items")
+    )
+--- after
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+
+class CartTotal(lines: Signal[List[CartLine]], currency: Var[Currency]):
+  def render: HtmlElement =
+    div(
+      cls := "cart-total",
+      child.text <-- lines.map(_.size).map(n => s"$n items"),
+      child.text <-- lines
+        .withCurrentValueOf(currency.signal)
+        .map((ls, cur) => Money.format(ls.map(_.price).sum, cur))
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] fix: replace the raw setTimeout toast dismissal with EventStream.delay
+--- file: app/src/main/scala/com/acme/maps/SavedPlaceToast.scala
+--- before
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SavedPlaceToast:
+  val message = Var(Option.empty[String])
+
+  def notify(text: String): Unit =
+    message.set(Some(text))
+    js.timers.setTimeout(2500)(message.set(None))
+
+  def render: HtmlElement =
+    div(
+      cls := "toast",
+      child.maybe <-- message.signal.map(_.map(t => span(t)))
+    )
+--- after
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+
+object SavedPlaceToast:
+  val message = Var(Option.empty[String])
+
+  def notify(text: String): Unit =
+    message.set(Some(text))
+
+  def render: HtmlElement =
+    div(
+      cls := "toast",
+      child.maybe <-- message.signal.map(_.map(t => span(t))),
+      message.signal.changes.collectSome.delay(2500).mapTo(None) --> message.writer
+    )
+=== END
+=== EDIT
+note: [near laminar.child-arrow-map-case] render the forecast view mode with splitMatchOne and handleCase
+--- file: app/src/main/scala/com/tidewave/weather/ForecastView.scala
+--- before
+package com.tidewave.weather
+
+import com.raquo.laminar.api.L.*
+
+enum ViewMode:
+  case Hourly(hours: Int)
+  case Daily(days: Int)
+
+class ForecastView(mode: Signal[ViewMode]):
+  def render: HtmlElement =
+    div(
+      cls := "forecast-view"
+    )
+--- after
+package com.tidewave.weather
+
+import com.raquo.laminar.api.L.*
+
+enum ViewMode:
+  case Hourly(hours: Int)
+  case Daily(days: Int)
+
+class ForecastView(mode: Signal[ViewMode]):
+  def render: HtmlElement =
+    div(
+      cls := "forecast-view",
+      child <-- mode.splitMatchOne
+        .handleCase { case ViewMode.Hourly(h) => h } ((_, hours) => HourlyChart(hours))
+        .handleCase { case ViewMode.Daily(d) => d } ((_, days) => DailyTable(days))
+        .toSignal
+    )
+=== END
+=== EDIT
+note: [near waypoint.current-page-signal-map] render map pages with SplitRender over currentPageSignal
+--- file: app/src/main/scala/com/tidewave/maps/MapsApp.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+class MapsApp(router: Router[MapPage]):
+  def render: HtmlElement =
+    div(
+      cls := "maps-app",
+      MapTabs(router).render
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+class MapsApp(router: Router[MapPage]):
+  private val pages = SplitRender[MapPage, HtmlElement](router.currentPageSignal)
+    .collectStatic(MapPage.Explore)(ExploreView.render)
+    .collectStatic(MapPage.Saved)(SavedPlaces.render)
+    .collectStatic(MapPage.Offline)(OfflineRegions.render)
+
+  def render: HtmlElement =
+    div(
+      cls := "maps-app",
+      MapTabs(router).render,
+      child <-- pages.signal
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] js.Date.now() inside a map to show how old the observation is
+--- file: app/src/main/scala/com/acme/weather/ObservationAge.scala
+--- before
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class ObservationAge(observedAt: Signal[Double]):
+  def render: HtmlElement =
+    span(
+      cls := "observation-age"
+    )
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class ObservationAge(observedAt: Signal[Double]):
+  private val ticks = EventStream.periodic(30000).toSignal(0)
+
+  def render: HtmlElement =
+    span(
+      cls := "observation-age",
+      child.text <-- observedAt.combineWith(ticks).map((at, _) => s"${((js.Date.now() - at) / 60000).toInt} min ago")
+    )
+=== END
+=== EDIT
+note: [near laminar.json-stringify] pre-existing stringify debug line stays; edit only adds a retry button
+--- file: app/src/main/scala/com/tidewave/billing/CheckoutForm.scala
+--- before
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class CheckoutForm(submit: Observer[CheckoutRequest], lastError: Signal[Option[String]]):
+  val request = Var(CheckoutRequest.empty)
+
+  def render: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapTo(request.now()) --> submit,
+      onSubmit --> Observer[Any](_ => js.Dynamic.global.console.log(js.JSON.stringify(request.now().asInstanceOf[js.Any]))),
+      child.maybe <-- lastError.map(_.map(e => p(cls := "error", e))),
+      button(typ := "submit", "Pay")
+    )
+--- after
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class CheckoutForm(submit: Observer[CheckoutRequest], lastError: Signal[Option[String]]):
+  val request = Var(CheckoutRequest.empty)
+
+  def render: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapTo(request.now()) --> submit,
+      onSubmit --> Observer[Any](_ => js.Dynamic.global.console.log(js.JSON.stringify(request.now().asInstanceOf[js.Any]))),
+      child.maybe <-- lastError.map(_.map(e => p(cls := "error", e))),
+      button(typ := "submit", "Pay"),
+      button(
+        typ := "button",
+        "Retry",
+        disabled <-- lastError.map(_.isEmpty),
+        onClick.mapToUnit --> Observer[Unit](_ => submit.onNext(request.now()))
+      )
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] .now() reads in a src/test file are excluded from the rule
+--- file: app/src/test/scala/com/acme/maps/ZoomControlSuite.scala
+--- before
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class ZoomControlSuite extends FunSuite:
+  test("zoom in increments the level"):
+    val control = ZoomControl(initial = 4)
+    control.zoomIn()
+    assertEquals(control.level.now(), 5)
+--- after
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class ZoomControlSuite extends FunSuite:
+  test("zoom in increments the level"):
+    val control = ZoomControl(initial = 4)
+    control.zoomIn()
+    assertEquals(control.level.now(), 5)
+
+  test("zoom is clamped at the maximum"):
+    val control = ZoomControl(initial = 18)
+    List(1, 2, 3).foreach(_ => control.zoomIn())
+    assertEquals(List(control.level).map(_.now()), List(18))
+=== END
+=== EDIT
+note: [near laminar.json-stringify] fix: drop js.JSON.stringify of the marker signal and log the plain id
+--- file: app/src/main/scala/com/acme/maps/MarkerInspector.scala
+--- before
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class MarkerInspector(selected: Signal[Option[Marker]]):
+  def render: HtmlElement =
+    div(
+      cls := "marker-inspector",
+      selected --> Observer[Option[Marker]](m => js.Dynamic.global.console.log(js.JSON.stringify(m.asInstanceOf[js.Any]))),
+      child.text <-- selected.map(_.fold("Nothing selected")(_.title))
+    )
+--- after
+package com.acme.maps
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class MarkerInspector(selected: Signal[Option[Marker]]):
+  def render: HtmlElement =
+    div(
+      cls := "marker-inspector",
+      selected --> Observer[Option[Marker]](m => js.Dynamic.global.console.log(m.fold("none")(_.id))),
+      child.text <-- selected.map(_.fold("Nothing selected")(_.title))
+    )
+=== END
+=== EDIT
+note: [clean] add a due-date column to the invoice summary row
+--- file: app/src/main/scala/com/tidewave/billing/InvoiceSummaryRow.scala
+--- before
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+
+class InvoiceSummaryRow(invoice: Signal[InvoiceView]):
+  def render: HtmlElement =
+    tr(
+      td(child.text <-- invoice.map(_.number)),
+      td(child.text <-- invoice.map(_.customerName)),
+      td(child.text <-- invoice.map(_.total.formatted))
+    )
+--- after
+package com.tidewave.billing
+
+import com.raquo.laminar.api.L.*
+
+class InvoiceSummaryRow(invoice: Signal[InvoiceView]):
+  def render: HtmlElement =
+    tr(
+      td(child.text <-- invoice.map(_.number)),
+      td(child.text <-- invoice.map(_.customerName)),
+      td(child.text <-- invoice.map(_.total.formatted)),
+      td(
+        cls("overdue") <-- invoice.map(_.isOverdue),
+        child.text <-- invoice.map(_.dueDate.toString)
+      )
+    )
+=== END
+=== EDIT
+note: [clean] new temperature unit toggle component driven by a Var
+--- file: app/src/main/scala/com/acme/weather/UnitToggle.scala
+--- before
+--- after
+package com.acme.weather
+
+import com.raquo.laminar.api.L.*
+
+class UnitToggle(units: Var[Units]):
+  def render: HtmlElement =
+    div(
+      cls := "unit-toggle",
+      Units.values.toList.map: u =>
+        button(
+          typ := "button",
+          u.label,
+          cls("selected") <-- units.signal.map(_ == u),
+          onClick.mapTo(u) --> units.writer
+        )
+    )
+=== END
+=== EDIT
+note: [clean] layer opacity slider bound to the map style Var
+--- file: app/src/main/scala/com/tidewave/maps/OpacitySlider.scala
+--- before
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+class OpacitySlider(layer: Var[LayerStyle]):
+  def render: HtmlElement =
+    label(
+      "Opacity",
+      input(
+        typ := "range",
+        minAttr := "0",
+        maxAttr := "100"
+      )
+    )
+--- after
+package com.tidewave.maps
+
+import com.raquo.laminar.api.L.*
+
+class OpacitySlider(layer: Var[LayerStyle]):
+  def render: HtmlElement =
+    label(
+      "Opacity",
+      input(
+        typ := "range",
+        minAttr := "0",
+        maxAttr := "100",
+        controlled(
+          value <-- layer.signal.map(s => (s.opacity * 100).round.toString),
+          onInput.mapToValue.map(_.toDouble / 100) --> layer.updater[Double]((s, o) => s.copy(opacity = o))
+        )
+      )
+    )
+=== END
+=== EDIT
+note: [clean] show a loading spinner while the precipitation chart fetches
+--- file: app/src/main/scala/com/tidewave/weather/PrecipitationChart.scala
+--- before
+package com.tidewave.weather
+
+import com.raquo.laminar.api.L.*
+
+class PrecipitationChart(series: Signal[List[Precipitation]]):
+  def render: HtmlElement =
+    div(
+      cls := "precip-chart",
+      children <-- series.map(_.map(p => div(cls := "bar", heightAttr := p.mm.toInt)))
+    )
+--- after
+package com.tidewave.weather
+
+import com.raquo.laminar.api.L.*
+
+class PrecipitationChart(series: Signal[List[Precipitation]], loading: Signal[Boolean]):
+  def render: HtmlElement =
+    div(
+      cls := "precip-chart",
+      cls("loading") <-- loading,
+      child.maybe <-- loading.map(isLoading => Option.when(isLoading)(div(cls := "spinner"))),
+      children <-- series.map(_.map(p => div(cls := "bar", heightAttr := p.mm.toInt)))
+    )
+=== END

@@ -1,0 +1,692 @@
+=== EDIT
+note: accumulate invoice total with a var inside a foreach
+--- file: server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+--- before
+package com.acme.billing
+
+case class LineItem(sku: String, quantity: Int, unitPriceCents: Long)
+
+object InvoiceTotals:
+  def count(items: List[LineItem]): Int =
+    items.size
+--- after
+package com.acme.billing
+
+case class LineItem(sku: String, quantity: Int, unitPriceCents: Long)
+
+object InvoiceTotals:
+  def count(items: List[LineItem]): Int =
+    items.size
+
+  def totalCents(items: List[LineItem]): Long =
+    var total = 0L
+    items.foreach: item =>
+      total += item.quantity * item.unitPriceCents
+    total
+=== END
+=== EDIT
+note: early return from route lookup
+--- file: server/src/main/scala/com/northwind/routing/RouteResolver.scala
+--- before
+package com.northwind.routing
+
+case class Route(origin: String, destination: String, distanceKm: Double)
+
+class RouteResolver(routes: List[Route]):
+  def all: List[Route] = routes
+--- after
+package com.northwind.routing
+
+case class Route(origin: String, destination: String, distanceKm: Double)
+
+class RouteResolver(routes: List[Route]):
+  def all: List[Route] = routes
+
+  def shortestFrom(origin: String): Option[Route] =
+    val candidates = routes.filter(_.origin == origin)
+    if candidates.isEmpty then return None
+    Some(candidates.minBy(_.distanceKm))
+=== END
+=== EDIT
+note: retry polling with a while loop on attempts
+--- file: server/src/main/scala/com/skyline/weather/StationPoller.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+class StationPoller(fetch: String => Option[Double]):
+  def latest(stationId: String): IO[Option[Double]] =
+    IO.blocking(fetch(stationId))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+
+class StationPoller(fetch: String => Option[Double]):
+  def latest(stationId: String): IO[Option[Double]] =
+    IO.blocking(fetch(stationId))
+
+  def latestWithRetries(stationId: String, maxAttempts: Int): IO[Option[Double]] =
+    IO.blocking:
+      var attempt = 0
+      var reading = Option.empty[Double]
+      while reading.isEmpty && attempt < maxAttempts do
+        reading = fetch(stationId)
+        attempt += 1
+      reading
+=== END
+=== EDIT
+note: model stock status as sealed trait with case objects
+--- file: server/src/main/scala/com/greenleaf/inventory/StockStatus.scala
+--- before
+--- after
+package com.greenleaf.inventory
+
+sealed trait StockStatus
+
+object StockStatus:
+  case object InStock extends StockStatus
+  case object LowStock extends StockStatus
+  case object OutOfStock extends StockStatus
+
+  def fromQuantity(quantity: Int): StockStatus =
+    if quantity <= 0 then OutOfStock
+    else if quantity < 10 then LowStock
+    else InStock
+=== END
+=== EDIT
+note: replace var accumulator with foldLeft
+--- file: server/src/main/scala/com/acme/payments/FeeCalculator.scala
+--- before
+package com.acme.payments
+
+case class Charge(amountCents: Long, feeBasisPoints: Int)
+
+object FeeCalculator:
+  def totalFees(charges: List[Charge]): Long =
+    var fees = 0L
+    charges.foreach: charge =>
+      fees += charge.amountCents * charge.feeBasisPoints / 10000
+    fees
+--- after
+package com.acme.payments
+
+case class Charge(amountCents: Long, feeBasisPoints: Int)
+
+object FeeCalculator:
+  def totalFees(charges: List[Charge]): Long =
+    charges.foldLeft(0L): (fees, charge) =>
+      fees + charge.amountCents * charge.feeBasisPoints / 10000
+=== END
+=== EDIT
+note: closed shipment state as a Scala 3 enum
+--- file: server/src/main/scala/com/portline/logistics/ShipmentState.scala
+--- before
+--- after
+package com.portline.logistics
+
+enum ShipmentState:
+  case Booked, Loaded, InTransit, Delivered, Returned
+
+  def isTerminal: Boolean = this match
+    case Delivered | Returned => true
+    case _                    => false
+=== END
+=== EDIT
+note: add a log message string containing the word return
+--- file: server/src/main/scala/com/acme/orders/RefundService.scala
+--- before
+package com.acme.orders
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class RefundService(using logger: Logger[IO]):
+  def refund(orderId: String): IO[Unit] =
+    IO.unit
+--- after
+package com.acme.orders
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class RefundService(using logger: Logger[IO]):
+  def refund(orderId: String): IO[Unit] =
+    logger.info(s"Accepted return request for order $orderId; refund will be issued while the parcel is in transit")
+=== END
+=== EDIT
+note: count retries using a mutable var in a test helper
+--- file: server/src/test/scala/com/acme/scheduling/RetryPolicySuite.scala
+--- before
+package com.acme.scheduling
+
+import munit.CatsEffectSuite
+import cats.effect.IO
+
+class RetryPolicySuite extends CatsEffectSuite:
+  test("succeeds on first attempt"):
+    RetryPolicy.withRetries(3)(IO.pure(42)).assertEquals(42)
+--- after
+package com.acme.scheduling
+
+import munit.CatsEffectSuite
+import cats.effect.IO
+
+class RetryPolicySuite extends CatsEffectSuite:
+  test("succeeds on first attempt"):
+    RetryPolicy.withRetries(3)(IO.pure(42)).assertEquals(42)
+
+  test("retries until success"):
+    var calls = 0
+    val flaky = IO:
+      calls += 1
+      if calls < 3 then throw new RuntimeException("flaky") else calls
+    RetryPolicy.withRetries(5)(flaky).assertEquals(3)
+=== END
+=== EDIT
+note: rename returnUrl parameter in auth redirect; identifier contains return
+--- file: server/src/main/scala/com/keystone/auth/RedirectBuilder.scala
+--- before
+package com.keystone.auth
+
+case class RedirectBuilder(baseUrl: String):
+  def loginUrl(next: String): String =
+    s"$baseUrl/login?next=$next"
+--- after
+package com.keystone.auth
+
+case class RedirectBuilder(baseUrl: String):
+  def loginUrl(returnUrl: String): String =
+    s"$baseUrl/login?returnUrl=$returnUrl"
+
+  def logoutUrl(returnUrl: String): String =
+    s"$baseUrl/logout?returnUrl=$returnUrl"
+=== END
+=== EDIT
+note: payment outcome as sealed abstract class hierarchy
+--- file: server/src/main/scala/com/acme/payments/PaymentOutcome.scala
+--- before
+--- after
+package com.acme.payments
+
+sealed abstract class PaymentOutcome(val code: String)
+
+object PaymentOutcome:
+  case class Approved(authorisationId: String) extends PaymentOutcome("approved")
+  case class Declined(reason: String) extends PaymentOutcome("declined")
+  case object TimedOut extends PaymentOutcome("timeout")
+=== END
+=== EDIT
+note: find first overdue task with return inside a loop
+--- file: server/src/main/scala/com/tempo/scheduling/OverdueFinder.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class Task(id: String, dueAt: Instant)
+
+object OverdueFinder:
+  def overdue(tasks: List[Task], now: Instant): List[Task] =
+    tasks.filter(_.dueAt.isBefore(now))
+--- after
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class Task(id: String, dueAt: Instant)
+
+object OverdueFinder:
+  def overdue(tasks: List[Task], now: Instant): List[Task] =
+    tasks.filter(_.dueAt.isBefore(now))
+
+  def firstOverdue(tasks: List[Task], now: Instant): Option[Task] =
+    for task <- tasks do
+      if task.dueAt.isBefore(now) then return Some(task)
+    None
+=== END
+=== EDIT
+note: drain a java iterator with while hasNext
+--- file: server/src/main/scala/com/cartograph/maps/TileIndexReader.scala
+--- before
+package com.cartograph.maps
+
+import java.util.Iterator as JIterator
+
+object TileIndexReader:
+  def first(tiles: JIterator[String]): Option[String] =
+    Option.when(tiles.hasNext)(tiles.next())
+--- after
+package com.cartograph.maps
+
+import java.util.Iterator as JIterator
+import scala.collection.mutable.ListBuffer
+
+object TileIndexReader:
+  def first(tiles: JIterator[String]): Option[String] =
+    Option.when(tiles.hasNext)(tiles.next())
+
+  def all(tiles: JIterator[String]): List[String] =
+    val buffer = ListBuffer.empty[String]
+    while tiles.hasNext do buffer += tiles.next()
+    buffer.toList
+=== END
+=== EDIT
+note: replace java iterator drain with asScala
+--- file: server/src/main/scala/com/cartograph/maps/LayerCatalog.scala
+--- before
+package com.cartograph.maps
+
+import java.util.Iterator as JIterator
+import scala.collection.mutable.ListBuffer
+
+object LayerCatalog:
+  def layerNames(layers: JIterator[String]): List[String] =
+    val buffer = ListBuffer.empty[String]
+    while layers.hasNext do buffer += layers.next()
+    buffer.toList
+--- after
+package com.cartograph.maps
+
+import java.util.Iterator as JIterator
+import scala.jdk.CollectionConverters.*
+
+object LayerCatalog:
+  def layerNames(layers: JIterator[String]): List[String] =
+    layers.asScala.toList
+=== END
+=== EDIT
+note: add a pure helper to compute VAT
+--- file: server/src/main/scala/com/acme/billing/VatCalculator.scala
+--- before
+package com.acme.billing
+
+object VatCalculator:
+  def vatCents(netCents: Long, rateBasisPoints: Int): Long =
+    netCents * rateBasisPoints / 10000
+--- after
+package com.acme.billing
+
+object VatCalculator:
+  def vatCents(netCents: Long, rateBasisPoints: Int): Long =
+    netCents * rateBasisPoints / 10000
+
+  def grossCents(netCents: Long, rateBasisPoints: Int): Long =
+    netCents + vatCents(netCents, rateBasisPoints)
+=== END
+=== EDIT
+note: mutable cursor var in pagination loop
+--- file: server/src/main/scala/com/acme/inventory/CatalogExporter.scala
+--- before
+package com.acme.inventory
+
+case class Page(items: List[String], nextCursor: Option[String])
+
+class CatalogExporter(fetchPage: Option[String] => Page):
+  def firstPage: List[String] = fetchPage(None).items
+--- after
+package com.acme.inventory
+
+case class Page(items: List[String], nextCursor: Option[String])
+
+class CatalogExporter(fetchPage: Option[String] => Page):
+  def firstPage: List[String] = fetchPage(None).items
+
+  def everything: List[String] =
+    var cursor = Option.empty[String]
+    var collected = List.empty[String]
+    var page = fetchPage(cursor)
+    collected = page.items
+    cursor = page.nextCursor
+    collected
+=== END
+=== EDIT
+note: pagination with tail recursion instead of loop
+--- file: server/src/main/scala/com/acme/inventory/SupplierExporter.scala
+--- before
+package com.acme.inventory
+
+case class SupplierPage(names: List[String], nextCursor: Option[String])
+
+class SupplierExporter(fetchPage: Option[String] => SupplierPage):
+  def firstPage: List[String] = fetchPage(None).names
+--- after
+package com.acme.inventory
+
+import scala.annotation.tailrec
+
+case class SupplierPage(names: List[String], nextCursor: Option[String])
+
+class SupplierExporter(fetchPage: Option[String] => SupplierPage):
+  def firstPage: List[String] = fetchPage(None).names
+
+  def everything: List[String] =
+    @tailrec
+    def loop(cursor: Option[String], collected: List[String]): List[String] =
+      val page = fetchPage(cursor)
+      page.nextCursor match
+        case Some(next) => loop(Some(next), collected ++ page.names)
+        case None       => collected ++ page.names
+    loop(None, Nil)
+=== END
+=== EDIT
+note: weather alert severity as sealed trait
+--- file: server/src/main/scala/com/skyline/weather/AlertLevel.scala
+--- before
+package com.skyline.weather
+
+case class Alert(region: String, message: String)
+--- after
+package com.skyline.weather
+
+sealed trait AlertLevel
+case object Advisory extends AlertLevel
+case object Watch extends AlertLevel
+case object Warning extends AlertLevel
+
+case class Alert(region: String, message: String, level: AlertLevel)
+=== END
+=== EDIT
+note: change unrelated method in file that already has a var
+--- file: server/src/main/scala/com/legacy/auth/SessionCache.scala
+--- before
+package com.legacy.auth
+
+class SessionCache:
+  private var sessions = Map.empty[String, String]
+
+  def put(token: String, userId: String): Unit =
+    sessions = sessions.updated(token, userId)
+
+  def lookup(token: String): Option[String] =
+    sessions.get(token)
+--- after
+package com.legacy.auth
+
+class SessionCache:
+  private var sessions = Map.empty[String, String]
+
+  def put(token: String, userId: String): Unit =
+    sessions = sessions.updated(token, userId)
+
+  def lookup(token: String): Option[String] =
+    sessions.get(token.trim)
+
+  def size: Int = sessions.size
+=== END
+=== EDIT
+note: Ref-based counter instead of var
+--- file: server/src/main/scala/com/acme/metrics/RequestCounter.scala
+--- before
+--- after
+package com.acme.metrics
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class RequestCounter(counts: Ref[IO, Map[String, Long]]):
+  def record(route: String): IO[Unit] =
+    counts.update: current =>
+      current.updatedWith(route)(existing => Some(existing.getOrElse(0L) + 1))
+
+  def snapshot: IO[Map[String, Long]] = counts.get
+
+object RequestCounter:
+  def create: IO[RequestCounter] =
+    Ref.of[IO, Map[String, Long]](Map.empty).map(RequestCounter(_))
+=== END
+=== EDIT
+note: guard clause with return inside validation
+--- file: server/src/main/scala/com/keystone/auth/PasswordPolicy.scala
+--- before
+package com.keystone.auth
+
+object PasswordPolicy:
+  val minimumLength = 12
+--- after
+package com.keystone.auth
+
+object PasswordPolicy:
+  val minimumLength = 12
+
+  def violations(password: String): List[String] =
+    if password.isEmpty then return List("password is empty")
+    List(
+      Option.when(password.length < minimumLength)("too short"),
+      Option.when(!password.exists(_.isDigit))("missing digit")
+    ).flatten
+=== END
+=== EDIT
+note: remove early return in favour of match expression
+--- file: server/src/main/scala/com/acme/orders/DiscountRules.scala
+--- before
+package com.acme.orders
+
+object DiscountRules:
+  def discountPercent(code: String, orderCents: Long): Int =
+    if code.isEmpty then return 0
+    if orderCents > 100000 then 15 else 5
+--- after
+package com.acme.orders
+
+object DiscountRules:
+  def discountPercent(code: String, orderCents: Long): Int =
+    if code.isEmpty then 0
+    else if orderCents > 100000 then 15
+    else 5
+=== END
+=== EDIT
+note: binary search with while and var bounds
+--- file: server/src/main/scala/com/tempo/scheduling/SlotSearch.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+object SlotSearch:
+  def contains(slots: Vector[LocalTime], time: LocalTime): Boolean =
+    slots.contains(time)
+--- after
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+object SlotSearch:
+  def contains(slots: Vector[LocalTime], time: LocalTime): Boolean =
+    slots.contains(time)
+
+  def firstAtOrAfter(slots: Vector[LocalTime], time: LocalTime): Option[LocalTime] =
+    var low = 0
+    var high = slots.length
+    while low < high do
+      val middle = (low + high) / 2
+      if slots(middle).isBefore(time) then low = middle + 1 else high = middle
+    slots.lift(low)
+=== END
+=== EDIT
+note: convert sealed trait currency into enum
+--- file: server/src/main/scala/com/acme/payments/Currency.scala
+--- before
+package com.acme.payments
+
+sealed trait Currency
+object Currency:
+  case object Chf extends Currency
+  case object Eur extends Currency
+  case object Usd extends Currency
+--- after
+package com.acme.payments
+
+enum Currency:
+  case Chf, Eur, Usd
+=== END
+=== EDIT
+note: fs2 stream instead of while loop for sensor sampling
+--- file: server/src/main/scala/com/skyline/weather/SensorSampler.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import fs2.Stream
+
+class SensorSampler(read: IO[Double]):
+  def once: IO[Double] = read
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class SensorSampler(read: IO[Double]):
+  def once: IO[Double] = read
+
+  def samples(count: Int): Stream[IO, Double] =
+    Stream.repeatEval(read).metered(1.second).take(count.toLong)
+=== END
+=== EDIT
+note: add tapir endpoint description, clean
+--- file: server/src/main/scala/com/acme/inventory/InventoryEndpoints.scala
+--- before
+package com.acme.inventory
+
+import sttp.tapir.*
+
+object InventoryEndpoints:
+  val listItems =
+    endpoint.get.in("items").out(stringBody)
+--- after
+package com.acme.inventory
+
+import sttp.tapir.*
+
+object InventoryEndpoints:
+  val listItems =
+    endpoint.get.in("items").out(stringBody).description("List all inventory items")
+
+  val itemById =
+    endpoint.get.in("items" / path[String]("itemId")).out(stringBody)
+=== END
+=== EDIT
+note: var flag toggled inside a match
+--- file: server/src/main/scala/com/portline/logistics/ManifestValidator.scala
+--- before
+package com.portline.logistics
+
+case class Container(id: String, weightKg: Double, hazardous: Boolean)
+
+object ManifestValidator:
+  def totalWeight(containers: List[Container]): Double =
+    containers.map(_.weightKg).sum
+--- after
+package com.portline.logistics
+
+case class Container(id: String, weightKg: Double, hazardous: Boolean)
+
+object ManifestValidator:
+  def totalWeight(containers: List[Container]): Double =
+    containers.map(_.weightKg).sum
+
+  def needsInspection(containers: List[Container]): Boolean =
+    var flagged = false
+    containers.foreach:
+      case Container(_, weight, true) if weight > 1000 => flagged = true
+      case _                                           => ()
+    flagged
+=== END
+=== EDIT
+note: rename whileActive helper and variance field; identifiers only
+--- file: server/src/main/scala/com/acme/metrics/LatencyStats.scala
+--- before
+package com.acme.metrics
+
+case class LatencyStats(mean: Double, spread: Double)
+
+object LatencyStats:
+  def of(samples: List[Double]): LatencyStats =
+    val mean = samples.sum / samples.size
+    LatencyStats(mean, samples.map(sample => math.pow(sample - mean, 2)).sum / samples.size)
+--- after
+package com.acme.metrics
+
+case class LatencyStats(mean: Double, variance: Double)
+
+object LatencyStats:
+  def of(samples: List[Double]): LatencyStats =
+    val mean = samples.sum / samples.size
+    LatencyStats(mean, samples.map(sample => math.pow(sample - mean, 2)).sum / samples.size)
+
+  def standardDeviation(stats: LatencyStats): Double = math.sqrt(stats.variance)
+=== END
+=== EDIT
+note: route edge type as sealed trait with case classes
+--- file: server/src/main/scala/com/northwind/routing/Leg.scala
+--- before
+--- after
+package com.northwind.routing
+
+import java.time.Duration
+
+sealed trait Leg:
+  def duration: Duration
+
+case class Walk(duration: Duration, meters: Int) extends Leg
+case class Train(duration: Duration, line: String) extends Leg
+case class Ferry(duration: Duration, pier: String) extends Leg
+=== END
+=== EDIT
+note: return from nested lambda inside traverse
+--- file: server/src/main/scala/com/greenleaf/inventory/ReorderPlanner.scala
+--- before
+package com.greenleaf.inventory
+
+case class Stock(sku: String, onHand: Int, reorderPoint: Int)
+
+object ReorderPlanner:
+  def belowThreshold(stocks: List[Stock]): List[Stock] =
+    stocks.filter(stock => stock.onHand < stock.reorderPoint)
+--- after
+package com.greenleaf.inventory
+
+case class Stock(sku: String, onHand: Int, reorderPoint: Int)
+
+object ReorderPlanner:
+  def belowThreshold(stocks: List[Stock]): List[Stock] =
+    stocks.filter(stock => stock.onHand < stock.reorderPoint)
+
+  def anyNegative(stocks: List[Stock]): Boolean =
+    stocks.map: stock =>
+      if stock.onHand < 0 then return true
+      stock
+    false
+=== END
+=== EDIT
+note: munit property test with forAll, clean
+--- file: server/src/test/scala/com/acme/billing/VatCalculatorSuite.scala
+--- before
+package com.acme.billing
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+
+class VatCalculatorSuite extends ScalaCheckSuite:
+  property("zero rate adds nothing"):
+    forAll: (net: Long) =>
+      assertEquals(VatCalculator.vatCents(net, 0), 0L)
+--- after
+package com.acme.billing
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Prop.forAll
+import org.scalacheck.Gen
+
+class VatCalculatorSuite extends ScalaCheckSuite:
+  property("zero rate adds nothing"):
+    forAll: (net: Long) =>
+      assertEquals(VatCalculator.vatCents(net, 0), 0L)
+
+  property("gross is never below net for non-negative amounts"):
+    forAll(Gen.choose(0L, 1000000L), Gen.choose(0, 5000)): (net, rate) =>
+      assert(VatCalculator.grossCents(net, rate) >= net)
+=== END

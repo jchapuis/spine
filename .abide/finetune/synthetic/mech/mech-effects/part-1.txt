@@ -1,0 +1,776 @@
+=== EDIT
+note: stamp audit entries with Instant.now
+--- file: server/src/main/scala/com/acme/audit/AuditLog.scala
+--- before
+package com.acme.audit
+
+import cats.effect.IO
+
+class AuditLog(store: AuditStore):
+
+  def record(actor: ActorRef, action: Action): IO[Unit] =
+    store.append(AuditEntry(actor, action))
+--- after
+package com.acme.audit
+
+import cats.effect.IO
+import java.time.Instant
+
+class AuditLog(store: AuditStore):
+
+  def record(actor: ActorRef, action: Action): IO[Unit] =
+    store.append(AuditEntry(actor, action, Instant.now()))
+=== END
+
+=== EDIT
+note: stamp audit entries with IO.realTimeInstant
+--- file: server/src/main/scala/com/acme/audit/AccessLog.scala
+--- before
+package com.acme.audit
+
+import cats.effect.IO
+
+class AccessLog(store: AuditStore):
+
+  def record(actor: ActorRef, resource: ResourceRef): IO[Unit] =
+    store.appendAccess(actor, resource)
+--- after
+package com.acme.audit
+
+import cats.effect.IO
+
+class AccessLog(store: AuditStore):
+
+  def record(actor: ActorRef, resource: ResourceRef): IO[Unit] =
+    IO.realTimeInstant.flatMap: now =>
+      store.appendAccess(actor, resource, now)
+=== END
+
+=== EDIT
+note: measure request latency with System.nanoTime in middleware
+--- file: server/src/main/scala/com/orbit/http/TimingMiddleware.scala
+--- before
+package com.orbit.http
+
+import cats.data.Kleisli
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.typelevel.log4cats.Logger
+
+object TimingMiddleware:
+  def apply(routes: HttpRoutes[IO])(using Logger[IO]): HttpRoutes[IO] =
+    Kleisli: req =>
+      routes(req)
+--- after
+package com.orbit.http
+
+import cats.data.Kleisli
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.typelevel.log4cats.Logger
+
+object TimingMiddleware:
+  def apply(routes: HttpRoutes[IO])(using Logger[IO]): HttpRoutes[IO] =
+    Kleisli: req =>
+      val started = System.nanoTime
+      routes(req).semiflatTap: _ =>
+        Logger[IO].info(s"${req.uri} took ${(System.nanoTime - started) / 1000000} ms")
+=== END
+
+=== EDIT
+note: measure request latency with IO.timed
+--- file: server/src/main/scala/com/orbit/http/LatencyMiddleware.scala
+--- before
+package com.orbit.http
+
+import cats.data.Kleisli
+import cats.data.OptionT
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.typelevel.log4cats.Logger
+
+object LatencyMiddleware:
+  def apply(routes: HttpRoutes[IO])(using Logger[IO]): HttpRoutes[IO] =
+    Kleisli: req =>
+      routes(req)
+--- after
+package com.orbit.http
+
+import cats.data.Kleisli
+import cats.data.OptionT
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.typelevel.log4cats.Logger
+
+object LatencyMiddleware:
+  def apply(routes: HttpRoutes[IO])(using Logger[IO]): HttpRoutes[IO] =
+    Kleisli: req =>
+      OptionT(routes(req).value.timed.flatMap: (elapsed, response) =>
+        Logger[IO].info(s"${req.uri} took ${elapsed.toMillis} ms").as(response))
+=== END
+
+=== EDIT
+note: blocking unsafeRunSync to fetch a config value inside a service
+--- file: server/src/main/scala/com/skyline/weather/ForecastCache.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class ForecastCache(state: Ref[IO, Map[CityRef, Forecast]], config: ConfigSource):
+
+  def get(city: CityRef): IO[Option[Forecast]] =
+    state.get.map(_.get(city))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.Ref
+import cats.effect.unsafe.implicits.global
+
+class ForecastCache(state: Ref[IO, Map[CityRef, Forecast]], config: ConfigSource):
+
+  private val ttl = config.ttl.unsafeRunSync()
+
+  def get(city: CityRef): IO[Option[Forecast]] =
+    state.get.map(_.get(city))
+=== END
+
+=== EDIT
+note: pass the ttl in as a constructor argument resolved by the app wiring
+--- file: server/src/main/scala/com/skyline/weather/ObservationCache.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class ObservationCache(state: Ref[IO, Map[CityRef, Observation]]):
+
+  def get(city: CityRef): IO[Option[Observation]] =
+    state.get.map(_.get(city))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.Ref
+import scala.concurrent.duration.FiniteDuration
+
+class ObservationCache(state: Ref[IO, Map[CityRef, Observation]], ttl: FiniteDuration):
+
+  def get(city: CityRef): IO[Option[Observation]] =
+    state.get.map(_.get(city))
+=== END
+
+=== EDIT
+note: unsafeRunSync in the app Main entry point (excluded path)
+--- file: server/src/main/scala/com/skyline/weather/Main.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+
+object Main:
+  def main(args: Array[String]): Unit =
+    println("starting")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+
+object Main:
+  def main(args: Array[String]): Unit =
+    given IORuntime = IORuntime.global
+    Server.run(args.toList).unsafeRunSync()
+=== END
+
+=== EDIT
+note: import the global runtime in a munit suite to run IO synchronously
+--- file: server/src/test/scala/com/skyline/weather/ForecastCacheSuite.scala
+--- before
+package com.skyline.weather
+
+import munit.FunSuite
+
+class ForecastCacheSuite extends FunSuite:
+
+  test("empty cache has no forecast"):
+    assert(true)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+import munit.FunSuite
+
+class ForecastCacheSuite extends FunSuite:
+
+  test("empty cache has no forecast"):
+    val cache = ForecastCache.empty.unsafeRunSync()
+    assertEquals(cache.get(Fixtures.zurich).unsafeRunSync(), None)
+=== END
+
+=== EDIT
+note: rewrite the suite with CatsEffectSuite instead of unsafeRunSync (fix)
+--- file: server/src/test/scala/com/skyline/weather/ObservationCacheSuite.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.unsafe.implicits.global
+import munit.FunSuite
+
+class ObservationCacheSuite extends FunSuite:
+
+  test("empty cache has no observation"):
+    assertEquals(ObservationCache.empty.flatMap(_.get(Fixtures.zurich)).unsafeRunSync(), None)
+--- after
+package com.skyline.weather
+
+import munit.CatsEffectSuite
+
+class ObservationCacheSuite extends CatsEffectSuite:
+
+  test("empty cache has no observation"):
+    assertIO(ObservationCache.empty.flatMap(_.get(Fixtures.zurich)), None)
+=== END
+
+=== EDIT
+note: fetch tiles in parallel with parEvalMapUnbounded
+--- file: server/src/main/scala/com/cartograph/maps/TilePrefetch.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TilePrefetch(tiles: TileSource, cache: TileCache):
+
+  def prefetch(keys: List[TileKey]): Stream[IO, Unit] =
+    Stream.emits(keys).evalMap(key => tiles.fetch(key).flatMap(cache.put(key, _)))
+--- after
+package com.cartograph.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TilePrefetch(tiles: TileSource, cache: TileCache):
+
+  def prefetch(keys: List[TileKey]): Stream[IO, Unit] =
+    Stream.emits(keys).parEvalMapUnbounded(key => tiles.fetch(key).flatMap(cache.put(key, _)))
+=== END
+
+=== EDIT
+note: fetch tiles with a bounded parEvalMap
+--- file: server/src/main/scala/com/cartograph/maps/TileWarmup.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileWarmup(tiles: TileSource, cache: TileCache):
+
+  def warm(keys: List[TileKey]): Stream[IO, Unit] =
+    Stream.emits(keys).evalMap(key => tiles.fetch(key).flatMap(cache.put(key, _)))
+--- after
+package com.cartograph.maps
+
+import cats.effect.IO
+import fs2.Stream
+
+class TileWarmup(tiles: TileSource, cache: TileCache, parallelism: Int):
+
+  def warm(keys: List[TileKey]): Stream[IO, Unit] =
+    Stream.emits(keys).parEvalMap(parallelism)(key => tiles.fetch(key).flatMap(cache.put(key, _)))
+=== END
+
+=== EDIT
+note: open a single skunk session for the repository wiring
+--- file: server/src/main/scala/com/stockpile/inventory/db/Database.scala
+--- before
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Database:
+  def session(config: DbConfig): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](host = config.host, port = config.port, user = config.user, database = config.name, max = 10)
+--- after
+package com.stockpile.inventory.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Database:
+  def session(config: DbConfig): Resource[IO, Session[IO]] =
+    Session.single[IO](host = config.host, port = config.port, user = config.user, database = config.name)
+=== END
+
+=== EDIT
+note: Session.single used in a test database helper (excluded path)
+--- file: server/src/test/scala/com/stockpile/inventory/TestDatabase.scala
+--- before
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+
+object TestDatabase:
+  val port: Int = 5433
+--- after
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object TestDatabase:
+  val port: Int = 5433
+
+  def session: Resource[IO, Session[IO]] =
+    Session.single[IO](host = "localhost", port = port, user = "test", database = "inventory")
+=== END
+
+=== EDIT
+note: recover inside an mtl Raise scope in an import service
+--- file: server/src/main/scala/com/stockpile/inventory/StockImport.scala
+--- before
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class StockImport(parser: CsvParser, store: StockStore):
+
+  def run(file: UploadRef)(using Raise[IO, ImportError]): IO[Int] =
+    parser.parse(file).flatMap(store.upsertAll)
+--- after
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class StockImport(parser: CsvParser, store: StockStore):
+
+  def run(file: UploadRef)(using Raise[IO, ImportError]): IO[Int] =
+    parser.parse(file).flatMap(store.upsertAll).handleErrorWith: e =>
+      Raise[IO, ImportError].raise(ImportError.Unreadable(file, e.getMessage))
+=== END
+
+=== EDIT
+note: map the failure to a typed error with Raise without IO-level recovery
+--- file: server/src/main/scala/com/stockpile/inventory/PriceImport.scala
+--- before
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class PriceImport(parser: CsvParser, store: PriceStore):
+
+  def run(file: UploadRef)(using Raise[IO, ImportError]): IO[Int] =
+    parser.parse(file).flatMap(store.upsertAll)
+--- after
+package com.stockpile.inventory
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class PriceImport(parser: CsvParser, store: PriceStore):
+
+  def run(file: UploadRef)(using Raise[IO, ImportError]): IO[Int] =
+    parser.parseEither(file).flatMap:
+      case Right(rows) => store.upsertAll(rows)
+      case Left(reason) => Raise[IO, ImportError].raise(ImportError.Unreadable(file, reason))
+=== END
+
+=== EDIT
+note: attempt inside a Handle.allow block in a payments flow
+--- file: server/src/main/scala/com/ledgerly/payments/ChargeFlow.scala
+--- before
+package com.ledgerly.payments
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class ChargeFlow(gateway: Gateway, receipts: Receipts):
+
+  def charge(card: CardToken, amount: Money): IO[Either[ChargeError, Receipt]] =
+    Handle.allow[ChargeError]:
+      gateway.charge(card, amount).flatMap(receipts.store)
+    .rescue(e => IO.pure(Left(e)))
+--- after
+package com.ledgerly.payments
+
+import cats.effect.IO
+import cats.mtl.Handle
+
+class ChargeFlow(gateway: Gateway, receipts: Receipts):
+
+  def charge(card: CardToken, amount: Money): IO[Either[ChargeError, Receipt]] =
+    Handle.allow[ChargeError]:
+      gateway.charge(card, amount).attempt.flatMap:
+        case Right(id) => receipts.store(id)
+        case Left(_) => receipts.storeFailure(card)
+    .rescue(e => IO.pure(Left(e)))
+=== END
+
+=== EDIT
+note: add a refund helper in an mtl file without any recovery
+--- file: server/src/main/scala/com/ledgerly/payments/RefundFlow.scala
+--- before
+package com.ledgerly.payments
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class RefundFlow(gateway: Gateway):
+
+  def refund(receipt: Receipt)(using Raise[IO, RefundError]): IO[Unit] =
+    gateway.refund(receipt.charge)
+--- after
+package com.ledgerly.payments
+
+import cats.effect.IO
+import cats.mtl.Raise
+
+class RefundFlow(gateway: Gateway):
+
+  def refund(receipt: Receipt)(using Raise[IO, RefundError]): IO[Unit] =
+    IO.raiseWhen(receipt.refunded)(RefundError.AlreadyRefunded(receipt.charge)) *>
+      gateway.refund(receipt.charge)
+=== END
+
+=== EDIT
+note: recoverWith on a non-mtl http client (no cats.mtl import)
+--- file: server/src/main/scala/com/skyline/weather/ProviderClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class ProviderClient(http: Client[IO], fallback: Client[IO]):
+
+  def observation(station: StationRef): IO[Observation] =
+    http.expect[Observation](s"/obs/$station")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class ProviderClient(http: Client[IO], fallback: Client[IO]):
+
+  def observation(station: StationRef): IO[Observation] =
+    http.expect[Observation](s"/obs/$station").recoverWith:
+      case _: java.net.ConnectException => fallback.expect[Observation](s"/obs/$station")
+=== END
+
+=== EDIT
+note: compute token expiry from System.currentTimeMillis
+--- file: server/src/main/scala/com/keystone/auth/TokenIssuer.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+
+class TokenIssuer(signer: Signer, ttlMillis: Long):
+
+  def issue(subject: SubjectRef): IO[Token] =
+    signer.sign(Claims(subject))
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+
+class TokenIssuer(signer: Signer, ttlMillis: Long):
+
+  def issue(subject: SubjectRef): IO[Token] =
+    signer.sign(Claims(subject, expiresAt = System.currentTimeMillis() + ttlMillis))
+=== END
+
+=== EDIT
+note: token expiry from Clock[F].realTime in a tagless service
+--- file: server/src/main/scala/com/keystone/auth/RefreshIssuer.scala
+--- before
+package com.keystone.auth
+
+import cats.Monad
+import cats.effect.Clock
+
+class RefreshIssuer[F[_]: Monad: Clock](signer: Signer[F], ttlMillis: Long):
+
+  def issue(subject: SubjectRef): F[Token] =
+    signer.sign(Claims(subject))
+--- after
+package com.keystone.auth
+
+import cats.Monad
+import cats.effect.Clock
+import cats.syntax.flatMap.*
+
+class RefreshIssuer[F[_]: Monad: Clock](signer: Signer[F], ttlMillis: Long):
+
+  def issue(subject: SubjectRef): F[Token] =
+    Clock[F].realTime.flatMap: now =>
+      signer.sign(Claims(subject, expiresAt = now.toMillis + ttlMillis))
+=== END
+
+=== EDIT
+note: Instant.now in a test fixture (excluded path)
+--- file: server/src/test/scala/com/keystone/auth/TokenFixtures.scala
+--- before
+package com.keystone.auth
+
+object TokenFixtures:
+  val subject: SubjectRef = SubjectRef("alice")
+--- after
+package com.keystone.auth
+
+import java.time.Instant
+
+object TokenFixtures:
+  val subject: SubjectRef = SubjectRef("alice")
+  val issuedAt: Instant = Instant.now()
+=== END
+
+=== EDIT
+note: add a route for listing cities, no effect concerns
+--- file: server/src/main/scala/com/skyline/weather/CityRoutes.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class CityRoutes(cities: Cities):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "cities" => cities.all.flatMap(Ok(_))
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class CityRoutes(cities: Cities):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "cities" => cities.all.flatMap(Ok(_))
+    case GET -> Root / "cities" / country => cities.inCountry(country).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: unsafeRunAndForget to fire a webhook from a service
+--- file: server/src/main/scala/com/beacon/notify/Webhooks.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class Webhooks(http: Client[IO], targets: WebhookTargets):
+
+  def notify(event: Event): IO[Unit] =
+    targets.forEvent(event).flatMap(_.traverse_(t => http.successful(t.request(event))))
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import org.http4s.client.Client
+
+class Webhooks(http: Client[IO], targets: WebhookTargets)(using IORuntime):
+
+  def notify(event: Event): Unit =
+    targets.forEvent(event).flatMap(_.traverse_(t => http.successful(t.request(event)))).unsafeRunAndForget()
+=== END
+
+=== EDIT
+note: fire webhooks on a supervised fiber with start
+--- file: server/src/main/scala/com/beacon/notify/Callbacks.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class Callbacks(http: Client[IO], targets: WebhookTargets):
+
+  def notify(event: Event): IO[Unit] =
+    targets.forEvent(event).flatMap(_.traverse_(t => http.successful(t.request(event))))
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import cats.effect.std.Supervisor
+import org.http4s.client.Client
+
+class Callbacks(http: Client[IO], targets: WebhookTargets, supervisor: Supervisor[IO]):
+
+  def notify(event: Event): IO[Unit] =
+    supervisor.supervise(targets.forEvent(event).flatMap(_.traverse_(t => http.successful(t.request(event))))).void
+=== END
+
+=== EDIT
+note: unsafeToFuture bridge in a Play-style legacy adapter
+--- file: server/src/main/scala/com/beacon/legacy/LegacyAdapter.scala
+--- before
+package com.beacon.legacy
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import scala.concurrent.Future
+
+class LegacyAdapter(service: NotificationService)(using IORuntime):
+
+  def pending(): Future[List[Notification]] =
+    Future.successful(Nil)
+--- after
+package com.beacon.legacy
+
+import cats.effect.IO
+import cats.effect.unsafe.IORuntime
+import scala.concurrent.Future
+
+class LegacyAdapter(service: NotificationService)(using IORuntime):
+
+  def pending(): Future[List[Notification]] =
+    service.pending.unsafeToFuture()
+=== END
+
+=== EDIT
+note: parse a timestamp string with Instant.parse (not a clock read)
+--- file: server/src/main/scala/com/beacon/notify/EventDecoder.scala
+--- before
+package com.beacon.notify
+
+import io.circe.Decoder
+
+object EventDecoder:
+  given Decoder[EventKind] = Decoder.decodeString.emap(EventKind.parse)
+--- after
+package com.beacon.notify
+
+import io.circe.Decoder
+import java.time.Instant
+import scala.util.Try
+
+object EventDecoder:
+  given Decoder[EventKind] = Decoder.decodeString.emap(EventKind.parse)
+  given Decoder[Instant] = Decoder.decodeString.emapTry(raw => Try(Instant.parse(raw)))
+=== END
+
+=== EDIT
+note: add a pooled skunk session with a larger pool size
+--- file: server/src/main/scala/com/ledgerly/payments/db/Sessions.scala
+--- before
+package com.ledgerly.payments.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Sessions:
+  def pool(config: DbConfig): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](host = config.host, port = 5432, user = config.user, database = config.db, max = 8)
+--- after
+package com.ledgerly.payments.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Sessions:
+  def pool(config: DbConfig): Resource[IO, Resource[IO, Session[IO]]] =
+    Session.pooled[IO](host = config.host, port = 5432, user = config.user, database = config.db, max = config.poolSize)
+=== END
+
+=== EDIT
+note: migration runner opens Session.single in production code
+--- file: server/src/main/scala/com/ledgerly/payments/db/Migrations.scala
+--- before
+package com.ledgerly.payments.db
+
+import cats.effect.IO
+import skunk.Session
+
+object Migrations:
+  def run(config: DbConfig, scripts: List[Script]): IO[Unit] =
+    IO.unit
+--- after
+package com.ledgerly.payments.db
+
+import cats.effect.IO
+import cats.syntax.foldable.*
+import natchez.Trace.Implicits.noop
+import skunk.Session
+
+object Migrations:
+  def run(config: DbConfig, scripts: List[Script]): IO[Unit] =
+    Session
+      .single[IO](host = config.host, port = 5432, user = config.user, database = config.db)
+      .use(session => scripts.traverse_(s => session.execute(s.command)))
+=== END
+
+=== EDIT
+note: parEvalMapUnordered with a bound in a report export
+--- file: server/src/main/scala/com/ledgerly/reports/StatementExport.scala
+--- before
+package com.ledgerly.reports
+
+import cats.effect.IO
+import fs2.Stream
+
+class StatementExport(statements: Statements, storage: BlobStorage):
+
+  def exportAll(accounts: Stream[IO, AccountRef]): Stream[IO, BlobRef] =
+    accounts.evalMap(a => statements.render(a).flatMap(storage.put))
+--- after
+package com.ledgerly.reports
+
+import cats.effect.IO
+import fs2.Stream
+
+class StatementExport(statements: Statements, storage: BlobStorage):
+
+  def exportAll(accounts: Stream[IO, AccountRef]): Stream[IO, BlobRef] =
+    accounts.parEvalMapUnordered(4)(a => statements.render(a).flatMap(storage.put))
+=== END
+
+=== EDIT
+note: rename a stream helper, unrelated to effects
+--- file: server/src/main/scala/com/ledgerly/reports/Batches.scala
+--- before
+package com.ledgerly.reports
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+object Batches:
+  def group[A](in: Stream[IO, A]): Stream[IO, List[A]] =
+    in.groupWithin(100, 2.seconds).map(_.toList)
+--- after
+package com.ledgerly.reports
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+object Batches:
+  def chunked[A](in: Stream[IO, A]): Stream[IO, List[A]] =
+    in.groupWithin(100, 2.seconds).map(_.toList)
+=== END

@@ -46,7 +46,9 @@ Agent 2 — compliance gate:
 > violation with file:line, the skill it breaks, and the fix. Name the skills you checked that
 > passed clean. Run the skill's necessity pass (step 6b) over the whole target against its stated
 > intent (PR body or commit messages) and report its findings in their own section. Run the jargon
-> pass (step 6c) over the same target and report it in a section of its own. If the mechanical layer has already been run, say so and spend your effort on the
+> pass (step 6c) over the same target and report it in a section of its own. Run the simplicity
+> pass (step 6d) over the same target and report it in a section of its own, worth-it findings
+> before taste, and decisions that would reverse a recorded choice apart. If the mechanical layer has already been run, say so and spend your effort on the
 > LLM-judgment layer instead of repeating it.
 
 Tell each agent what the other is covering so they partition rather than overlap.

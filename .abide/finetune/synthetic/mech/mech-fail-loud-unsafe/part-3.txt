@@ -1,0 +1,688 @@
+=== EDIT
+note: compare against null with eq when reading a legacy SDK result
+--- file: server/src/main/scala/com/payflow/payments/CardNetworkAdapter.scala
+--- before
+package com.payflow.payments
+
+import cats.effect.IO
+
+class CardNetworkAdapter(sdk: LegacyCardSdk):
+
+  def authorize(request: AuthorizationRequest): IO[AuthorizationCode] =
+    IO.blocking(AuthorizationCode(sdk.authorize(request.toSdk).code))
+--- after
+package com.payflow.payments
+
+import cats.effect.IO
+
+class CardNetworkAdapter(sdk: LegacyCardSdk):
+
+  def authorize(request: AuthorizationRequest): IO[AuthorizationCode] =
+    IO.blocking(sdk.authorize(request.toSdk)).flatMap: response =>
+      if response eq null then IO.raiseError(PaymentError.NoResponse(request.id))
+      else IO.pure(AuthorizationCode(response.code))
+=== END
+
+=== EDIT
+note: wrap the SDK result with Option.apply and raise on absence
+--- file: server/src/main/scala/com/payflow/payments/RefundAdapter.scala
+--- before
+package com.payflow.payments
+
+import cats.effect.IO
+
+class RefundAdapter(sdk: LegacyCardSdk):
+
+  def refund(request: RefundRequest): IO[RefundId] =
+    IO.blocking(RefundId(sdk.refund(request.toSdk).reference))
+--- after
+package com.payflow.payments
+
+import cats.effect.IO
+import cats.syntax.option.*
+
+class RefundAdapter(sdk: LegacyCardSdk):
+
+  def refund(request: RefundRequest): IO[RefundId] =
+    IO.blocking(Option(sdk.refund(request.toSdk))).flatMap: response =>
+      response.liftTo[IO](PaymentError.NoResponse(request.id)).map(found => RefundId(found.reference))
+=== END
+
+=== EDIT
+note: parse a json tree and cast the nested map
+--- file: server/src/main/scala/com/skyline/weather/AlertFeedParser.scala
+--- before
+package com.skyline.weather
+
+object AlertFeedParser:
+
+  def severity(level: Int): Severity =
+    Severity.fromOrdinal(level.min(Severity.values.length - 1))
+--- after
+package com.skyline.weather
+
+object AlertFeedParser:
+
+  def severity(level: Int): Severity =
+    Severity.fromOrdinal(level.min(Severity.values.length - 1))
+
+  def area(tree: Map[String, Any]): Map[String, Any] =
+    tree("properties").asInstanceOf[Map[String, Any]]("area")
+      .asInstanceOf[Map[String, Any]]
+=== END
+
+=== EDIT
+note: decode the alert with a circe cursor instead of casting maps
+--- file: server/src/main/scala/com/skyline/weather/AlertDecoder.scala
+--- before
+package com.skyline.weather
+
+import io.circe.Json
+
+object AlertDecoder:
+
+  def id(json: Json): Option[String] =
+    json.hcursor.get[String]("id").toOption
+--- after
+package com.skyline.weather
+
+import io.circe.{DecodingFailure, Json}
+
+object AlertDecoder:
+
+  def id(json: Json): Option[String] =
+    json.hcursor.get[String]("id").toOption
+
+  def area(json: Json): Either[DecodingFailure, AlertArea] =
+    json.hcursor.downField("properties").get[AlertArea]("area")
+=== END
+
+=== EDIT
+note: abstract resource base class overrides finalize as a safety net
+--- file: server/src/main/scala/com/orbital/telemetry/ChannelHandle.scala
+--- before
+package com.orbital.telemetry
+
+abstract class ChannelHandle(channel: ChannelId):
+
+  def close(): Unit
+
+  def isOpen: Boolean
+--- after
+package com.orbital.telemetry
+
+abstract class ChannelHandle(channel: ChannelId):
+
+  def close(): Unit
+
+  def isOpen: Boolean
+
+  override def finalize(): Unit =
+    if isOpen then close()
+=== END
+
+=== EDIT
+note: partition events with isInstanceOf
+--- file: server/src/main/scala/com/planwise/scheduling/CalendarSync.scala
+--- before
+package com.planwise.scheduling
+
+import cats.effect.IO
+
+class CalendarSync(remote: RemoteCalendar[IO], local: LocalCalendar[IO]):
+
+  def pull(owner: OwnerId): IO[Unit] =
+    remote.events(owner).flatMap(local.replace(owner, _))
+--- after
+package com.planwise.scheduling
+
+import cats.effect.IO
+
+class CalendarSync(remote: RemoteCalendar[IO], local: LocalCalendar[IO]):
+
+  def pull(owner: OwnerId): IO[Unit] =
+    remote.events(owner).flatMap: events =>
+      val (cancelled, active) = events.partition(_.isInstanceOf[CalendarEvent.Cancelled])
+      local.replace(owner, active) *> local.archive(owner, cancelled)
+=== END
+
+=== EDIT
+note: partition events with a dedicated predicate on the enum
+--- file: server/src/main/scala/com/planwise/scheduling/RoomSync.scala
+--- before
+package com.planwise.scheduling
+
+import cats.effect.IO
+
+class RoomSync(remote: RemoteCalendar[IO], rooms: RoomBookings[IO]):
+
+  def pull(room: RoomId): IO[Unit] =
+    remote.roomEvents(room).flatMap(rooms.replace(room, _))
+--- after
+package com.planwise.scheduling
+
+import cats.effect.IO
+
+class RoomSync(remote: RemoteCalendar[IO], rooms: RoomBookings[IO]):
+
+  def pull(room: RoomId): IO[Unit] =
+    remote.roomEvents(room).flatMap: events =>
+      val (cancelled, active) = events.partition(_.isCancelled)
+      rooms.replace(room, active) *> rooms.archive(room, cancelled)
+=== END
+
+=== EDIT
+note: throw from a fold on Either when the token is invalid
+--- file: server/src/main/scala/com/gatekeep/auth/TokenParser.scala
+--- before
+package com.gatekeep.auth
+
+object TokenParser:
+
+  def parse(raw: String): Either[TokenError, Claims] =
+    JwtDecoder.decode(raw).left.map(TokenError.Malformed(_))
+--- after
+package com.gatekeep.auth
+
+object TokenParser:
+
+  def parse(raw: String): Either[TokenError, Claims] =
+    JwtDecoder.decode(raw).left.map(TokenError.Malformed(_))
+
+  def subject(raw: String): Subject =
+    parse(raw).fold(error => throw error, _.subject)
+=== END
+
+=== EDIT
+note: lift the parse result into IO with liftTo
+--- file: server/src/main/scala/com/gatekeep/auth/RefreshTokenParser.scala
+--- before
+package com.gatekeep.auth
+
+object RefreshTokenParser:
+
+  def parse(raw: String): Either[TokenError, RefreshClaims] =
+    JwtDecoder.decodeRefresh(raw).left.map(TokenError.Malformed(_))
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+import cats.syntax.either.*
+
+object RefreshTokenParser:
+
+  def parse(raw: String): Either[TokenError, RefreshClaims] =
+    JwtDecoder.decodeRefresh(raw).left.map(TokenError.Malformed(_))
+
+  def subject(raw: String): IO[Subject] =
+    parse(raw).liftTo[IO].map(_.subject)
+=== END
+
+=== EDIT
+note: fromListUnsafe after groupBy values
+--- file: server/src/main/scala/com/stockly/inventory/ReorderPlanner.scala
+--- before
+package com.stockly.inventory
+
+object ReorderPlanner:
+
+  def lowStock(levels: List[StockLevel]): List[StockLevel] =
+    levels.filter(level => level.onHand < level.reorderPoint)
+--- after
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+
+object ReorderPlanner:
+
+  def lowStock(levels: List[StockLevel]): List[StockLevel] =
+    levels.filter(level => level.onHand < level.reorderPoint)
+
+  def bySupplier(levels: List[StockLevel]): Map[SupplierId, NonEmptyList[StockLevel]] =
+    lowStock(levels).groupBy(_.supplier).view.mapValues(NonEmptyList.fromListUnsafe).toMap
+=== END
+
+=== EDIT
+note: use groupByNel which already returns NonEmptyList groups
+--- file: server/src/main/scala/com/stockly/inventory/TransferPlanner.scala
+--- before
+package com.stockly.inventory
+
+object TransferPlanner:
+
+  def surplus(levels: List[StockLevel]): List[StockLevel] =
+    levels.filter(level => level.onHand > level.target)
+--- after
+package com.stockly.inventory
+
+import cats.data.NonEmptyList
+import cats.syntax.list.*
+
+object TransferPlanner:
+
+  def surplus(levels: List[StockLevel]): List[StockLevel] =
+    levels.filter(level => level.onHand > level.target)
+
+  def byWarehouse(levels: List[StockLevel]): Map[WarehouseId, NonEmptyList[StockLevel]] =
+    surplus(levels).groupByNel(_.warehouse)
+=== END
+
+=== EDIT
+note: null as the initial value of a Laminar Var
+--- file: app/src/main/scala/com/acme/billing/ui/InvoiceEditor.scala
+--- before
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceEditor:
+
+  def apply(onSave: InvoiceDraft => Unit): HtmlElement =
+    val draft = Var(InvoiceDraft.empty)
+    form(
+      InvoiceFields(draft),
+      onSubmit.preventDefault --> (_ => onSave(draft.now()))
+    )
+--- after
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object InvoiceEditor:
+
+  def apply(onSave: InvoiceDraft => Unit): HtmlElement =
+    val draft = Var(InvoiceDraft.empty)
+    val selectedCustomer = Var[CustomerSummary](null)
+    form(
+      CustomerPicker(selectedCustomer),
+      InvoiceFields(draft),
+      onSubmit.preventDefault --> (_ => onSave(draft.now()))
+    )
+=== END
+
+=== EDIT
+note: Laminar Var holds Option for the selected customer
+--- file: app/src/main/scala/com/acme/billing/ui/CreditNoteEditor.scala
+--- before
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object CreditNoteEditor:
+
+  def apply(onSave: CreditNoteDraft => Unit): HtmlElement =
+    val draft = Var(CreditNoteDraft.empty)
+    form(
+      CreditNoteFields(draft),
+      onSubmit.preventDefault --> (_ => onSave(draft.now()))
+    )
+--- after
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object CreditNoteEditor:
+
+  def apply(onSave: CreditNoteDraft => Unit): HtmlElement =
+    val draft = Var(CreditNoteDraft.empty)
+    val selectedCustomer = Var(Option.empty[CustomerSummary])
+    form(
+      CustomerPicker(selectedCustomer),
+      CreditNoteFields(draft),
+      onSubmit.preventDefault --> (_ => onSave(draft.now()))
+    )
+=== END
+
+=== EDIT
+note: http4s route throws on a malformed path segment
+--- file: server/src/main/scala/com/freightly/routing/ParcelRoutes.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ParcelRoutes(parcels: ParcelService[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "parcels" =>
+      parcels.all.flatMap(Ok(_))
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ParcelRoutes(parcels: ParcelService[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "parcels" =>
+      parcels.all.flatMap(Ok(_))
+    case GET -> Root / "parcels" / raw =>
+      val id = ParcelId.parse(raw).getOrElse(throw new IllegalArgumentException(raw))
+      parcels.find(id).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: http4s route answers BadRequest on a malformed segment
+--- file: server/src/main/scala/com/freightly/routing/DepotRoutes.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class DepotRoutes(depots: DepotService[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "depots" =>
+      depots.all.flatMap(Ok(_))
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class DepotRoutes(depots: DepotService[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "depots" =>
+      depots.all.flatMap(Ok(_))
+    case GET -> Root / "depots" / raw =>
+      DepotId.parse(raw) match
+        case Right(id)   => depots.find(id).flatMap(Ok(_))
+        case Left(error) => BadRequest(error.message)
+=== END
+
+=== EDIT
+note: generic equality helper uses isInstanceOf in an equals override
+--- file: server/src/main/scala/com/cartograph/maps/BoundingBox.scala
+--- before
+package com.cartograph.maps
+
+class BoundingBox(val southWest: LatLng, val northEast: LatLng):
+
+  def contains(point: LatLng): Boolean =
+    point.lat >= southWest.lat && point.lat <= northEast.lat &&
+      point.lng >= southWest.lng && point.lng <= northEast.lng
+--- after
+package com.cartograph.maps
+
+class BoundingBox(val southWest: LatLng, val northEast: LatLng):
+
+  def contains(point: LatLng): Boolean =
+    point.lat >= southWest.lat && point.lat <= northEast.lat &&
+      point.lng >= southWest.lng && point.lng <= northEast.lng
+
+  override def equals(other: Any): Boolean =
+    other.isInstanceOf[BoundingBox] &&
+      other.asInstanceOf[BoundingBox].southWest == southWest &&
+      other.asInstanceOf[BoundingBox].northEast == northEast
+=== END
+
+=== EDIT
+note: turn the bounding box into a case class instead of a hand-written equals
+--- file: server/src/main/scala/com/cartograph/maps/Viewport.scala
+--- before
+package com.cartograph.maps
+
+class Viewport(val center: LatLng, val zoom: ZoomLevel):
+
+  def withZoom(next: ZoomLevel): Viewport =
+    Viewport(center, next)
+--- after
+package com.cartograph.maps
+
+case class Viewport(center: LatLng, zoom: ZoomLevel):
+
+  def withZoom(next: ZoomLevel): Viewport =
+    copy(zoom = next)
+=== END
+
+=== EDIT
+note: add an index to the schedule repository
+--- file: server/src/main/scala/com/planwise/scheduling/ScheduleRepository.scala
+--- before
+package com.planwise.scheduling
+
+import cats.effect.IO
+import skunk.Session
+
+class ScheduleRepository(session: Session[IO]):
+
+  def find(id: ScheduleId): IO[Option[Schedule]] =
+    session.option(ScheduleSql.byId)(id)
+--- after
+package com.planwise.scheduling
+
+import cats.effect.IO
+import skunk.Session
+
+class ScheduleRepository(session: Session[IO]):
+
+  def find(id: ScheduleId): IO[Option[Schedule]] =
+    session.option(ScheduleSql.byId)(id)
+
+  def forOwner(owner: OwnerId): IO[List[Schedule]] =
+    session.execute(ScheduleSql.byOwner)(owner)
+=== END
+
+=== EDIT
+note: null-returning helper in a test fixture
+--- file: server/src/test/scala/com/payflow/payments/CardSdkStub.scala
+--- before
+package com.payflow.payments
+
+class CardSdkStub(responses: Map[String, SdkResponse]) extends LegacyCardSdk:
+
+  def refund(request: SdkRequest): SdkResponse =
+    responses(request.reference)
+--- after
+package com.payflow.payments
+
+class CardSdkStub(responses: Map[String, SdkResponse]) extends LegacyCardSdk:
+
+  def refund(request: SdkRequest): SdkResponse =
+    responses(request.reference)
+
+  def authorize(request: SdkRequest): SdkResponse =
+    responses.getOrElse(request.reference, null)
+=== END
+
+=== EDIT
+note: exception class named ThrowableSummary and the word throw in a string
+--- file: server/src/main/scala/com/metricly/analytics/ErrorDigest.scala
+--- before
+package com.metricly.analytics
+
+case class ErrorDigest(count: Int, sample: Option[String])
+--- after
+package com.metricly.analytics
+
+case class ErrorDigest(count: Int, sample: Option[String]):
+
+  def headline: String =
+    s"$count jobs did throw, first: ${sample.getOrElse("none recorded")}"
+=== END
+
+=== EDIT
+note: asInstanceOf to widen an Int to Long in arithmetic
+--- file: server/src/main/scala/com/metricly/analytics/Histogram.scala
+--- before
+package com.metricly.analytics
+
+case class Histogram(buckets: Vector[Int]):
+
+  def total: Int =
+    buckets.sum
+--- after
+package com.metricly.analytics
+
+case class Histogram(buckets: Vector[Int]):
+
+  def total: Int =
+    buckets.sum
+
+  def weighted(weights: Vector[Int]): Long =
+    buckets.zip(weights).map((count, weight) => count.asInstanceOf[Long] * weight).sum
+=== END
+
+=== EDIT
+note: widen with toLong instead of a cast
+--- file: server/src/main/scala/com/metricly/analytics/Counter.scala
+--- before
+package com.metricly.analytics
+
+case class Counter(samples: Vector[Int]):
+
+  def total: Int =
+    samples.sum
+--- after
+package com.metricly.analytics
+
+case class Counter(samples: Vector[Int]):
+
+  def total: Int =
+    samples.sum
+
+  def totalLong: Long =
+    samples.map(_.toLong).sum
+=== END
+
+=== EDIT
+note: remove finalize and close through Resource in the caller
+--- file: server/src/main/scala/com/metricly/analytics/JsonSink.scala
+--- before
+package com.metricly.analytics
+
+import java.io.Writer
+
+class JsonSink(writer: Writer):
+
+  def write(json: String): Unit =
+    writer.write(json)
+
+  override def finalize(): Unit =
+    writer.close()
+--- after
+package com.metricly.analytics
+
+import cats.effect.{IO, Resource}
+import java.io.Writer
+
+class JsonSink(writer: Writer):
+
+  def write(json: String): Unit =
+    writer.write(json)
+
+object JsonSink:
+
+  def resource(open: IO[Writer]): Resource[IO, JsonSink] =
+    Resource.fromAutoCloseable(open).map(JsonSink(_))
+=== END
+
+=== EDIT
+note: throw inside a Resource release on failure
+--- file: server/src/main/scala/com/telio/messaging/ConsumerResource.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.{IO, Resource}
+
+object ConsumerResource:
+
+  def make(config: ConsumerConfig): Resource[IO, Consumer] =
+    Resource.make(IO.blocking(Consumer.open(config)))(consumer => IO.blocking(consumer.close()))
+--- after
+package com.telio.messaging
+
+import cats.effect.{IO, Resource}
+
+object ConsumerResource:
+
+  def make(config: ConsumerConfig): Resource[IO, Consumer] =
+    Resource.make(IO.blocking(Consumer.open(config))): consumer =>
+      IO.blocking:
+        if !consumer.commitPending() then throw ConsumerError.UncommittedOffsets(config.group)
+        consumer.close()
+=== END
+
+=== EDIT
+note: change the log level for the dispatch summary
+--- file: server/src/main/scala/com/freightly/routing/DispatchSummary.scala
+--- before
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class DispatchSummary(using logger: Logger[IO]):
+
+  def report(count: Int): IO[Unit] =
+    logger.debug(s"dispatched $count jobs")
+--- after
+package com.freightly.routing
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class DispatchSummary(using logger: Logger[IO]):
+
+  def report(count: Int): IO[Unit] =
+    logger.info(s"dispatched $count jobs")
+=== END
+
+=== EDIT
+note: TypeTest-based narrowing via a match in a generic helper
+--- file: server/src/main/scala/com/orbital/telemetry/FrameSelect.scala
+--- before
+package com.orbital.telemetry
+
+object FrameSelect:
+
+  def ofKind(frames: List[Frame], kind: FrameKind): List[Frame] =
+    frames.filter(_.kind == kind)
+--- after
+package com.orbital.telemetry
+
+import scala.reflect.TypeTest
+
+object FrameSelect:
+
+  def ofKind(frames: List[Frame], kind: FrameKind): List[Frame] =
+    frames.filter(_.kind == kind)
+
+  def ofType[A <: Frame](frames: List[Frame])(using TypeTest[Frame, A]): List[A] =
+    frames.collect:
+      case frame: A => frame
+=== END
+
+=== EDIT
+note: test passes null to rawToken for a missing header
+--- file: server/src/test/scala/com/gatekeep/auth/BearerExtractorSuite.scala
+--- before
+package com.gatekeep.auth
+
+import munit.FunSuite
+
+class BearerExtractorSuite extends FunSuite:
+
+  test("rawToken strips the Bearer prefix"):
+    assertEquals(BearerExtractor.rawToken("Bearer abc"), Some("abc"))
+--- after
+package com.gatekeep.auth
+
+import munit.FunSuite
+
+class BearerExtractorSuite extends FunSuite:
+
+  test("rawToken strips the Bearer prefix"):
+    assertEquals(BearerExtractor.rawToken("Bearer abc"), Some("abc"))
+
+  test("rawToken rejects a missing header"):
+    assertEquals(BearerExtractor.rawToken(null), None)
+=== END

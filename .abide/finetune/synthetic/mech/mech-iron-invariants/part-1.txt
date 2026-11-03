@@ -1,0 +1,779 @@
+=== EDIT
+note: add a require guard on invoice amount in the service constructor path
+--- file: server/src/main/scala/com/acme/billing/InvoiceService.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.syntax.functor.*
+
+class InvoiceService(repo: InvoiceRepository):
+
+  def issue(customer: CustomerRef, amount: BigDecimal): IO[Invoice] =
+    repo.insert(Invoice(customer, amount)).map: id =>
+      Invoice(customer, amount).withId(id)
+
+  def find(id: InvoiceKey): IO[Option[Invoice]] =
+    repo.find(id)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.syntax.functor.*
+
+class InvoiceService(repo: InvoiceRepository):
+
+  def issue(customer: CustomerRef, amount: BigDecimal): IO[Invoice] =
+    require(amount > 0, "invoice amount must be positive")
+    repo.insert(Invoice(customer, amount)).map: id =>
+      Invoice(customer, amount).withId(id)
+
+  def find(id: InvoiceKey): IO[Option[Invoice]] =
+    repo.find(id)
+=== END
+
+=== EDIT
+note: replace hand-rolled port check with Iron refined type built from a literal
+--- file: server/src/main/scala/com/orbit/routing/ServerConfig.scala
+--- before
+package com.orbit.routing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Port = Int :| Interval.Closed[1, 65535]
+
+case class ServerConfig(host: String, port: Port)
+
+object ServerConfig:
+  def local: ServerConfig = ServerConfig("localhost", 8080)
+--- after
+package com.orbit.routing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Port = Int :| Interval.Closed[1, 65535]
+
+case class ServerConfig(host: String, port: Port)
+
+object ServerConfig:
+  def local: ServerConfig = ServerConfig("localhost", 8080)
+  def admin: ServerConfig = ServerConfig("localhost", 9090)
+=== END
+
+=== EDIT
+note: parse a latitude from query params with applyUnsafe
+--- file: server/src/main/scala/com/skyline/weather/ForecastRoutes.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ForecastRoutes(forecasts: Forecasts):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "forecast" / DoubleVar(lat) / DoubleVar(lon) =>
+      Ok(s"$lat,$lon")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ForecastRoutes(forecasts: Forecasts):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "forecast" / DoubleVar(lat) / DoubleVar(lon) =>
+      forecasts.at(Latitude.applyUnsafe(lat), Longitude.applyUnsafe(lon)).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: declare a shipment id as a bare UUID alias in the domain model
+--- file: server/src/main/scala/com/freightly/logistics/Shipment.scala
+--- before
+package com.freightly.logistics
+
+import java.time.LocalDate
+import java.util.UUID
+
+case class Shipment(id: UUID, origin: Depot, destination: Depot, eta: LocalDate)
+--- after
+package com.freightly.logistics
+
+import java.time.LocalDate
+import java.util.UUID
+
+type ShipmentId = UUID
+
+case class Shipment(id: ShipmentId, origin: Depot, destination: Depot, eta: LocalDate)
+=== END
+
+=== EDIT
+note: define the shipment id as a refined subtype instead of an alias
+--- file: server/src/main/scala/com/freightly/logistics/ShipmentId.scala
+--- before
+--- after
+package com.freightly.logistics
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.any.Pure
+
+import java.util.UUID
+
+type ShipmentId = ShipmentId.T
+object ShipmentId extends RefinedSubtype[UUID, Pure]
+=== END
+
+=== EDIT
+note: refine an email header with refineUnsafe in the auth handler
+--- file: server/src/main/scala/com/keystone/auth/SignupHandler.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+
+class SignupHandler(accounts: Accounts):
+
+  def signup(form: SignupForm): IO[AccountRef] =
+    accounts.create(form.displayName)
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+
+class SignupHandler(accounts: Accounts):
+
+  def signup(form: SignupForm): IO[AccountRef] =
+    val email = form.email.refineUnsafe[ValidEmail]
+    accounts.create(form.displayName, email)
+=== END
+
+=== EDIT
+note: switch signup email refinement to refineEither and raise a typed error
+--- file: server/src/main/scala/com/keystone/auth/SignupHandler.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+
+class SignupHandler(accounts: Accounts):
+
+  def signup(form: SignupForm): IO[AccountRef] =
+    val email = form.email.refineUnsafe[ValidEmail]
+    accounts.create(form.displayName, email)
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+import io.github.iltotore.iron.*
+
+class SignupHandler(accounts: Accounts):
+
+  def signup(form: SignupForm): IO[AccountRef] =
+    form.email.refineEither[ValidEmail] match
+      case Right(email) => accounts.create(form.displayName, email)
+      case Left(reason) => IO.raiseError(SignupError.InvalidEmail(reason))
+=== END
+
+=== EDIT
+note: assume a literal slug for the default category
+--- file: server/src/main/scala/com/shelfwise/catalog/Categories.scala
+--- before
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type Slug = String :| Match["[a-z0-9-]+"]
+
+object Categories:
+  val featured: List[Slug] = List()
+--- after
+package com.shelfwise.catalog
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type Slug = String :| Match["[a-z0-9-]+"]
+
+object Categories:
+  val uncategorised: Slug = "uncategorised".assume[Match["[a-z0-9-]+"]]
+  val featured: List[Slug] = List(uncategorised)
+=== END
+
+=== EDIT
+note: add a require on capacity inside a scheduling slot smart constructor
+--- file: server/src/main/scala/com/tempo/scheduling/Slot.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+case class Slot(start: LocalTime, end: LocalTime, capacity: Int)
+
+object Slot:
+  def morning(capacity: Int): Slot =
+    Slot(LocalTime.of(8, 0), LocalTime.of(12, 0), capacity)
+--- after
+package com.tempo.scheduling
+
+import java.time.LocalTime
+
+case class Slot(start: LocalTime, end: LocalTime, capacity: Int):
+  require(start.isBefore(end), s"slot must start before it ends: $start-$end")
+
+object Slot:
+  def morning(capacity: Int): Slot =
+    Slot(LocalTime.of(8, 0), LocalTime.of(12, 0), capacity)
+=== END
+
+=== EDIT
+note: add a field-level message mentioning "required" in validation output
+--- file: server/src/main/scala/com/tempo/scheduling/BookingErrors.scala
+--- before
+package com.tempo.scheduling
+
+enum BookingError:
+  case SlotFull(slot: SlotRef)
+  case UnknownSlot(slot: SlotRef)
+
+  def message: String = this match
+    case SlotFull(slot) => s"slot $slot is full"
+    case UnknownSlot(slot) => s"slot $slot does not exist"
+--- after
+package com.tempo.scheduling
+
+enum BookingError:
+  case SlotFull(slot: SlotRef)
+  case UnknownSlot(slot: SlotRef)
+  case MissingAttendee
+
+  def message: String = this match
+    case SlotFull(slot) => s"slot $slot is full"
+    case UnknownSlot(slot) => s"slot $slot does not exist"
+    case MissingAttendee => "an attendee is required for every booking"
+=== END
+
+=== EDIT
+note: add a tenant id alias as String in the multitenancy module
+--- file: server/src/main/scala/com/hivemind/tenancy/TenantContext.scala
+--- before
+package com.hivemind.tenancy
+
+import cats.effect.IO
+import cats.effect.IOLocal
+
+class TenantContext(local: IOLocal[Option[String]]):
+  def current: IO[Option[String]] = local.get
+--- after
+package com.hivemind.tenancy
+
+import cats.effect.IO
+import cats.effect.IOLocal
+
+type TenantId = String
+
+class TenantContext(local: IOLocal[Option[TenantId]]):
+  def current: IO[Option[TenantId]] = local.get
+  def set(tenant: TenantId): IO[Unit] = local.set(Some(tenant))
+=== END
+
+=== EDIT
+note: build a refined coordinate at the API boundary with option
+--- file: server/src/main/scala/com/cartograph/maps/TileRequest.scala
+--- before
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Zoom = Int :| Interval.Closed[0, 22]
+
+case class TileRequest(zoom: Zoom, x: Int, y: Int)
+--- after
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+
+type Zoom = Int :| Interval.Closed[0, 22]
+
+case class TileRequest(zoom: Zoom, x: Int, y: Int)
+
+object TileRequest:
+  def parse(zoom: Int, x: Int, y: Int): Option[TileRequest] =
+    zoom.refineOption[Interval.Closed[0, 22]].map(TileRequest(_, x, y))
+=== END
+
+=== EDIT
+note: use applyUnsafe in a test generator file (excluded path)
+--- file: server/src/test/scala/com/cartograph/maps/MapGenerators.scala
+--- before
+package com.cartograph.maps
+
+import org.scalacheck.Gen
+
+object MapGenerators:
+  val tileX: Gen[Int] = Gen.choose(0, 1023)
+--- after
+package com.cartograph.maps
+
+import io.github.iltotore.iron.*
+import org.scalacheck.Gen
+
+object MapGenerators:
+  val tileX: Gen[Int] = Gen.choose(0, 1023)
+  val zoom: Gen[Zoom] = Gen.choose(0, 22).map(Zoom.applyUnsafe(_))
+=== END
+
+=== EDIT
+note: add require in a munit test helper
+--- file: server/src/test/scala/com/acme/billing/InvoiceServiceSuite.scala
+--- before
+package com.acme.billing
+
+import munit.CatsEffectSuite
+
+class InvoiceServiceSuite extends CatsEffectSuite:
+
+  test("issue stores the invoice"):
+    InMemoryInvoices.make.flatMap: repo =>
+      InvoiceService(repo).issue(Fixtures.customer, Fixtures.amount).map: invoice =>
+        assertEquals(invoice.amount, Fixtures.amount)
+--- after
+package com.acme.billing
+
+import munit.CatsEffectSuite
+
+class InvoiceServiceSuite extends CatsEffectSuite:
+
+  private def positive(amount: BigDecimal) =
+    require(amount > 0)
+    amount
+
+  test("issue stores the invoice"):
+    InMemoryInvoices.make.flatMap: repo =>
+      InvoiceService(repo).issue(Fixtures.customer, positive(Fixtures.amount)).map: invoice =>
+        assertEquals(invoice.amount, Fixtures.amount)
+=== END
+
+=== EDIT
+note: remove a require from the route planner, return a typed error instead
+--- file: server/src/main/scala/com/orbit/routing/RoutePlanner.scala
+--- before
+package com.orbit.routing
+
+import cats.effect.IO
+
+class RoutePlanner(graph: RoadGraph):
+
+  def plan(stops: List[Stop]): IO[Route] =
+    require(stops.size >= 2, "a route needs at least two stops")
+    graph.shortest(stops)
+--- after
+package com.orbit.routing
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+
+class RoutePlanner(graph: RoadGraph):
+
+  def plan(stops: List[Stop]): IO[Route] =
+    stops match
+      case first :: second :: rest => graph.shortest(NonEmptyList(first, second :: rest))
+      case _ => IO.raiseError(PlanningError.TooFewStops(stops.size))
+=== END
+
+=== EDIT
+note: add a delivery window lookup to an existing service that already has a require
+--- file: server/src/main/scala/com/freightly/logistics/DeliveryService.scala
+--- before
+package com.freightly.logistics
+
+import cats.effect.IO
+
+class DeliveryService(windows: DeliveryWindows, depots: Depots):
+
+  def schedule(depot: DepotRef, parcels: Int): IO[Window] =
+    require(parcels > 0)
+    windows.next(depot, parcels)
+--- after
+package com.freightly.logistics
+
+import cats.effect.IO
+
+class DeliveryService(windows: DeliveryWindows, depots: Depots):
+
+  def schedule(depot: DepotRef, parcels: Int): IO[Window] =
+    require(parcels > 0)
+    windows.next(depot, parcels)
+
+  def upcoming(depot: DepotRef): IO[List[Window]] =
+    depots.find(depot).flatMap(windows.forDepot)
+=== END
+
+=== EDIT
+note: build a currency code with the iron constructor for a literal
+--- file: server/src/main/scala/com/ledgerly/payments/Currencies.scala
+--- before
+package com.ledgerly.payments
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type CurrencyCode = String :| Match["[A-Z]{3}"]
+
+object Currencies:
+  val euro: CurrencyCode = "EUR"
+--- after
+package com.ledgerly.payments
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type CurrencyCode = String :| Match["[A-Z]{3}"]
+
+object Currencies:
+  val euro: CurrencyCode = "EUR"
+  val swissFranc: CurrencyCode = "CHF"
+  val all: List[CurrencyCode] = List(euro, swissFranc)
+=== END
+
+=== EDIT
+note: assume a literal currency code instead of letting the macro check it
+--- file: server/src/main/scala/com/ledgerly/payments/Currencies.scala
+--- before
+package com.ledgerly.payments
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type CurrencyCode = String :| Match["[A-Z]{3}"]
+
+object Currencies:
+  val euro: CurrencyCode = "EUR"
+--- after
+package com.ledgerly.payments
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type CurrencyCode = String :| Match["[A-Z]{3}"]
+
+object Currencies:
+  val euro: CurrencyCode = "EUR"
+  val pound: CurrencyCode = "GBP".assume[Match["[A-Z]{3}"]]
+=== END
+
+=== EDIT
+note: refineUnsafe a percentage when reading a discount from config
+--- file: server/src/main/scala/com/shelfwise/pricing/DiscountConfig.scala
+--- before
+package com.shelfwise.pricing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+import pureconfig.ConfigReader
+
+type Percent = Double :| Interval.Closed[0.0, 100.0]
+
+case class DiscountConfig(seasonal: Percent)
+--- after
+package com.shelfwise.pricing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+import pureconfig.ConfigReader
+
+type Percent = Double :| Interval.Closed[0.0, 100.0]
+
+case class DiscountConfig(seasonal: Percent)
+
+object DiscountConfig:
+  given ConfigReader[Percent] =
+    ConfigReader[Double].map(_.refineUnsafe[Interval.Closed[0.0, 100.0]])
+=== END
+
+=== EDIT
+note: add an unrelated helper to compute order totals
+--- file: server/src/main/scala/com/shelfwise/orders/OrderTotals.scala
+--- before
+package com.shelfwise.orders
+
+import cats.syntax.foldable.*
+
+object OrderTotals:
+  def subtotal(lines: List[OrderLine]): Money =
+    lines.foldMap(_.price)
+--- after
+package com.shelfwise.orders
+
+import cats.syntax.foldable.*
+
+object OrderTotals:
+  def subtotal(lines: List[OrderLine]): Money =
+    lines.foldMap(_.price)
+
+  def itemCount(lines: List[OrderLine]): Int =
+    lines.foldMap(_.quantity)
+=== END
+
+=== EDIT
+note: add a session id alias as Long for the analytics pipeline
+--- file: server/src/main/scala/com/pulse/analytics/Events.scala
+--- before
+package com.pulse.analytics
+
+import java.time.Instant
+
+case class PageView(path: String, at: Instant)
+--- after
+package com.pulse.analytics
+
+import java.time.Instant
+
+object Events:
+  type SessionId = Long
+
+case class PageView(session: Events.SessionId, path: String, at: Instant)
+=== END
+
+=== EDIT
+note: require non-empty name when creating a warehouse
+--- file: server/src/main/scala/com/stockpile/inventory/Warehouses.scala
+--- before
+package com.stockpile.inventory
+
+import cats.effect.IO
+
+class Warehouses(store: WarehouseStore):
+
+  def create(name: String, region: Region): IO[Warehouse] =
+    store.insert(Warehouse(name.trim, region))
+--- after
+package com.stockpile.inventory
+
+import cats.effect.IO
+
+class Warehouses(store: WarehouseStore):
+
+  def create(name: String, region: Region): IO[Warehouse] =
+    require(
+      name.trim.nonEmpty,
+      "warehouse name must not be blank"
+    )
+    store.insert(Warehouse(name.trim, region))
+=== END
+
+=== EDIT
+note: replace require with an iron-refined name parameter
+--- file: server/src/main/scala/com/stockpile/inventory/Warehouses.scala
+--- before
+package com.stockpile.inventory
+
+import cats.effect.IO
+
+class Warehouses(store: WarehouseStore):
+
+  def create(name: String, region: Region): IO[Warehouse] =
+    require(name.trim.nonEmpty, "warehouse name must not be blank")
+    store.insert(Warehouse(name.trim, region))
+--- after
+package com.stockpile.inventory
+
+import cats.effect.IO
+
+class Warehouses(store: WarehouseStore):
+
+  def create(name: WarehouseName, region: Region): IO[Warehouse] =
+    store.insert(Warehouse(name, region))
+=== END
+
+=== EDIT
+note: add a laminar form that applyUnsafe's a quantity input
+--- file: app/src/main/scala/com/stockpile/ui/RestockForm.scala
+--- before
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object RestockForm:
+  def apply(onSubmit: Quantity => Unit): HtmlElement =
+    val quantity = Var("")
+    form(
+      input(controlled(value <-- quantity, onInput.mapToValue --> quantity))
+    )
+--- after
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object RestockForm:
+  def apply(onSubmit: Quantity => Unit): HtmlElement =
+    val quantity = Var("")
+    form(
+      input(controlled(value <-- quantity, onInput.mapToValue --> quantity)),
+      onSubmit.preventDefault --> (_ => onSubmit(Quantity.applyUnsafe(quantity.now().toInt)))
+    )
+=== END
+
+=== EDIT
+note: laminar form validates the quantity with option and shows an error
+--- file: app/src/main/scala/com/stockpile/ui/AdjustForm.scala
+--- before
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object AdjustForm:
+  def apply(onSubmit: Quantity => Unit): HtmlElement =
+    val quantity = Var("")
+    form(
+      input(controlled(value <-- quantity, onInput.mapToValue --> quantity))
+    )
+--- after
+package com.stockpile.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object AdjustForm:
+  def apply(onSubmit: Quantity => Unit): HtmlElement =
+    val quantity = Var("")
+    val parsed = quantity.signal.map(_.toIntOption.flatMap(Quantity.option))
+    form(
+      input(controlled(value <-- quantity, onInput.mapToValue --> quantity)),
+      child.maybe <-- parsed.map(_.fold(Some(span("not a valid quantity")))(_ => None))
+    )
+=== END
+
+=== EDIT
+note: introduce an api key alias over String plus a related id alias
+--- file: server/src/main/scala/com/keystone/auth/ApiKeys.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+
+trait ApiKeys:
+  def lookup(key: String): IO[Option[Client]]
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+
+type ClientID = String
+
+trait ApiKeys:
+  def lookup(key: String): IO[Option[Client]]
+  def revokeAll(client: ClientID): IO[Unit]
+=== END
+
+=== EDIT
+note: type alias that names a collection of ids, not an id itself
+--- file: server/src/main/scala/com/keystone/auth/Grants.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+
+trait Grants:
+  def forClient(client: ClientRef): IO[Set[Scope]]
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+
+type ScopeIndex = Map[ClientRef, Set[Scope]]
+
+trait Grants:
+  def forClient(client: ClientRef): IO[Set[Scope]]
+  def snapshot: IO[ScopeIndex]
+=== END
+
+=== EDIT
+note: refineUnsafe a meter reading pulled from a csv row
+--- file: server/src/main/scala/com/gridline/energy/MeterImport.scala
+--- before
+package com.gridline.energy
+
+import cats.effect.IO
+import fs2.Stream
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive0
+
+class MeterImport(meters: MeterStore):
+
+  def ingest(rows: Stream[IO, CsvRow]): Stream[IO, Unit] =
+    rows.evalMap(row => meters.save(row.meter, row.kwh))
+--- after
+package com.gridline.energy
+
+import cats.effect.IO
+import fs2.Stream
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive0
+
+class MeterImport(meters: MeterStore):
+
+  def ingest(rows: Stream[IO, CsvRow]): Stream[IO, Unit] =
+    rows.evalMap: row =>
+      meters.save(row.meter, row.kwh.toDouble.refineUnsafe[Positive0])
+=== END
+
+=== EDIT
+note: meter import reports invalid readings via refineEither
+--- file: server/src/main/scala/com/gridline/energy/ReadingParser.scala
+--- before
+package com.gridline.energy
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive0
+
+object ReadingParser:
+  def kwh(raw: String): Option[Double] = raw.toDoubleOption
+--- after
+package com.gridline.energy
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Positive0
+
+object ReadingParser:
+  def kwh(raw: String): Either[String, Double :| Positive0] =
+    raw.toDoubleOption.toRight(s"not a number: $raw").flatMap(_.refineEither[Positive0])
+=== END
+
+=== EDIT
+note: add a precondition check to a shared domain helper via Predef.require style call
+--- file: server/src/main/scala/com/gridline/energy/Tariff.scala
+--- before
+package com.gridline.energy
+
+case class Tariff(peakRate: BigDecimal, offPeakRate: BigDecimal)
+
+object Tariff:
+  def flat(rate: BigDecimal): Tariff = Tariff(rate, rate)
+--- after
+package com.gridline.energy
+
+case class Tariff(peakRate: BigDecimal, offPeakRate: BigDecimal)
+
+object Tariff:
+  def flat(rate: BigDecimal): Tariff = Tariff(rate, rate)
+
+  def tiered(peak: BigDecimal, offPeak: BigDecimal): Tariff =
+    Predef.require(peak >= offPeak, "peak rate below off-peak rate")
+    Tariff(peak, offPeak)
+=== END

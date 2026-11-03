@@ -1,0 +1,1039 @@
+=== EDIT
+note: trip summary reports engine idle time in minutes via toUnit
+--- file: server/src/main/scala/com/fleetio/telematics/TripSummary.scala
+--- before
+package com.fleetio.telematics
+
+import scala.concurrent.duration.*
+
+case class Trip(vehicleId: String, driving: FiniteDuration, idle: FiniteDuration, distanceKm: Double)
+
+object TripSummary:
+
+  def averageSpeed(trip: Trip): Double =
+    trip.distanceKm / trip.driving.toHours.max(1)
+--- after
+package com.fleetio.telematics
+
+import scala.concurrent.duration.*
+
+case class Trip(vehicleId: String, driving: FiniteDuration, idle: FiniteDuration, distanceKm: Double)
+
+object TripSummary:
+
+  def averageSpeed(trip: Trip): Double =
+    trip.distanceKm / trip.driving.toHours.max(1)
+
+  def idleMinutes(trip: Trip): Double =
+    trip.idle.toUnit(MINUTES)
+=== END
+
+=== EDIT
+note: parking fee computes hours and leftover minutes with two toUnit calls
+--- file: server/src/main/scala/com/parkr/parking/FeeCalculator.scala
+--- before
+package com.parkr.parking
+
+import scala.concurrent.duration.*
+
+case class Tariff(hourlyCents: Long, minuteCents: Long)
+
+object FeeCalculator:
+
+  def flat(tariff: Tariff): Long =
+    tariff.hourlyCents
+--- after
+package com.parkr.parking
+
+import scala.concurrent.duration.*
+
+case class Tariff(hourlyCents: Long, minuteCents: Long)
+
+object FeeCalculator:
+
+  def flat(tariff: Tariff): Long =
+    tariff.hourlyCents
+
+  def fee(tariff: Tariff, stay: FiniteDuration): Long =
+    val hours = stay.toUnit(HOURS).floor.toLong
+    val minutes = (stay - hours.hours).toUnit(MINUTES).ceil.toLong
+    hours * tariff.hourlyCents + minutes * tariff.minuteCents
+=== END
+
+=== EDIT
+note: charge session logs its duration in seconds via toUnit inside IO
+--- file: server/src/main/scala/com/voltgrid/energy/ChargeSessionService.scala
+--- before
+package com.voltgrid.energy
+
+import cats.effect.IO
+import cats.effect.Clock
+import org.typelevel.log4cats.Logger
+
+class ChargeSessionService(store: ChargeSessionStore)(using Logger[IO]):
+
+  def stop(sessionId: SessionId): IO[Unit] =
+    for
+      session <- store.find(sessionId)
+      _ <- store.close(sessionId)
+    yield ()
+--- after
+package com.voltgrid.energy
+
+import cats.effect.IO
+import cats.effect.Clock
+import org.typelevel.log4cats.Logger
+import scala.concurrent.duration.*
+
+class ChargeSessionService(store: ChargeSessionStore)(using Logger[IO]):
+
+  def stop(sessionId: SessionId): IO[Unit] =
+    for
+      session <- store.find(sessionId)
+      now <- Clock[IO].realTime
+      _ <- store.close(sessionId)
+      _ <- Logger[IO].info(s"Session $sessionId lasted ${(now - session.startedAt).toUnit(SECONDS)}s")
+    yield ()
+=== END
+
+=== EDIT
+note: lease grace period check compares toUnit(HOURS) against a threshold
+--- file: server/src/main/scala/com/rentwise/leasing/GracePolicy.scala
+--- before
+package com.rentwise.leasing
+
+import scala.concurrent.duration.*
+
+enum GraceDecision:
+  case Waive, Charge
+
+object GracePolicy:
+
+  def decide(late: FiniteDuration): GraceDecision =
+    GraceDecision.Charge
+--- after
+package com.rentwise.leasing
+
+import scala.concurrent.duration.*
+
+enum GraceDecision:
+  case Waive, Charge
+
+object GracePolicy:
+
+  def decide(late: FiniteDuration): GraceDecision =
+    if late.toUnit(HOURS) <= 72 then GraceDecision.Waive
+    else GraceDecision.Charge
+=== END
+
+=== EDIT
+note: Laminar ticket hold countdown renders seconds with a spaced toUnit call
+--- file: app/src/main/scala/com/tixly/events/ui/HoldCountdown.scala
+--- before
+package com.tixly.events.ui
+
+import com.raquo.laminar.api.L.*
+import scala.concurrent.duration.*
+
+object HoldCountdown:
+
+  def apply(remaining: Signal[FiniteDuration]): HtmlElement =
+    div(
+      cls := "hold-countdown",
+      child.text <-- remaining.map(_.toMinutes.toString)
+    )
+--- after
+package com.tixly.events.ui
+
+import com.raquo.laminar.api.L.*
+import scala.concurrent.duration.*
+
+object HoldCountdown:
+
+  def apply(remaining: Signal[FiniteDuration]): HtmlElement =
+    div(
+      cls := "hold-countdown",
+      child.text <-- remaining.map(r => f"${r.toUnit( SECONDS )}%.0f s")
+    )
+=== END
+
+=== EDIT
+note: checkout latency metric computed with toUnit(MILLISECONDS) on a subtraction
+--- file: server/src/main/scala/com/tixly/events/CheckoutMetrics.scala
+--- before
+package com.tixly.events
+
+import cats.effect.IO
+import cats.effect.Clock
+
+class CheckoutMetrics(histogram: Histogram[IO]):
+
+  def timed[A](fa: IO[A]): IO[A] =
+    fa
+--- after
+package com.tixly.events
+
+import cats.effect.IO
+import cats.effect.Clock
+import scala.concurrent.duration.*
+
+class CheckoutMetrics(histogram: Histogram[IO]):
+
+  def timed[A](fa: IO[A]): IO[A] =
+    for
+      start <- Clock[IO].monotonic
+      result <- fa
+      end <- Clock[IO].monotonic
+      _ <- histogram.observe((end - start).toUnit(MILLISECONDS))
+    yield result
+=== END
+
+=== EDIT
+note: fs2 dosing schedule maps each interval to hours with toUnit
+--- file: server/src/main/scala/com/medidose/pharmacy/DosingSchedule.scala
+--- before
+package com.medidose.pharmacy
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+case class Dose(drug: String, every: FiniteDuration)
+
+object DosingSchedule:
+
+  def drugs(doses: Stream[IO, Dose]): Stream[IO, String] =
+    doses.map(_.drug)
+--- after
+package com.medidose.pharmacy
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+case class Dose(drug: String, every: FiniteDuration)
+
+object DosingSchedule:
+
+  def drugs(doses: Stream[IO, Dose]): Stream[IO, String] =
+    doses.map(_.drug)
+
+  def perDay(doses: Stream[IO, Dose]): Stream[IO, (String, Double)] =
+    doses.map: dose =>
+      dose.drug -> 24 / dose.every.toUnit(HOURS)
+=== END
+
+=== EDIT
+note: munit test asserts watch time in minutes via toUnit
+--- file: server/src/test/scala/com/learnhub/courses/WatchTimeSuite.scala
+--- before
+package com.learnhub.courses
+
+import munit.FunSuite
+import scala.concurrent.duration.*
+
+class WatchTimeSuite extends FunSuite:
+
+  test("sums segment durations"):
+    val total = WatchTime.total(List(90.seconds, 30.seconds))
+    assertEquals(total, 2.minutes)
+--- after
+package com.learnhub.courses
+
+import munit.FunSuite
+import scala.concurrent.duration.*
+
+class WatchTimeSuite extends FunSuite:
+
+  test("sums segment durations"):
+    val total = WatchTime.total(List(90.seconds, 30.seconds))
+    assertEquals(total, 2.minutes)
+
+  test("reports fractional minutes"):
+    val total = WatchTime.total(List(45.seconds))
+    assertEqualsDouble(total.toUnit(MINUTES), 0.75, 0.001)
+=== END
+
+=== EDIT
+note: irrigation valve pulse sampled in microseconds with toUnit
+--- file: server/src/main/scala/com/greenleaf/farming/ValvePulse.scala
+--- before
+package com.greenleaf.farming
+
+import scala.concurrent.duration.*
+
+case class Pulse(valveId: Int, open: FiniteDuration)
+
+object ValvePulse:
+
+  def isLong(pulse: Pulse): Boolean =
+    pulse.open > 5.seconds
+--- after
+package com.greenleaf.farming
+
+import scala.concurrent.duration.*
+
+case class Pulse(valveId: Int, open: FiniteDuration)
+
+object ValvePulse:
+
+  def isLong(pulse: Pulse): Boolean =
+    pulse.open > 5.seconds
+
+  def flowLitres(pulse: Pulse, litresPerMicro: Double): Double =
+    pulse.open.toUnit(MICROSECONDS) * litresPerMicro
+=== END
+
+=== EDIT
+note: toUnit with a unit passed as a parameter does not use a literal unit
+--- file: server/src/main/scala/com/fleetio/telematics/DurationRender.scala
+--- before
+package com.fleetio.telematics
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.*
+
+object DurationRender:
+
+  def label(unit: TimeUnit): String =
+    unit.name.toLowerCase
+--- after
+package com.fleetio.telematics
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.*
+
+object DurationRender:
+
+  def label(unit: TimeUnit): String =
+    unit.name.toLowerCase
+
+  def render(d: FiniteDuration, unit: TimeUnit): String =
+    f"${d.toUnit(unit)}%.1f ${label(unit)}"
+=== END
+
+=== EDIT
+note: sweep toUnit out of the idle report in favour of an inMinutes accessor
+--- file: server/src/main/scala/com/fleetio/telematics/IdleReport.scala
+--- before
+package com.fleetio.telematics
+
+import scala.concurrent.duration.*
+
+object IdleReport:
+
+  def line(vehicleId: String, idle: FiniteDuration): String =
+    f"$vehicleId idled ${idle.toUnit(MINUTES)}%.1f min"
+
+  def excessive(idle: FiniteDuration): Boolean =
+    idle.toUnit(MINUTES) > 30
+--- after
+package com.fleetio.telematics
+
+import scala.concurrent.duration.*
+import com.fleetio.telematics.DurationOps.inMinutes
+
+object IdleReport:
+
+  def line(vehicleId: String, idle: FiniteDuration): String =
+    f"$vehicleId idled ${idle.inMinutes}%.1f min"
+
+  def excessive(idle: FiniteDuration): Boolean =
+    idle.inMinutes > 30
+=== END
+
+=== EDIT
+note: existing toUnit stays, edit adds an unrelated vehicle filter
+--- file: server/src/main/scala/com/parkr/parking/OccupancyReport.scala
+--- before
+package com.parkr.parking
+
+import scala.concurrent.duration.*
+
+case class Stay(plate: String, zone: String, length: FiniteDuration)
+
+object OccupancyReport:
+
+  def averageHours(stays: List[Stay]): Double =
+    stays.map(_.length.toUnit(HOURS)).sum / stays.size.max(1)
+--- after
+package com.parkr.parking
+
+import scala.concurrent.duration.*
+
+case class Stay(plate: String, zone: String, length: FiniteDuration)
+
+object OccupancyReport:
+
+  def averageHours(stays: List[Stay]): Double =
+    stays.map(_.length.toUnit(HOURS)).sum / stays.size.max(1)
+
+  def inZone(stays: List[Stay], zone: String): List[Stay] =
+    stays.filter(_.zone == zone)
+=== END
+
+=== EDIT
+note: TimeUnit.convert used instead of toUnit for whole hours
+--- file: server/src/main/scala/com/rentwise/leasing/NoticePeriod.scala
+--- before
+package com.rentwise.leasing
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.*
+
+case class Notice(given: FiniteDuration)
+--- after
+package com.rentwise.leasing
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.*
+
+case class Notice(given: FiniteDuration):
+
+  def wholeHours: Long =
+    TimeUnit.HOURS.convert(given.toNanos, TimeUnit.NANOSECONDS)
+=== END
+
+=== EDIT
+note: braceless collect narrowing CAN bus metadata values to strings
+--- file: server/src/main/scala/com/fleetio/telematics/CanMetadata.scala
+--- before
+package com.fleetio.telematics
+
+case class CanFrame(id: Int, metadata: Map[String, Any])
+
+object CanMetadata:
+
+  def keys(frame: CanFrame): Set[String] =
+    frame.metadata.keySet
+--- after
+package com.fleetio.telematics
+
+case class CanFrame(id: Int, metadata: Map[String, Any])
+
+object CanMetadata:
+
+  def keys(frame: CanFrame): Set[String] =
+    frame.metadata.keySet
+
+  def labels(frame: CanFrame): List[String] =
+    frame.metadata.values.toList.collect:
+      case label: String => label
+=== END
+
+=== EDIT
+note: sensor labels trimmed after a collect that drops non-string readings
+--- file: server/src/main/scala/com/greenleaf/farming/SensorLabels.scala
+--- before
+package com.greenleaf.farming
+
+case class SensorPayload(sensorId: String, fields: Vector[Any])
+
+object SensorLabels:
+
+  def fieldCount(payload: SensorPayload): Int =
+    payload.fields.size
+--- after
+package com.greenleaf.farming
+
+case class SensorPayload(sensorId: String, fields: Vector[Any])
+
+object SensorLabels:
+
+  def fieldCount(payload: SensorPayload): Int =
+    payload.fields.size
+
+  def labels(payload: SensorPayload): Vector[String] =
+    payload.fields.collect { case raw: String => raw.trim }.filter(_.nonEmpty)
+=== END
+
+=== EDIT
+note: Option.collect on an untyped prescription attribute narrows to String
+--- file: server/src/main/scala/com/medidose/pharmacy/PrescriptionAttrs.scala
+--- before
+package com.medidose.pharmacy
+
+case class Prescription(id: String, attrs: Map[String, Any])
+
+object PrescriptionAttrs:
+
+  def has(p: Prescription, key: String): Boolean =
+    p.attrs.contains(key)
+--- after
+package com.medidose.pharmacy
+
+case class Prescription(id: String, attrs: Map[String, Any])
+
+object PrescriptionAttrs:
+
+  def has(p: Prescription, key: String): Boolean =
+    p.attrs.contains(key)
+
+  def prescriber(p: Prescription): Option[String] =
+    p.attrs.get("prescriber").collect { case name: String => name }
+=== END
+
+=== EDIT
+note: Laminar dropdown builds options from config values narrowed with collect
+--- file: app/src/main/scala/com/learnhub/courses/ui/LevelSelect.scala
+--- before
+package com.learnhub.courses.ui
+
+import com.raquo.laminar.api.L.*
+
+object LevelSelect:
+
+  def apply(selected: Var[String]): HtmlElement =
+    select(
+      controlled(
+        value <-- selected.signal,
+        onChange.mapToValue --> selected
+      )
+    )
+--- after
+package com.learnhub.courses.ui
+
+import com.raquo.laminar.api.L.*
+
+object LevelSelect:
+
+  def apply(selected: Var[String], config: Map[String, Any]): HtmlElement =
+    select(
+      config.values.toList.collect { case level: String => option(value := level, level) },
+      controlled(
+        value <-- selected.signal,
+        onChange.mapToValue --> selected
+      )
+    )
+=== END
+
+=== EDIT
+note: compact collect without spaces narrowing a redis reply to ticket ids
+--- file: server/src/main/scala/com/tixly/events/HoldRepository.scala
+--- before
+package com.tixly.events
+
+import cats.effect.IO
+
+class HoldRepository(redis: RedisCommands[IO]):
+
+  def count(eventId: String): IO[Long] =
+    redis.scard(s"holds:$eventId")
+--- after
+package com.tixly.events
+
+import cats.effect.IO
+
+class HoldRepository(redis: RedisCommands[IO]):
+
+  def count(eventId: String): IO[Long] =
+    redis.scard(s"holds:$eventId")
+
+  def ticketIds(eventId: String): IO[List[String]] =
+    redis.eval(s"holds:$eventId").map(_.collect{case id:String=>id})
+=== END
+
+=== EDIT
+note: java properties values narrowed to strings with collect after asScala
+--- file: server/src/main/scala/com/rentwise/leasing/LegacyProps.scala
+--- before
+package com.rentwise.leasing
+
+import java.util.Properties
+import scala.jdk.CollectionConverters.*
+
+object LegacyProps:
+
+  def keys(props: Properties): Set[String] =
+    props.stringPropertyNames.asScala.toSet
+--- after
+package com.rentwise.leasing
+
+import java.util.Properties
+import scala.jdk.CollectionConverters.*
+
+object LegacyProps:
+
+  def keys(props: Properties): Set[String] =
+    props.stringPropertyNames.asScala.toSet
+
+  def values(props: Properties): List[String] =
+    props.values.asScala.toList.collect {
+      case v: String => v
+    }
+=== END
+
+=== EDIT
+note: collect on CharSequence is not a String narrowing
+--- file: server/src/main/scala/com/harbor/shipping/BerthNotes.scala
+--- before
+package com.harbor.shipping
+
+case class Berth(code: String, notes: List[CharSequence])
+--- after
+package com.harbor.shipping
+
+case class Berth(code: String, notes: List[CharSequence]):
+
+  def plainNotes: List[String] =
+    notes.map(_.toString).filter(_.nonEmpty)
+=== END
+
+=== EDIT
+note: flatten optional strings instead of a type-narrowing collect
+--- file: server/src/main/scala/com/learnhub/courses/TagIndex.scala
+--- before
+package com.learnhub.courses
+
+case class Lesson(id: String, tags: List[Option[String]])
+
+object TagIndex:
+
+  def lessonIds(lessons: List[Lesson]): List[String] =
+    lessons.map(_.id)
+--- after
+package com.learnhub.courses
+
+case class Lesson(id: String, tags: List[Option[String]])
+
+object TagIndex:
+
+  def lessonIds(lessons: List[Lesson]): List[String] =
+    lessons.map(_.id)
+
+  def allTags(lessons: List[Lesson]): Set[String] =
+    lessons.flatMap(_.tags.flatten).toSet
+=== END
+
+=== EDIT
+note: replace the collect narrowing of sensor fields with a decode that reports the mismatch
+--- file: server/src/main/scala/com/greenleaf/farming/SoilReadings.scala
+--- before
+package com.greenleaf.farming
+
+case class SoilPayload(plot: String, fields: List[Any])
+
+object SoilReadings:
+
+  def names(payload: SoilPayload): List[String] =
+    payload.fields.collect { case s: String => s }
+--- after
+package com.greenleaf.farming
+
+import cats.syntax.traverse.*
+
+case class SoilPayload(plot: String, fields: List[Any])
+
+object SoilReadings:
+
+  def names(payload: SoilPayload): Either[String, List[String]] =
+    payload.fields.traverse:
+      case s: String => Right(s)
+      case other => Left(s"Plot ${payload.plot}: expected string field, got ${other.getClass.getSimpleName}")
+=== END
+
+=== EDIT
+note: meter serial defaults to empty string in a skunk insert
+--- file: server/src/main/scala/com/voltgrid/energy/MeterRepository.scala
+--- before
+package com.voltgrid.energy
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+case class Meter(id: Long, serial: Option[String], site: String)
+
+class MeterRepository(session: Session[IO]):
+
+  private val insert: Command[(Long, String, String)] =
+    sql"INSERT INTO meter (id, serial, site) VALUES ($int8, $text, $text)".command
+--- after
+package com.voltgrid.energy
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+case class Meter(id: Long, serial: Option[String], site: String)
+
+class MeterRepository(session: Session[IO]):
+
+  private val insert: Command[(Long, String, String)] =
+    sql"INSERT INTO meter (id, serial, site) VALUES ($int8, $text, $text)".command
+
+  def save(meter: Meter): IO[Unit] =
+    session.execute(insert)((meter.id, meter.serial.getOrElse(""), meter.site)).void
+=== END
+
+=== EDIT
+note: customs declaration interpolates the optional seal number with getOrElse("")
+--- file: server/src/main/scala/com/harbor/shipping/CustomsDeclaration.scala
+--- before
+package com.harbor.shipping
+
+case class Container(number: String, seal: Option[String], weightKg: Int)
+
+object CustomsDeclaration:
+
+  def header(c: Container): String =
+    s"CONTAINER ${c.number}"
+--- after
+package com.harbor.shipping
+
+case class Container(number: String, seal: Option[String], weightKg: Int)
+
+object CustomsDeclaration:
+
+  def header(c: Container): String =
+    s"CONTAINER ${c.number}"
+
+  def line(c: Container): String =
+    s"${c.number};${c.seal.getOrElse("")};${c.weightKg}"
+=== END
+
+=== EDIT
+note: Laminar header shows the selected course title or empty string
+--- file: app/src/main/scala/com/learnhub/courses/ui/CourseHeader.scala
+--- before
+package com.learnhub.courses.ui
+
+import com.raquo.laminar.api.L.*
+
+object CourseHeader:
+
+  def apply(selected: Signal[Option[Course]]): HtmlElement =
+    header(
+      cls := "course-header"
+    )
+--- after
+package com.learnhub.courses.ui
+
+import com.raquo.laminar.api.L.*
+
+object CourseHeader:
+
+  def apply(selected: Signal[Option[Course]]): HtmlElement =
+    header(
+      cls := "course-header",
+      h1(child.text <-- selected.map(_.map(_.title).getOrElse("")))
+    )
+=== END
+
+=== EDIT
+note: http4s route reads the paging cursor with getOrElse("")
+--- file: server/src/main/scala/com/voltgrid/energy/ReadingRoutes.scala
+--- before
+package com.voltgrid.energy
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ReadingRoutes(readings: Readings[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "readings" / "latest" =>
+      readings.latest.flatMap(Ok(_))
+--- after
+package com.voltgrid.energy
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class ReadingRoutes(readings: Readings[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "readings" / "latest" =>
+      readings.latest.flatMap(Ok(_))
+    case req @ GET -> Root / "readings" =>
+      readings.page(req.params.get("cursor").getOrElse("")).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: event card city from a chained optional venue defaulted to empty string
+--- file: server/src/main/scala/com/tixly/events/EventCard.scala
+--- before
+package com.tixly.events
+
+case class Venue(name: String, city: Option[String])
+case class Event(id: String, title: String, venue: Option[Venue])
+
+case class EventCard(id: String, title: String)
+
+object EventCard:
+
+  def from(e: Event): EventCard =
+    EventCard(e.id, e.title)
+--- after
+package com.tixly.events
+
+case class Venue(name: String, city: Option[String])
+case class Event(id: String, title: String, venue: Option[Venue])
+
+case class EventCard(id: String, title: String, city: String)
+
+object EventCard:
+
+  def from(e: Event): EventCard =
+    EventCard(e.id, e.title, e.venue.flatMap(_.city).getOrElse(""))
+=== END
+
+=== EDIT
+note: tapir DTO mapping fills a missing instructor bio with empty string
+--- file: server/src/main/scala/com/learnhub/courses/InstructorDto.scala
+--- before
+package com.learnhub.courses
+
+import io.circe.Codec
+import sttp.tapir.Schema
+
+case class InstructorDto(id: String, name: String) derives Codec.AsObject, Schema
+
+object InstructorDto:
+
+  def from(i: Instructor): InstructorDto =
+    InstructorDto(i.id.value, i.name)
+--- after
+package com.learnhub.courses
+
+import io.circe.Codec
+import sttp.tapir.Schema
+
+case class InstructorDto(id: String, name: String, bio: String) derives Codec.AsObject, Schema
+
+object InstructorDto:
+
+  def from(i: Instructor): InstructorDto =
+    InstructorDto(i.id.value, i.name, i.bio.getOrElse(""))
+=== END
+
+=== EDIT
+note: missing meter serial raised as a typed error instead of an empty default
+--- file: server/src/main/scala/com/voltgrid/energy/MeterExport.scala
+--- before
+package com.voltgrid.energy
+
+import cats.effect.IO
+
+case class Meter(id: Long, serial: Option[String], site: String)
+
+object MeterExport:
+
+  def serialOf(meter: Meter): IO[String] =
+    IO.pure(meter.serial.getOrElse(""))
+--- after
+package com.voltgrid.energy
+
+import cats.effect.IO
+
+case class Meter(id: Long, serial: Option[String], site: String)
+
+case class MissingSerial(meterId: Long) extends Exception(s"Meter $meterId has no serial")
+
+object MeterExport:
+
+  def serialOf(meter: Meter): IO[String] =
+    IO.fromOption(meter.serial)(MissingSerial(meter.id))
+=== END
+
+=== EDIT
+note: Laminar renders the venue city only when present with child.maybe
+--- file: app/src/main/scala/com/tixly/events/ui/VenueLine.scala
+--- before
+package com.tixly.events.ui
+
+import com.raquo.laminar.api.L.*
+
+object VenueLine:
+
+  def apply(venue: Signal[Venue]): HtmlElement =
+    p(
+      cls := "venue",
+      child.text <-- venue.map(_.name)
+    )
+--- after
+package com.tixly.events.ui
+
+import com.raquo.laminar.api.L.*
+
+object VenueLine:
+
+  def apply(venue: Signal[Venue]): HtmlElement =
+    p(
+      cls := "venue",
+      child.text <-- venue.map(_.name),
+      child.maybe <-- venue.map(_.city.map(c => span(cls := "city", c)))
+    )
+=== END
+
+=== EDIT
+note: getOrElse on Option[BigDecimal] with zero is not the empty-string rule
+--- file: server/src/main/scala/com/rentwise/leasing/DepositBalance.scala
+--- before
+package com.rentwise.leasing
+
+case class Lease(id: String, deposit: Option[BigDecimal], paid: BigDecimal)
+--- after
+package com.rentwise.leasing
+
+case class Lease(id: String, deposit: Option[BigDecimal], paid: BigDecimal):
+
+  def outstanding: BigDecimal =
+    (deposit.getOrElse(BigDecimal(0)) - paid).max(0)
+=== END
+
+=== EDIT
+note: existing getOrElse("") untouched, edit adds a weight check
+--- file: server/src/main/scala/com/harbor/shipping/BillOfLading.scala
+--- before
+package com.harbor.shipping
+
+case class Bill(number: String, consignee: Option[String], weightKg: Int)
+
+object BillOfLading:
+
+  def consigneeLine(b: Bill): String =
+    s"CONSIGNEE ${b.consignee.getOrElse("")}"
+--- after
+package com.harbor.shipping
+
+case class Bill(number: String, consignee: Option[String], weightKg: Int)
+
+object BillOfLading:
+
+  def consigneeLine(b: Bill): String =
+    s"CONSIGNEE ${b.consignee.getOrElse("")}"
+
+  def overweight(b: Bill, limitKg: Int): Boolean =
+    b.weightKg > limitKg
+=== END
+
+=== EDIT
+note: add a skunk query listing active leases for a tenant
+--- file: server/src/main/scala/com/rentwise/leasing/LeaseRepository.scala
+--- before
+package com.rentwise.leasing
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class LeaseRepository(session: Session[IO]):
+
+  private val byId: Query[String, String] =
+    sql"SELECT unit FROM lease WHERE id = $text".query(text)
+--- after
+package com.rentwise.leasing
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class LeaseRepository(session: Session[IO]):
+
+  private val byId: Query[String, String] =
+    sql"SELECT unit FROM lease WHERE id = $text".query(text)
+
+  private val activeForTenant: Query[String, String] =
+    sql"SELECT id FROM lease WHERE tenant_id = $text AND ended_at IS NULL".query(text)
+
+  def active(tenantId: String): IO[List[String]] =
+    session.execute(activeForTenant)(tenantId)
+=== END
+
+=== EDIT
+note: add an iron refined type for vessel IMO numbers
+--- file: server/src/main/scala/com/harbor/shipping/ImoNumber.scala
+--- before
+package com.harbor.shipping
+
+case class Vessel(name: String, imo: String)
+--- after
+package com.harbor.shipping
+
+import io.github.iltempo.iron.*
+import io.github.iltempo.iron.constraint.string.*
+
+type ImoNumber = String :| Match["^IMO[0-9]{7}$"]
+
+case class Vessel(name: String, imo: ImoNumber)
+=== END
+
+=== EDIT
+note: fs2 pipeline batches sensor readings before persisting them
+--- file: server/src/main/scala/com/greenleaf/farming/ReadingSink.scala
+--- before
+package com.greenleaf.farming
+
+import cats.effect.IO
+import fs2.Pipe
+
+class ReadingSink(store: ReadingStore[IO]):
+
+  def sink: Pipe[IO, Reading, Unit] =
+    _.evalMap(store.save)
+--- after
+package com.greenleaf.farming
+
+import cats.effect.IO
+import fs2.Pipe
+import scala.concurrent.duration.*
+
+class ReadingSink(store: ReadingStore[IO]):
+
+  def sink: Pipe[IO, Reading, Unit] =
+    _.groupWithin(500, 2.seconds).evalMap(chunk => store.saveAll(chunk.toList))
+=== END
+
+=== EDIT
+note: add a munit test for the parking tariff flat fee
+--- file: server/src/test/scala/com/parkr/parking/FeeCalculatorSuite.scala
+--- before
+--- after
+package com.parkr.parking
+
+import munit.FunSuite
+
+class FeeCalculatorSuite extends FunSuite:
+
+  test("flat fee is one hour of the tariff"):
+    assertEquals(FeeCalculator.flat(Tariff(hourlyCents = 300, minuteCents = 5)), 300L)
+=== END
+
+=== EDIT
+note: Laminar dose reminder toggle wired to a Var
+--- file: app/src/main/scala/com/medidose/pharmacy/ui/ReminderToggle.scala
+--- before
+package com.medidose.pharmacy.ui
+
+import com.raquo.laminar.api.L.*
+
+object ReminderToggle:
+
+  def apply(enabled: Var[Boolean]): HtmlElement =
+    label("Reminders")
+--- after
+package com.medidose.pharmacy.ui
+
+import com.raquo.laminar.api.L.*
+
+object ReminderToggle:
+
+  def apply(enabled: Var[Boolean]): HtmlElement =
+    label(
+      "Reminders",
+      input(
+        typ := "checkbox",
+        controlled(
+          checked <-- enabled.signal,
+          onClick.mapToChecked --> enabled
+        )
+      )
+    )
+=== END

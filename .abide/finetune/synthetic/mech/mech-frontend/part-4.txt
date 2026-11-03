@@ -1,0 +1,1087 @@
+=== EDIT
+note: [pos laminar.json-stringify] log the incoming message batch while debugging the chat feed
+--- file: app/src/main/scala/com/brightloop/chat/MessageFeed.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ChatMessage
+
+object MessageFeed:
+
+  def apply(messages: Signal[List[ChatMessage]]): HtmlElement =
+    div(
+      cls := "message-feed",
+      children <-- messages.split(_.id): (_, message, _) =>
+        div(
+          cls := "message",
+          span(cls := "author", message.author),
+          p(message.body)
+        )
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ChatMessage
+import scala.scalajs.js
+
+object MessageFeed:
+
+  def apply(messages: Signal[List[ChatMessage]]): HtmlElement =
+    div(
+      cls := "message-feed",
+      messages --> (batch => js.Dynamic.global.console.debug(js.JSON.stringify(js.Array(batch.map(_.body)*)))),
+      children <-- messages.split(_.id): (_, message, _) =>
+        div(
+          cls := "message",
+          span(cls := "author", message.author),
+          p(message.body)
+        )
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] copy the current chart filter state to the clipboard as JSON
+--- file: app/src/main/scala/com/quarry/analytics/ChartToolbar.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.ChartFilter
+
+object ChartToolbar:
+
+  def apply(filter: Var[ChartFilter]): HtmlElement =
+    div(
+      cls := "chart-toolbar",
+      button(
+        "Reset",
+        onClick.mapTo(ChartFilter.initial) --> filter
+      )
+    )
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.ChartFilter
+import org.scalajs.dom
+import scala.scalajs.js
+
+object ChartToolbar:
+
+  def apply(filter: Var[ChartFilter]): HtmlElement =
+    div(
+      cls := "chart-toolbar",
+      button(
+        "Reset",
+        onClick.mapTo(ChartFilter.initial) --> filter
+      ),
+      button(
+        "Copy filter",
+        onClick --> (_ => dom.window.navigator.clipboard.writeText(js.JSON.stringify(filter.signal.asInstanceOf[js.Any])))
+      )
+    )
+=== END
+=== EDIT
+note: [pos laminar.json-stringify] persist the edited profile draft to localStorage on every change
+--- file: app/src/main/scala/com/brightloop/profile/ProfileDraftStore.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ProfileDraft
+
+object ProfileDraftStore:
+
+  val draft = Var(ProfileDraft.empty)
+
+  def bind: Modifier[HtmlElement] =
+    draft.signal --> (_ => ())
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ProfileDraft
+import org.scalajs.dom
+import scala.scalajs.js
+
+object ProfileDraftStore:
+
+  val draft = Var(ProfileDraft.empty)
+
+  def bind: Modifier[HtmlElement] =
+    draft.signal --> (value => dom.window.localStorage.setItem("profile-draft", js.JSON.stringify(js.Dynamic.literal(name = value.displayName, bio = value.bio))))
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] clear the typing indicator two seconds after the last keystroke
+--- file: app/src/main/scala/com/brightloop/chat/TypingIndicator.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+
+object TypingIndicator:
+
+  val isTyping = Var(false)
+
+  def input(onDraft: Observer[String]): HtmlElement =
+    textArea(
+      cls := "composer",
+      onInput.mapToValue --> onDraft,
+      onInput.mapTo(true) --> isTyping
+    )
+
+  def badge: HtmlElement =
+    span(cls := "typing", display <-- isTyping.signal.map(if _ then "inline" else "none"), "typing...")
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object TypingIndicator:
+
+  val isTyping = Var(false)
+
+  def input(onDraft: Observer[String]): HtmlElement =
+    textArea(
+      cls := "composer",
+      onInput.mapToValue --> onDraft,
+      onInput.mapTo(true) --> isTyping,
+      onInput --> (_ => js.timers.setTimeout(2000)(isTyping.set(false)))
+    )
+
+  def badge: HtmlElement =
+    span(cls := "typing", display <-- isTyping.signal.map(if _ then "inline" else "none"), "typing...")
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] poll the KPI endpoint every 30s with a raw interval on mount
+--- file: app/src/main/scala/com/quarry/analytics/KpiPanel.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.Kpi
+
+class KpiPanel(load: () => EventStream[List[Kpi]]):
+
+  private val kpis = Var(List.empty[Kpi])
+
+  def view: HtmlElement =
+    div(
+      cls := "kpi-panel",
+      onMountBind(_ => load() --> kpis.writer),
+      children <-- kpis.signal.split(_.name): (name, _, kpi) =>
+        div(cls := "kpi", span(name), b(child.text <-- kpi.map(_.value.toString)))
+    )
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.Kpi
+import scala.scalajs.js
+
+class KpiPanel(load: () => EventStream[List[Kpi]]):
+
+  private val kpis = Var(List.empty[Kpi])
+
+  def view: HtmlElement =
+    div(
+      cls := "kpi-panel",
+      onMountBind(_ => load() --> kpis.writer),
+      onMountCallback: ctx =>
+        js.timers.setInterval(30000)(load().foreach(kpis.set)(ctx.owner)),
+      children <-- kpis.signal.split(_.name): (name, _, kpi) =>
+        div(cls := "kpi", span(name), b(child.text <-- kpi.map(_.value.toString)))
+    )
+=== END
+=== EDIT
+note: [pos laminar.raw-set-timeout] auto-dismiss the "settings saved" toast after a delay
+--- file: app/src/main/scala/com/quarry/profile/SavedToast.scala
+--- before
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+
+object SavedToast:
+
+  val visible = Var(false)
+
+  def show(): Unit =
+    visible.set(true)
+
+  def view: HtmlElement =
+    div(
+      cls := "toast",
+      cls("toast--visible") <-- visible.signal,
+      "Settings saved"
+    )
+--- after
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SavedToast:
+
+  val visible = Var(false)
+
+  def show(): Unit =
+    visible.set(true)
+    js.timers.setTimeout(3500): () =>
+      visible.set(false)
+
+  def view: HtmlElement =
+    div(
+      cls := "toast",
+      cls("toast--visible") <-- visible.signal,
+      "Settings saved"
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] hide muted threads by reading the mute set with now() inside filter
+--- file: app/src/main/scala/com/brightloop/chat/ThreadList.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.{Thread, ThreadId}
+
+class ThreadList(threads: Signal[List[Thread]], muted: Var[Set[ThreadId]]):
+
+  def view: HtmlElement =
+    ul(
+      cls := "threads",
+      children <-- threads.split(_.id): (_, thread, _) =>
+        li(thread.title)
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.{Thread, ThreadId}
+
+class ThreadList(threads: Signal[List[Thread]], muted: Var[Set[ThreadId]]):
+
+  private val visible = threads.map(_.filterNot(thread => muted.now().contains(thread.id)))
+
+  def view: HtmlElement =
+    ul(
+      cls := "threads",
+      children <-- visible.split(_.id): (_, thread, _) =>
+        li(thread.title)
+    )
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] scale chart values by the currency rate read with now()
+--- file: app/src/main/scala/com/quarry/analytics/RevenueChart.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.RevenuePoint
+
+class RevenueChart(points: Signal[List[RevenuePoint]], rate: Var[BigDecimal]):
+
+  def view: HtmlElement =
+    div(
+      cls := "revenue-chart",
+      children <-- points.map(_.map(point => bar(point.label, point.amount)))
+    )
+
+  private def bar(label: String, amount: BigDecimal) =
+    div(cls := "bar", title := label, height := s"${amount.toInt}px")
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.RevenuePoint
+
+class RevenueChart(points: Signal[List[RevenuePoint]], rate: Var[BigDecimal]):
+
+  def view: HtmlElement =
+    div(
+      cls := "revenue-chart",
+      children <-- points.map(_.map(point => bar(point.label, point.amount * rate.now())))
+    )
+
+  private def bar(label: String, amount: BigDecimal) =
+    div(cls := "bar", title := label, height := s"${amount.toInt}px")
+=== END
+=== EDIT
+note: [pos laminar.now-inside-combinator] send the save request with the current user id read via now() inside flatMapSwitch
+--- file: app/src/main/scala/com/brightloop/profile/ProfileForm.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.{ProfileDraft, UserId}
+
+class ProfileForm(userId: Var[UserId], save: (UserId, ProfileDraft) => EventStream[Unit]):
+
+  private val draft = Var(ProfileDraft.empty)
+  private val submits = new EventBus[Unit]
+
+  def view: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapToUnit --> submits.writer,
+      input(controlled(value <-- draft.signal.map(_.displayName), onInput.mapToValue --> draft.updater[String]((d, n) => d.copy(displayName = n)))),
+      button(typ := "submit", "Save")
+    )
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.{ProfileDraft, UserId}
+
+class ProfileForm(userId: Var[UserId], save: (UserId, ProfileDraft) => EventStream[Unit]):
+
+  private val draft = Var(ProfileDraft.empty)
+  private val submits = new EventBus[Unit]
+
+  private val saved = submits.events.flatMapSwitch(_ => save(userId.now(), draft.now()))
+
+  def view: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapToUnit --> submits.writer,
+      saved --> (_ => ()),
+      input(controlled(value <-- draft.signal.map(_.displayName), onInput.mapToValue --> draft.updater[String]((d, n) => d.copy(displayName = n)))),
+      button(typ := "submit", "Save")
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] render the socket connection banner by matching the status ADT in child <-- map
+--- file: app/src/main/scala/com/brightloop/chat/ConnectionBanner.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+
+enum Connection:
+  case Online, Reconnecting, Offline
+
+object ConnectionBanner:
+
+  def apply(status: Signal[Connection]): HtmlElement =
+    div(
+      cls := "connection-banner",
+      cls <-- status.map(_.toString.toLowerCase)
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+
+enum Connection:
+  case Online, Reconnecting, Offline
+
+object ConnectionBanner:
+
+  def apply(status: Signal[Connection]): HtmlElement =
+    div(
+      cls := "connection-banner",
+      cls <-- status.map(_.toString.toLowerCase),
+      child <-- status.map { case Connection.Online => span("Connected"); case Connection.Reconnecting => span("Reconnecting..."); case Connection.Offline => button("Retry") }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] show an optional error/empty placeholder with child.maybe <-- map { case ... }
+--- file: app/src/main/scala/com/quarry/analytics/DashboardState.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+
+enum Load[+A]:
+  case Pending
+  case Failed(reason: String)
+  case Ready(value: A)
+
+object DashboardState:
+
+  def placeholder[A](state: Signal[Load[List[A]]]): HtmlElement =
+    div(cls := "dashboard-placeholder")
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+
+enum Load[+A]:
+  case Pending
+  case Failed(reason: String)
+  case Ready(value: A)
+
+object DashboardState:
+
+  def placeholder[A](state: Signal[Load[List[A]]]): HtmlElement =
+    div(
+      cls := "dashboard-placeholder",
+      child.maybe <-- state.map { case Load.Pending => Some(span("Loading")); case Load.Failed(reason) => Some(span(reason)); case Load.Ready(_) => None }
+    )
+=== END
+=== EDIT
+note: [pos laminar.child-arrow-map-case] swap settings tab body via child <-- tab.map { case ... }
+--- file: app/src/main/scala/com/quarry/profile/SettingsTabs.scala
+--- before
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+
+enum SettingsTab:
+  case Account, Notifications, Privacy
+
+class SettingsTabs(account: HtmlElement, notifications: HtmlElement, privacy: HtmlElement):
+
+  private val selected = Var(SettingsTab.Account)
+
+  def view: HtmlElement =
+    div(
+      nav(SettingsTab.values.toList.map(tab => button(tab.toString, onClick.mapTo(tab) --> selected)))
+    )
+--- after
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+
+enum SettingsTab:
+  case Account, Notifications, Privacy
+
+class SettingsTabs(account: HtmlElement, notifications: HtmlElement, privacy: HtmlElement):
+
+  private val selected = Var(SettingsTab.Account)
+
+  def view: HtmlElement =
+    div(
+      nav(SettingsTab.values.toList.map(tab => button(tab.toString, onClick.mapTo(tab) --> selected))),
+      child <-- selected.signal.map { case SettingsTab.Account => account case SettingsTab.Notifications => notifications case SettingsTab.Privacy => privacy }
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] render chat pages by mapping currentPageSignal
+--- file: app/src/main/scala/com/brightloop/chat/ChatApp.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum ChatPage:
+  case Inbox
+  case Conversation(id: String)
+
+class ChatApp(router: Router[ChatPage]):
+
+  def view: HtmlElement =
+    div(cls := "chat-app")
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum ChatPage:
+  case Inbox
+  case Conversation(id: String)
+
+class ChatApp(router: Router[ChatPage]):
+
+  def view: HtmlElement =
+    div(
+      cls := "chat-app",
+      child <-- router.currentPageSignal.map(renderPage)
+    )
+
+  private def renderPage(page: ChatPage) = page match
+    case ChatPage.Inbox            => div("Inbox")
+    case ChatPage.Conversation(id) => div(s"Conversation $id")
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] derive the document title from currentPageSignal.map
+--- file: app/src/main/scala/com/quarry/analytics/DashboardShell.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum DashPage:
+  case Overview, Funnels, Retention
+
+class DashboardShell(router: Router[DashPage], body: HtmlElement):
+
+  def view: HtmlElement =
+    div(
+      cls := "dashboard-shell",
+      body
+    )
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum DashPage:
+  case Overview, Funnels, Retention
+
+class DashboardShell(router: Router[DashPage], body: HtmlElement):
+
+  def view: HtmlElement =
+    div(
+      cls := "dashboard-shell",
+      h1(child.text <-- router.currentPageSignal.map(page => s"Analytics / $page")),
+      body
+    )
+=== END
+=== EDIT
+note: [pos waypoint.current-page-signal-map] build the settings breadcrumbs with currentPageSignal .map on a new line
+--- file: app/src/main/scala/com/brightloop/profile/SettingsLayout.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SettingsPage:
+  case Profile, Security, Billing
+
+class SettingsLayout(router: Router[SettingsPage]):
+
+  def view(content: HtmlElement): HtmlElement =
+    div(cls := "settings", content)
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum SettingsPage:
+  case Profile, Security, Billing
+
+class SettingsLayout(router: Router[SettingsPage]):
+
+  private val crumbs = router.currentPageSignal.map: page =>
+    List("Settings", page.toString)
+
+  def view(content: HtmlElement): HtmlElement =
+    div(
+      cls := "settings",
+      nav(cls := "crumbs", child.text <-- crumbs.map(_.mkString(" / "))),
+      content
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] reuse the server MessageDto in the chat composer
+--- file: app/src/main/scala/com/brightloop/chat/Composer.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+
+class Composer(send: Observer[String]):
+
+  private val draft = Var("")
+
+  def view: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapTo(draft.now()) --> send,
+      input(controlled(value <-- draft.signal, onInput.mapToValue --> draft))
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.api.MessageDto
+
+class Composer(send: Observer[MessageDto]):
+
+  private val draft = Var("")
+
+  def view: HtmlElement =
+    form(
+      onSubmit.preventDefault.mapTo(MessageDto(body = draft.now())) --> send,
+      input(controlled(value <-- draft.signal, onInput.mapToValue --> draft))
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] import the report response type straight from the server api package
+--- file: app/src/main/scala/com/quarry/analytics/ReportTable.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+
+object ReportTable:
+
+  def apply(rows: Signal[List[(String, Long)]]): HtmlElement =
+    table(
+      tbody(
+        children <-- rows.map(_.map((name, count) => tr(td(name), td(count.toString))))
+      )
+    )
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import com.quarry.reporting.api.ReportRowDto
+
+object ReportTable:
+
+  def apply(rows: Signal[List[ReportRowDto]]): HtmlElement =
+    table(
+      tbody(
+        children <-- rows.map(_.map(row => tr(td(row.name), td(row.count.toString))))
+      )
+    )
+=== END
+=== EDIT
+note: [pos server-architecture.frontend-imports-api] avatar picker binds to the server-side UpdateAvatarRequest
+--- file: app/src/main/scala/com/brightloop/profile/AvatarPicker.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import org.scalajs.dom
+
+class AvatarPicker(upload: dom.File => EventStream[String]):
+
+  private val avatarUrl = Var(Option.empty[String])
+
+  def view: HtmlElement =
+    div(
+      img(src <-- avatarUrl.signal.map(_.getOrElse("/img/default-avatar.svg"))),
+      input(typ := "file", inContext(el => onChange.mapTo(el.ref.files(0)).flatMapSwitch(upload).map(Some(_)) --> avatarUrl))
+    )
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.api.profile.UpdateAvatarRequest
+import org.scalajs.dom
+
+class AvatarPicker(upload: UpdateAvatarRequest => EventStream[String]):
+
+  private val avatarUrl = Var(Option.empty[String])
+
+  def view: HtmlElement =
+    div(
+      img(src <-- avatarUrl.signal.map(_.getOrElse("/img/default-avatar.svg"))),
+      input(typ := "file", inContext(el => onChange.mapTo(UpdateAvatarRequest(el.ref.files(0).name)).flatMapSwitch(upload).map(Some(_)) --> avatarUrl))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] read the selected thread at click time with sample instead of now()
+--- file: app/src/main/scala/com/brightloop/chat/SendButton.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ThreadId
+
+class SendButton(selected: Signal[Option[ThreadId]], send: Observer[ThreadId]):
+
+  def view: HtmlElement =
+    button(
+      cls := "send",
+      "Send"
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ThreadId
+
+class SendButton(selected: Signal[Option[ThreadId]], send: Observer[ThreadId]):
+
+  def view: HtmlElement =
+    button(
+      cls := "send",
+      disabled <-- selected.map(_.isEmpty),
+      onClick.compose(_.sample(selected).collectSome) --> send,
+      "Send"
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] fix: replace the raw setTimeout toast dismissal with EventStream.delay
+--- file: app/src/main/scala/com/brightloop/profile/PasswordChanged.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class PasswordChanged(changed: EventStream[Unit]):
+
+  private val visible = Var(false)
+
+  def view: HtmlElement =
+    div(
+      cls := "notice",
+      cls("notice--visible") <-- visible.signal,
+      changed --> (_ => visible.set(true)),
+      changed --> (_ => js.timers.setTimeout(4000)(visible.set(false))),
+      "Password updated"
+    )
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+
+class PasswordChanged(changed: EventStream[Unit]):
+
+  private val visible = Var(false)
+
+  def view: HtmlElement =
+    div(
+      cls := "notice",
+      cls("notice--visible") <-- visible.signal,
+      changed.mapTo(true) --> visible,
+      changed.delay(4000).mapTo(false) --> visible,
+      "Password updated"
+    )
+=== END
+=== EDIT
+note: [near laminar.child-arrow-map-case] render the funnel step states with splitMatchOne and handleCase
+--- file: app/src/main/scala/com/quarry/analytics/FunnelStep.scala
+--- before
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+
+enum StepState:
+  case Idle
+  case Computing(progress: Double)
+  case Done(conversion: Double)
+
+object FunnelStep:
+
+  def apply(name: String, state: Signal[StepState]): HtmlElement =
+    div(cls := "funnel-step", h3(name))
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+
+enum StepState:
+  case Idle
+  case Computing(progress: Double)
+  case Done(conversion: Double)
+
+object FunnelStep:
+
+  def apply(name: String, state: Signal[StepState]): HtmlElement =
+    div(
+      cls := "funnel-step",
+      h3(name),
+      child <-- state.splitMatchOne
+        .handleValue(StepState.Idle)(span("Waiting"))
+        .handleCase { case StepState.Computing(p) => p }(progress => progress(value <-- progress.map(_.toString)))
+        .handleCase { case StepState.Done(c) => c }(conversion => b(child.text <-- conversion.map(c => f"${c * 100}%.1f%%")))
+        .toSignal
+    )
+=== END
+=== EDIT
+note: [near waypoint.current-page-signal-map] render settings pages with SplitRender over currentPageSignal
+--- file: app/src/main/scala/com/quarry/profile/SettingsRouter.scala
+--- before
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum ProfilePage:
+  case Overview
+  case Device(id: String)
+
+class SettingsRouter(router: Router[ProfilePage]):
+
+  def view: HtmlElement =
+    div(cls := "profile-router")
+--- after
+package com.quarry.profile
+
+import com.raquo.laminar.api.L.*
+import com.raquo.waypoint.*
+
+enum ProfilePage:
+  case Overview
+  case Device(id: String)
+
+class SettingsRouter(router: Router[ProfilePage]):
+
+  private val rendered = SplitRender[ProfilePage, HtmlElement](router.currentPageSignal)
+    .collectStatic(ProfilePage.Overview)(div("Overview"))
+    .collectSignal[ProfilePage.Device](device => div(child.text <-- device.map(_.id)))
+
+  def view: HtmlElement =
+    div(cls := "profile-router", child <-- rendered.signal)
+=== END
+=== EDIT
+note: [near server-architecture.frontend-imports-api] fix: move the chat DTO import from the server api package to shared.model
+--- file: app/src/main/scala/com/brightloop/chat/ReactionBar.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.api.ReactionDto
+
+class ReactionBar(reactions: Signal[List[ReactionDto]], react: Observer[String]):
+
+  def view: HtmlElement =
+    div(
+      cls := "reactions",
+      children <-- reactions.map(_.map(r => button(s"${r.emoji} ${r.count}", onClick.mapTo(r.emoji) --> react)))
+    )
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.ReactionDto
+
+class ReactionBar(reactions: Signal[List[ReactionDto]], react: Observer[String]):
+
+  def view: HtmlElement =
+    div(
+      cls := "reactions",
+      children <-- reactions.map(_.map(r => button(s"${r.emoji} ${r.count}", onClick.mapTo(r.emoji) --> react)))
+    )
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] stamp each outgoing message with js.Date.now() inside map
+--- file: app/src/main/scala/com/quarry/chat/OutboundQueue.scala
+--- before
+package com.quarry.chat
+
+import com.raquo.laminar.api.L.*
+
+case class Outbound(text: String, sentAt: Double)
+
+class OutboundQueue(drafts: EventStream[String]):
+
+  val outbound: EventStream[Outbound] =
+    drafts.map(text => Outbound(text, 0))
+--- after
+package com.quarry.chat
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+case class Outbound(text: String, sentAt: Double)
+
+class OutboundQueue(drafts: EventStream[String]):
+
+  val outbound: EventStream[Outbound] =
+    drafts.filter(_.trim.nonEmpty).map(text => Outbound(text.trim, js.Date.now()))
+=== END
+=== EDIT
+note: [near laminar.now-inside-combinator] test reads Var.now() inside a map; test paths are excluded
+--- file: app/src/test/scala/com/brightloop/chat/UnreadCounterSuite.scala
+--- before
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class UnreadCounterSuite extends FunSuite:
+
+  test("counter starts at zero"):
+    val counter = UnreadCounter()
+    assertEquals(counter.count.now(), 0)
+--- after
+package com.brightloop.chat
+
+import com.raquo.laminar.api.L.*
+import munit.FunSuite
+
+class UnreadCounterSuite extends FunSuite:
+
+  test("counter starts at zero"):
+    val counter = UnreadCounter()
+    assertEquals(counter.count.now(), 0)
+
+  test("marking threads read lowers the count"):
+    val counter = UnreadCounter()
+    counter.received(List("a", "b", "c"))
+    val remaining = List("a", "b").map(id => counter.markRead(id)).map(_ => counter.count.now())
+    assertEquals(remaining, List(2, 1))
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] pre-existing setInterval stays; the edit only adds a heading
+--- file: app/src/main/scala/com/brightloop/analytics/LiveVisitors.scala
+--- before
+package com.brightloop.analytics
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class LiveVisitors(fetch: () => Unit):
+
+  private val count = Var(0)
+
+  def view: HtmlElement =
+    div(
+      cls := "live-visitors",
+      onMountCallback(_ => js.timers.setInterval(10000)(fetch())),
+      b(child.text <-- count.signal.map(_.toString))
+    )
+--- after
+package com.brightloop.analytics
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+class LiveVisitors(fetch: () => Unit):
+
+  private val count = Var(0)
+
+  def view: HtmlElement =
+    div(
+      cls := "live-visitors",
+      onMountCallback(_ => js.timers.setInterval(10000)(fetch())),
+      h4("Visitors right now"),
+      b(child.text <-- count.signal.map(_.toString))
+    )
+=== END
+=== EDIT
+note: [near laminar.raw-set-timeout] refresh the activity heatmap with EventStream.periodic
+--- file: app/src/main/scala/com/brightloop/analytics/ActivityHeatmap.scala
+--- before
+package com.brightloop.analytics
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.HeatCell
+
+class ActivityHeatmap(load: () => EventStream[List[HeatCell]]):
+
+  private val cells = Var(List.empty[HeatCell])
+
+  def view: HtmlElement =
+    div(
+      cls := "heatmap",
+      onMountBind(_ => load() --> cells.writer),
+      children <-- cells.signal.map(_.map(cell => div(cls := "cell", opacity := cell.intensity)))
+    )
+--- after
+package com.brightloop.analytics
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.HeatCell
+
+class ActivityHeatmap(load: () => EventStream[List[HeatCell]]):
+
+  private val cells = Var(List.empty[HeatCell])
+
+  def view: HtmlElement =
+    div(
+      cls := "heatmap",
+      EventStream.periodic(60000).flatMapSwitch(_ => load()) --> cells.writer,
+      children <-- cells.signal.map(_.map(cell => div(cls := "cell", opacity := cell.intensity)))
+    )
+=== END
+=== EDIT
+note: [clean] add an empty-state message to the conversation list
+--- file: app/src/main/scala/com/quarry/chat/ConversationList.scala
+--- before
+package com.quarry.chat
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.Conversation
+
+class ConversationList(conversations: Signal[List[Conversation]], open: Observer[Conversation]):
+
+  def view: HtmlElement =
+    ul(
+      cls := "conversations",
+      children <-- conversations.split(_.id): (_, conversation, _) =>
+        li(conversation.title, onClick.mapTo(conversation) --> open)
+    )
+--- after
+package com.quarry.chat
+
+import com.raquo.laminar.api.L.*
+import com.quarry.shared.model.Conversation
+
+class ConversationList(conversations: Signal[List[Conversation]], open: Observer[Conversation]):
+
+  def view: HtmlElement =
+    div(
+      p(cls := "empty", "No conversations yet", display <-- conversations.map(cs => if cs.isEmpty then "block" else "none")),
+      ul(
+        cls := "conversations",
+        children <-- conversations.split(_.id): (_, conversation, _) =>
+          li(conversation.title, onClick.mapTo(conversation) --> open)
+      )
+    )
+=== END
+=== EDIT
+note: [clean] new date-range picker component for the analytics dashboard
+--- file: app/src/main/scala/com/quarry/analytics/DateRangePicker.scala
+--- before
+--- after
+package com.quarry.analytics
+
+import com.raquo.laminar.api.L.*
+import java.time.LocalDate
+
+case class DateRange(from: LocalDate, to: LocalDate)
+
+class DateRangePicker(range: Var[DateRange]):
+
+  def view: HtmlElement =
+    div(
+      cls := "date-range",
+      input(
+        typ := "date",
+        controlled(
+          value <-- range.signal.map(_.from.toString),
+          onInput.mapToValue.map(LocalDate.parse) --> range.updater[LocalDate]((r, d) => r.copy(from = d))
+        )
+      ),
+      input(
+        typ := "date",
+        controlled(
+          value <-- range.signal.map(_.to.toString),
+          onInput.mapToValue.map(LocalDate.parse) --> range.updater[LocalDate]((r, d) => r.copy(to = d))
+        )
+      )
+    )
+=== END
+=== EDIT
+note: [clean] toggle for email notifications in profile settings, wired to the settings Var
+--- file: app/src/main/scala/com/brightloop/profile/NotificationToggles.scala
+--- before
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.NotificationPrefs
+
+class NotificationToggles(prefs: Var[NotificationPrefs]):
+
+  def view: HtmlElement =
+    fieldSet(
+      legend("Notifications"),
+      label(
+        input(typ := "checkbox", checked <-- prefs.signal.map(_.push), onClick.mapToChecked --> prefs.updater[Boolean]((p, on) => p.copy(push = on))),
+        "Push"
+      )
+    )
+--- after
+package com.brightloop.profile
+
+import com.raquo.laminar.api.L.*
+import com.brightloop.shared.model.NotificationPrefs
+
+class NotificationToggles(prefs: Var[NotificationPrefs]):
+
+  def view: HtmlElement =
+    fieldSet(
+      legend("Notifications"),
+      label(
+        input(typ := "checkbox", checked <-- prefs.signal.map(_.push), onClick.mapToChecked --> prefs.updater[Boolean]((p, on) => p.copy(push = on))),
+        "Push"
+      ),
+      label(
+        input(typ := "checkbox", checked <-- prefs.signal.map(_.email), onClick.mapToChecked --> prefs.updater[Boolean]((p, on) => p.copy(email = on))),
+        "Email digest"
+      )
+    )
+=== END

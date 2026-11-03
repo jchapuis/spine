@@ -1,0 +1,624 @@
+=== EDIT
+note: skunk row type added as final case class with codec in companion
+--- file: server/src/main/scala/com/portline/shipping/ShipmentRow.scala
+--- before
+--- after
+package com.portline.shipping
+
+import skunk.Codec
+import skunk.codec.all.*
+
+final case class ShipmentRow(id: Long, vessel: String, containers: Int)
+
+object ShipmentRow:
+  val codec: Codec[ShipmentRow] =
+    (int8 *: varchar(64) *: int4).to[ShipmentRow]
+=== END
+=== EDIT
+note: domain exception declared as final class
+--- file: server/src/main/scala/com/meterly/quota/QuotaExceeded.scala
+--- before
+package com.meterly.quota
+
+import cats.effect.IO
+
+object QuotaCheck:
+  def ensure(used: Long, limit: Long): IO[Unit] =
+    IO.unit
+--- after
+package com.meterly.quota
+
+import cats.effect.IO
+
+final class QuotaExceeded(val used: Long, val limit: Long)
+    extends RuntimeException(s"quota exceeded: $used of $limit")
+
+object QuotaCheck:
+  def ensure(used: Long, limit: Long): IO[Unit] =
+    IO.raiseWhen(used > limit)(QuotaExceeded(used, limit))
+=== END
+=== EDIT
+note: final protected def on abstract http4s routes base
+--- file: server/src/main/scala/com/acme/http/JsonRoutes.scala
+--- before
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+abstract class JsonRoutes:
+  def routes: HttpRoutes[IO]
+--- after
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.Response
+import org.http4s.dsl.io.*
+
+abstract class JsonRoutes:
+  def routes: HttpRoutes[IO]
+
+  final protected def notFoundFor(resource: String): IO[Response[IO]] =
+    NotFound(s"$resource not found")
+=== END
+=== EDIT
+note: given instance scoped with private [payments] including a space
+--- file: server/src/main/scala/com/acme/payments/PaymentCodecs.scala
+--- before
+package com.acme.payments
+
+import io.circe.Encoder
+
+object PaymentCodecs:
+  given Encoder[PaymentId] = Encoder.encodeString.contramap(_.value)
+--- after
+package com.acme.payments
+
+import io.circe.Encoder
+
+object PaymentCodecs:
+  given Encoder[PaymentId] = Encoder.encodeString.contramap(_.value)
+
+  private [payments] given Encoder[Currency] =
+    Encoder.encodeString.contramap(_.code)
+=== END
+=== EDIT
+note: Default priority added to enum companion
+--- file: server/src/main/scala/com/tempo/tickets/Priority.scala
+--- before
+package com.tempo.tickets
+
+enum Priority:
+  case Low, Normal, High, Urgent
+
+object Priority:
+  def parse(raw: String): Option[Priority] =
+    Priority.values.find(_.toString.equalsIgnoreCase(raw))
+--- after
+package com.tempo.tickets
+
+enum Priority:
+  case Low, Normal, High, Urgent
+
+object Priority:
+  val Default = Priority.Normal
+
+  def parse(raw: String): Option[Priority] =
+    Priority.values.find(_.toString.equalsIgnoreCase(raw))
+=== END
+=== EDIT
+note: nowarn on deprecation category for a legacy currency lookup
+--- file: server/src/main/scala/com/acme/fx/CurrencyLookup.scala
+--- before
+package com.acme.fx
+
+import cats.effect.IO
+
+object CurrencyLookup:
+  def symbol(code: String): IO[String] =
+    IO.pure(code)
+--- after
+package com.acme.fx
+
+import cats.effect.IO
+import scala.annotation.nowarn
+
+object CurrencyLookup:
+  @nowarn("cat=deprecation")
+  def symbol(code: String): IO[String] =
+    IO.blocking(java.util.Currency.getInstance(code).getSymbol(java.util.Locale.getDefault))
+=== END
+=== EDIT
+note: identifiers finalAmount and finalised only, near miss
+--- file: server/src/main/scala/com/acme/billing/InvoiceTotals.scala
+--- before
+package com.acme.billing
+
+case class Line(amountCents: Long, discountCents: Long)
+
+object InvoiceTotals:
+  def gross(lines: List[Line]): Long =
+    lines.map(_.amountCents).sum
+--- after
+package com.acme.billing
+
+case class Line(amountCents: Long, discountCents: Long)
+
+object InvoiceTotals:
+  def gross(lines: List[Line]): Long =
+    lines.map(_.amountCents).sum
+
+  def net(lines: List[Line], finalised: Boolean): Long =
+    val finalAmount = gross(lines) - lines.map(_.discountCents).sum
+    if finalised then finalAmount else gross(lines)
+=== END
+=== EDIT
+note: fs2 pipe that dedupes readings, clean
+--- file: server/src/main/scala/com/skyline/weather/ReadingPipes.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import fs2.Pipe
+
+object ReadingPipes:
+  def nonNegative: Pipe[IO, Double, Double] =
+    _.filter(_ >= 0)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import fs2.Pipe
+
+object ReadingPipes:
+  def nonNegative: Pipe[IO, Double, Double] =
+    _.filter(_ >= 0)
+
+  def changesOnly: Pipe[IO, Double, Double] =
+    _.changes
+=== END
+=== EDIT
+note: Laminar form state as final case class
+--- file: app/src/main/scala/com/orbit/ui/signup/SignupForm.scala
+--- before
+package com.orbit.ui.signup
+
+import com.raquo.laminar.api.L.*
+
+object SignupForm:
+  def apply(): HtmlElement =
+    div(cls := "signup")
+--- after
+package com.orbit.ui.signup
+
+import com.raquo.laminar.api.L.*
+
+final case class SignupState(email: String, acceptedTerms: Boolean)
+
+object SignupForm:
+  def apply(): HtmlElement =
+    val state = Var(SignupState("", false))
+    div(
+      cls := "signup",
+      input(onInput.mapToValue --> state.updater[String]((s, v) => s.copy(email = v)))
+    )
+=== END
+=== EDIT
+note: money value with private constructor declared final class
+--- file: server/src/main/scala/com/acme/ledger/Money.scala
+--- before
+--- after
+package com.acme.ledger
+
+final class Money private (val cents: Long, val currency: String):
+  def plus(other: Money): Option[Money] =
+    Option.when(currency == other.currency)(Money(cents + other.cents, currency))
+
+object Money:
+  def of(cents: Long, currency: String): Option[Money] =
+    Option.when(cents >= 0)(new Money(cents, currency))
+=== END
+=== EDIT
+note: override final def equals on case-insensitive key
+--- file: server/src/main/scala/com/keystone/auth/Username.scala
+--- before
+package com.keystone.auth
+
+class Username(val raw: String):
+  def normalized: String = raw.trim.toLowerCase
+--- after
+package com.keystone.auth
+
+class Username(val raw: String):
+  def normalized: String = raw.trim.toLowerCase
+
+  override final def equals(other: Any): Boolean =
+    other match
+      case u: Username => u.normalized == normalized
+      case _           => false
+
+  override def hashCode: Int = normalized.hashCode
+=== END
+=== EDIT
+note: protected[auth] def on credential verifier trait
+--- file: server/src/main/scala/com/keystone/auth/CredentialVerifier.scala
+--- before
+package com.keystone.auth
+
+import cats.effect.IO
+
+trait CredentialVerifier:
+  def verify(user: String, secret: String): IO[Boolean]
+--- after
+package com.keystone.auth
+
+import cats.effect.IO
+
+trait CredentialVerifier:
+  def verify(user: String, secret: String): IO[Boolean]
+
+  protected[auth] def constantTimeEquals(a: String, b: String): Boolean =
+    a.length == b.length && a.zip(b).forall((x, y) => x == y)
+=== END
+=== EDIT
+note: def Default without parameters on pagination companion
+--- file: server/src/main/scala/com/acme/catalog/Pagination.scala
+--- before
+package com.acme.catalog
+
+case class Pagination(page: Int, size: Int):
+  def offset: Int = page * size
+--- after
+package com.acme.catalog
+
+case class Pagination(page: Int, size: Int):
+  def offset: Int = page * size
+
+object Pagination:
+  def Default: Pagination = Pagination(page = 0, size = 25)
+=== END
+=== EDIT
+note: nowarn on a local val inside a method
+--- file: server/src/main/scala/com/datahive/ingest/CsvReader.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+
+object CsvReader:
+  def header(line: String): IO[List[String]] =
+    IO.pure(line.split(',').toList.map(_.trim))
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import scala.annotation.nowarn
+
+object CsvReader:
+  def header(line: String): IO[List[String]] =
+    @nowarn val columns = line.split(',').toList
+    IO.pure(columns.map(_.trim))
+=== END
+=== EDIT
+note: drop final from service class, fix
+--- file: server/src/main/scala/com/greenleaf/inventory/StockService.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+final class StockService(repo: StockRepository):
+  def available(sku: String): IO[Int] =
+    repo.count(sku)
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+class StockService(repo: StockRepository):
+  def available(sku: String): IO[Int] =
+    repo.count(sku)
+=== END
+=== EDIT
+note: Default as an enum case, not a companion val, near miss
+--- file: server/src/main/scala/com/cartograph/maps/TileStyle.scala
+--- before
+package com.cartograph.maps
+
+enum TileStyle:
+  case Satellite, Terrain
+--- after
+package com.cartograph.maps
+
+enum TileStyle:
+  case Default, Satellite, Terrain
+
+  def layerName: String = this match
+    case Default   => "osm"
+    case Satellite => "sat"
+    case Terrain   => "topo"
+=== END
+=== EDIT
+note: file already has a nowarn, edit adds an unrelated method
+--- file: server/src/main/scala/com/legacy/reports/XmlExport.scala
+--- before
+package com.legacy.reports
+
+import scala.annotation.nowarn
+
+object XmlExport:
+  @nowarn("cat=deprecation")
+  def encode(value: String): String =
+    java.net.URLEncoder.encode(value)
+--- after
+package com.legacy.reports
+
+import scala.annotation.nowarn
+
+object XmlExport:
+  @nowarn("cat=deprecation")
+  def encode(value: String): String =
+    java.net.URLEncoder.encode(value)
+
+  def element(name: String, body: String): String =
+    s"<$name>$body</$name>"
+=== END
+=== EDIT
+note: tapir endpoint for listing berths, clean
+--- file: server/src/main/scala/com/portline/logistics/BerthEndpoints.scala
+--- before
+package com.portline.logistics
+
+import sttp.tapir.*
+
+object BerthEndpoints:
+  val base = endpoint.in("berths")
+--- after
+package com.portline.logistics
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import sttp.tapir.generic.auto.*
+
+object BerthEndpoints:
+  val base = endpoint.in("berths")
+
+  val list =
+    base.get
+      .in(query[Option[String]]("port"))
+      .out(jsonBody[List[Berth]])
+=== END
+=== EDIT
+note: final case class in a scala-cli backfill script
+--- file: scripts/backfill-orders.sc
+--- before
+--- after
+//> using scala 3.5.2
+//> using dep org.typelevel::cats-effect:3.5.4
+
+import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+
+final case class Backfill(fromDay: String, toDay: String, dryRun: Boolean)
+
+val job = Backfill("2026-01-01", "2026-02-01", dryRun = true)
+
+IO.println(s"backfilling ${job.fromDay} to ${job.toDay}").unsafeRunSync()
+=== END
+=== EDIT
+note: munit suite declared as final class
+--- file: server/src/test/scala/com/acme/ledger/MoneySuite.scala
+--- before
+--- after
+package com.acme.ledger
+
+import munit.FunSuite
+
+final class MoneySuite extends FunSuite:
+  test("plus rejects mismatched currencies"):
+    val chf = Money.of(100, "CHF").get
+    val eur = Money.of(100, "EUR").get
+    assertEquals(chf.plus(eur), None)
+=== END
+=== EDIT
+note: final inline def for a unit conversion
+--- file: server/src/main/scala/com/skyline/weather/Units.scala
+--- before
+package com.skyline.weather
+
+object Units:
+  def knotsToKmh(knots: Double): Double = knots * 1.852
+--- after
+package com.skyline.weather
+
+object Units:
+  def knotsToKmh(knots: Double): Double = knots * 1.852
+
+  final inline def hpaToInHg(hpa: Double): Double = hpa * 0.02953
+=== END
+=== EDIT
+note: private[weather] object for station registry
+--- file: server/src/main/scala/com/skyline/weather/Stations.scala
+--- before
+package com.skyline.weather
+
+case class Station(id: String, lat: Double, lon: Double)
+--- after
+package com.skyline.weather
+
+case class Station(id: String, lat: Double, lon: Double)
+
+private[weather] object Stations:
+  val geneva = Station("LSGG", 46.238, 6.109)
+  val zurich = Station("LSZH", 47.458, 8.555)
+
+  def byId(id: String): Option[Station] =
+    List(geneva, zurich).find(_.id == id)
+=== END
+=== EDIT
+note: val Default with type ascription for retry policy
+--- file: server/src/main/scala/com/acme/http/RetryPolicy.scala
+--- before
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+case class RetryPolicy(maxAttempts: Int, backoff: FiniteDuration)
+--- after
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+case class RetryPolicy(maxAttempts: Int, backoff: FiniteDuration)
+
+object RetryPolicy:
+  val Default: RetryPolicy = RetryPolicy(maxAttempts = 3, backoff = 200.millis)
+=== END
+=== EDIT
+note: annotation.nowarn on a given instance
+--- file: server/src/main/scala/com/acme/orders/OrderSchemas.scala
+--- before
+package com.acme.orders
+
+import sttp.tapir.Schema
+
+object OrderSchemas:
+  given Schema[OrderId] = Schema.string
+--- after
+package com.acme.orders
+
+import sttp.tapir.Schema
+
+object OrderSchemas:
+  given Schema[OrderId] = Schema.string
+
+  @annotation.nowarn("msg=unused")
+  given Schema[OrderStatus] = Schema.derivedEnumeration[OrderStatus].defaultStringBased
+=== END
+=== EDIT
+note: remove nowarn by actually using the parameter, fix
+--- file: server/src/main/scala/com/tempo/scheduling/SlotFinder.scala
+--- before
+package com.tempo.scheduling
+
+import scala.annotation.nowarn
+
+object SlotFinder:
+  @nowarn("msg=unused explicit parameter")
+  def free(slots: List[Slot], minutes: Int): List[Slot] =
+    slots.filter(_.open)
+--- after
+package com.tempo.scheduling
+
+object SlotFinder:
+  def free(slots: List[Slot], minutes: Int): List[Slot] =
+    slots.filter(slot => slot.open && slot.lengthMinutes >= minutes)
+=== END
+=== EDIT
+note: replace Default companion with call-site parameter defaults, fix
+--- file: server/src/main/scala/com/acme/mail/MailerConfig.scala
+--- before
+package com.acme.mail
+
+case class MailerConfig(host: String, port: Int, tls: Boolean)
+
+object MailerConfig:
+  val Default = MailerConfig("localhost", 25, tls = false)
+--- after
+package com.acme.mail
+
+case class MailerConfig(host: String, port: Int, tls: Boolean)
+=== END
+=== EDIT
+note: Laminar counter adds derived signal, clean
+--- file: app/src/main/scala/com/orbit/ui/cart/CartBadge.scala
+--- before
+package com.orbit.ui.cart
+
+import com.raquo.laminar.api.L.*
+
+object CartBadge:
+  def apply(items: Signal[Int]): HtmlElement =
+    span(cls := "badge", child.text <-- items.map(_.toString))
+--- after
+package com.orbit.ui.cart
+
+import com.raquo.laminar.api.L.*
+
+object CartBadge:
+  def apply(items: Signal[Int]): HtmlElement =
+    span(
+      cls := "badge",
+      cls("badge-empty") <-- items.map(_ == 0),
+      child.text <-- items.map(_.toString)
+    )
+=== END
+=== EDIT
+note: private[inventory] replaced with plain private, fix
+--- file: server/src/main/scala/com/greenleaf/inventory/Reorder.scala
+--- before
+package com.greenleaf.inventory
+
+object Reorder:
+  def needed(stock: Int, threshold: Int): Boolean =
+    stock < safety(threshold)
+
+  private[inventory] def safety(threshold: Int): Int =
+    threshold + threshold / 5
+--- after
+package com.greenleaf.inventory
+
+object Reorder:
+  def needed(stock: Int, threshold: Int): Boolean =
+    stock < safety(threshold)
+
+  private def safety(threshold: Int): Int =
+    threshold + threshold / 5
+=== END
+=== EDIT
+note: skunk query for active subscriptions, clean
+--- file: server/src/main/scala/com/meterly/billing/SubscriptionQueries.scala
+--- before
+package com.meterly.billing
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object SubscriptionQueries:
+  val byId: Query[Long, String] =
+    sql"SELECT plan FROM subscriptions WHERE id = $int8".query(varchar)
+--- after
+package com.meterly.billing
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object SubscriptionQueries:
+  val byId: Query[Long, String] =
+    sql"SELECT plan FROM subscriptions WHERE id = $int8".query(varchar)
+
+  val activeForCustomer: Query[Long, Long] =
+    sql"SELECT id FROM subscriptions WHERE customer_id = $int8 AND active".query(int8)
+=== END
+=== EDIT
+note: sealed trait with plain case classes, no final, near miss
+--- file: server/src/main/scala/com/acme/payments/PaymentResult.scala
+--- before
+--- after
+package com.acme.payments
+
+enum PaymentResult:
+  case Captured(reference: String, amountCents: Long)
+  case Declined(reason: String)
+  case Pending(retryAfterSeconds: Int)
+
+case class CaptureRequest(orderId: String, amountCents: Long)
+
+class PaymentGateway(client: GatewayClient):
+  def capture(request: CaptureRequest): cats.effect.IO[PaymentResult] =
+    client.post(request)
+=== END

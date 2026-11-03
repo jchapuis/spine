@@ -1,0 +1,846 @@
+=== TURN
+note: [pos factor-out.no-utils-object] extract coordinate helpers into a generic Utils object used by the tile service
+--- file: server/src/main/scala/com/tidewave/maps/Utils.scala
+--- before
+--- after
+package com.tidewave.maps
+
+object Utils:
+  def clampLatitude(lat: Double): Double = lat.max(-85.0511).min(85.0511)
+  def wrapLongitude(lon: Double): Double = ((lon + 180) % 360 + 360) % 360 - 180
+  def tileCount(zoom: Int): Int = 1 << zoom
+--- file: server/src/main/scala/com/tidewave/maps/TileService.scala
+--- before
+package com.tidewave.maps
+
+import cats.effect.IO
+
+class TileService(store: TileStore):
+  def tileAt(lat: Double, lon: Double, zoom: Int): IO[Option[Tile]] =
+    val x = ((lon + 180) / 360 * (1 << zoom)).toInt
+    val y = ((1 - math.log(math.tan(math.toRadians(lat)) + 1 / math.cos(math.toRadians(lat))) / math.Pi) / 2 * (1 << zoom)).toInt
+    store.find(TileKey(zoom, x, y))
+--- after
+package com.tidewave.maps
+
+import cats.effect.IO
+
+class TileService(store: TileStore):
+  def tileAt(lat: Double, lon: Double, zoom: Int): IO[Option[Tile]] =
+    val safeLat = Utils.clampLatitude(lat)
+    val safeLon = Utils.wrapLongitude(lon)
+    val x = ((safeLon + 180) / 360 * Utils.tileCount(zoom)).toInt
+    val y = ((1 - math.log(math.tan(math.toRadians(safeLat)) + 1 / math.cos(math.toRadians(safeLat))) / math.Pi) / 2 * Utils.tileCount(zoom)).toInt
+    store.find(TileKey(zoom, x, y))
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] add a Utils object for temperature conversion in the forecast package plus its test
+--- file: server/src/main/scala/com/meridian/weather/forecast/Utils.scala
+--- before
+--- after
+package com.meridian.weather.forecast
+
+object Utils:
+  def celsiusToFahrenheit(celsius: Double): Double = celsius * 9 / 5 + 32
+  def fahrenheitToCelsius(fahrenheit: Double): Double = (fahrenheit - 32) * 5 / 9
+  def kelvinToCelsius(kelvin: Double): Double = kelvin - 273.15
+--- file: server/src/test/scala/com/meridian/weather/forecast/UtilsSuite.scala
+--- before
+--- after
+package com.meridian.weather.forecast
+
+import munit.FunSuite
+
+class UtilsSuite extends FunSuite:
+  test("freezing point converts to 32F"):
+    assertEquals(Utils.celsiusToFahrenheit(0), 32.0)
+
+  test("boiling point round-trips"):
+    assertEquals(Utils.fahrenheitToCelsius(212), 100.0)
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] nested Utils object inside the route planner companion, used by the planner
+--- file: server/src/main/scala/com/tidewave/routing/RoutePlanner.scala
+--- before
+package com.tidewave.routing
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class RoutePlanner(graph: RoadGraph):
+  def plan(stops: List[Waypoint]): IO[List[Leg]] =
+    stops.zip(stops.drop(1)).traverse: (from, to) =>
+      graph.shortestPath(from.node, to.node).map(path => Leg(from, to, path))
+--- after
+package com.tidewave.routing
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class RoutePlanner(graph: RoadGraph):
+  def plan(stops: List[Waypoint]): IO[List[Leg]] =
+    RoutePlanner.Utils.consecutivePairs(stops).traverse: (from, to) =>
+      graph.shortestPath(from.node, to.node).map(path => Leg(from, to, path))
+
+object RoutePlanner:
+  object Utils:
+    def consecutivePairs[A](items: List[A]): List[(A, A)] = items.zip(items.drop(1))
+--- file: server/src/main/scala/com/tidewave/routing/TripSummary.scala
+--- before
+package com.tidewave.routing
+
+case class TripSummary(legs: List[Leg]):
+  def totalMeters: Long = legs.map(_.path.meters).sum
+--- after
+package com.tidewave.routing
+
+case class TripSummary(legs: List[Leg]):
+  def totalMeters: Long = legs.map(_.path.meters).sum
+  def transitions: List[(Leg, Leg)] = RoutePlanner.Utils.consecutivePairs(legs)
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] add geohash Utils in a shared geo package and call it from the station index and its repository
+--- file: server/src/main/scala/com/meridian/geo/Utils.scala
+--- before
+--- after
+package com.meridian.geo
+
+object Utils:
+  private val Alphabet = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+  def geohashPrefix(hash: String, precision: Int): String = hash.take(precision)
+
+  def isValidGeohash(hash: String): Boolean = hash.nonEmpty && hash.forall(Alphabet.contains)
+--- file: server/src/main/scala/com/meridian/weather/StationIndex.scala
+--- before
+package com.meridian.weather
+
+import cats.effect.IO
+
+class StationIndex(repository: StationRepository):
+  def near(geohash: String): IO[List[Station]] =
+    repository.byGeohashPrefix(geohash.take(5))
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+import com.meridian.geo.Utils
+
+class StationIndex(repository: StationRepository):
+  def near(geohash: String): IO[List[Station]] =
+    if Utils.isValidGeohash(geohash) then repository.byGeohashPrefix(Utils.geohashPrefix(geohash, 5))
+    else IO.pure(List.empty)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same smoothing factor line pasted into three forecast smoothers
+--- file: server/src/main/scala/com/meridian/weather/smoothing/TemperatureSmoother.scala
+--- before
+--- after
+package com.meridian.weather.smoothing
+
+class TemperatureSmoother:
+  def smooth(readings: List[Double]): List[Double] =
+    val alpha = 0.35
+    readings.scanLeft(readings.headOption.getOrElse(0.0))((previous, current) => alpha * current + (1 - alpha) * previous).drop(1)
+--- file: server/src/main/scala/com/meridian/weather/smoothing/PressureSmoother.scala
+--- before
+--- after
+package com.meridian.weather.smoothing
+
+class PressureSmoother:
+  def smooth(readings: List[Double]): List[Double] =
+    val alpha = 0.35
+    readings.scanLeft(readings.headOption.getOrElse(1013.0))((previous, current) => alpha * current + (1 - alpha) * previous).drop(1)
+--- file: server/src/main/scala/com/meridian/weather/smoothing/HumiditySmoother.scala
+--- before
+--- after
+package com.meridian.weather.smoothing
+
+class HumiditySmoother:
+  def smooth(readings: List[Double]): List[Double] =
+    val alpha = 0.35
+    readings.scanLeft(readings.headOption.getOrElse(50.0))((previous, current) => alpha * current + (1 - alpha) * previous).drop(1)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] retry backoff multiplier written inline in two clients and twice more in one
+--- file: server/src/main/scala/com/tidewave/maps/ElevationClient.scala
+--- before
+package com.tidewave.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ElevationClient(http: HttpGateway):
+  def elevation(point: LatLon): IO[Double] =
+    http.getJson[Double](s"/elevation?lat=${point.lat}&lon=${point.lon}")
+--- after
+package com.tidewave.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ElevationClient(http: HttpGateway):
+  def elevation(point: LatLon): IO[Double] =
+    http
+      .getJson[Double](s"/elevation?lat=${point.lat}&lon=${point.lon}")
+      .retrying(RetryPolicy.exponential(200.millis).withMultiplier(1.8))
+--- file: server/src/main/scala/com/tidewave/maps/GeocodeClient.scala
+--- before
+package com.tidewave.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class GeocodeClient(http: HttpGateway):
+  def forward(address: String): IO[List[LatLon]] =
+    http.getJson[List[LatLon]](s"/geocode?q=$address")
+
+  def reverse(point: LatLon): IO[Option[String]] =
+    http.getJson[Option[String]](s"/reverse?lat=${point.lat}&lon=${point.lon}")
+--- after
+package com.tidewave.maps
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class GeocodeClient(http: HttpGateway):
+  def forward(address: String): IO[List[LatLon]] =
+    http
+      .getJson[List[LatLon]](s"/geocode?q=$address")
+      .retrying(RetryPolicy.exponential(200.millis).withMultiplier(1.8))
+
+  def reverse(point: LatLon): IO[Option[String]] =
+    http
+      .getJson[Option[String]](s"/reverse?lat=${point.lat}&lon=${point.lon}")
+      .retrying(RetryPolicy.exponential(200.millis).withMultiplier(1.8))
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] earth radius constant repeated as a local val in three distance calculators
+--- file: server/src/main/scala/com/meridian/geo/Haversine.scala
+--- before
+--- after
+package com.meridian.geo
+
+object Haversine:
+  def distanceKm(a: LatLon, b: LatLon): Double =
+    val earthRadiusKm = 6371.0088
+    val dLat = math.toRadians(b.lat - a.lat)
+    val dLon = math.toRadians(b.lon - a.lon)
+    val h = math.pow(math.sin(dLat / 2), 2) + math.cos(math.toRadians(a.lat)) * math.cos(math.toRadians(b.lat)) * math.pow(math.sin(dLon / 2), 2)
+    2 * earthRadiusKm * math.asin(math.sqrt(h))
+--- file: server/src/main/scala/com/meridian/geo/BoundingBox.scala
+--- before
+--- after
+package com.meridian.geo
+
+case class BoundingBox(south: Double, west: Double, north: Double, east: Double)
+
+object BoundingBox:
+  def around(center: LatLon, radiusKm: Double): BoundingBox =
+    val earthRadiusKm = 6371.0088
+    val dLat = math.toDegrees(radiusKm / earthRadiusKm)
+    val dLon = math.toDegrees(radiusKm / (earthRadiusKm * math.cos(math.toRadians(center.lat))))
+    BoundingBox(center.lat - dLat, center.lon - dLon, center.lat + dLat, center.lon + dLon)
+--- file: server/src/main/scala/com/meridian/geo/Projection.scala
+--- before
+--- after
+package com.meridian.geo
+
+object Projection:
+  def equirectangular(point: LatLon, reference: LatLon): (Double, Double) =
+    val earthRadiusKm = 6371.0088
+    val x = earthRadiusKm * math.toRadians(point.lon - reference.lon) * math.cos(math.toRadians(reference.lat))
+    val y = earthRadiusKm * math.toRadians(point.lat - reference.lat)
+    (x, y)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] each new test re-declares the same local tolerance val
+--- file: server/src/test/scala/com/tidewave/routing/EtaEstimatorSuite.scala
+--- before
+--- after
+package com.tidewave.routing
+
+import munit.FunSuite
+
+class EtaEstimatorSuite extends FunSuite:
+  test("flat road at speed limit"):
+    val eta = EtaEstimator.minutes(distanceKm = 10, speedKmh = 60)
+    val tolerance = 0.001
+    assertEqualsDouble(eta, 10.0, tolerance)
+
+  test("zero distance takes no time"):
+    val eta = EtaEstimator.minutes(distanceKm = 0, speedKmh = 60)
+    val tolerance = 0.001
+    assertEqualsDouble(eta, 0.0, tolerance)
+--- file: server/src/test/scala/com/tidewave/routing/FuelEstimatorSuite.scala
+--- before
+--- after
+package com.tidewave.routing
+
+import munit.FunSuite
+
+class FuelEstimatorSuite extends FunSuite:
+  test("consumption scales with distance"):
+    val litres = FuelEstimator.litres(distanceKm = 100, litresPer100Km = 6)
+    val tolerance = 0.001
+    assertEqualsDouble(litres, 6.0, tolerance)
+
+  test("idle trip burns nothing"):
+    val litres = FuelEstimator.litres(distanceKm = 0, litresPer100Km = 6)
+    val tolerance = 0.001
+    assertEqualsDouble(litres, 0.0, tolerance)
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new wind service copies the precipitation service's import block verbatim
+--- file: server/src/main/scala/com/meridian/weather/PrecipitationService.scala
+--- before
+package com.meridian.weather
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+import java.time.Instant
+
+class PrecipitationService(source: ObservationSource)(using Logger[IO]):
+  def totals(stations: List[StationId], since: Instant): IO[List[Precipitation]] =
+    stations.traverse(source.precipitation(_, since))
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+import java.time.Instant
+
+class PrecipitationService(source: ObservationSource)(using Logger[IO]):
+  def totals(stations: List[StationId], since: Instant): IO[List[Precipitation]] =
+    Logger[IO].info(s"precipitation totals for ${stations.size} stations") *>
+      stations.traverse(source.precipitation(_, since))
+--- file: server/src/main/scala/com/meridian/weather/WindService.scala
+--- before
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+import java.time.Instant
+
+class WindService(source: ObservationSource)(using Logger[IO]):
+  def gusts(stations: List[StationId], since: Instant): IO[List[WindGust]] =
+    Logger[IO].info(s"wind gusts for ${stations.size} stations") *>
+      stations.traverse(source.gusts(_, since))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new http4s routes file reuses the same tapir/http4s imports in a different order
+--- file: server/src/main/scala/com/tidewave/routing/http/RouteEndpoints.scala
+--- before
+--- after
+package com.tidewave.routing.http
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import sttp.tapir.server.http4s.Http4sServerInterpreter
+
+class RouteEndpoints(logic: RouteLogic):
+  private val planEndpoint = endpoint.post.in("routes").in(jsonBody[PlanRequest]).out(jsonBody[PlanResponse])
+
+  val routes: HttpRoutes[IO] =
+    Http4sServerInterpreter[IO]().toRoutes(planEndpoint.serverLogicSuccess(logic.plan))
+--- file: server/src/main/scala/com/tidewave/routing/http/IsochroneEndpoints.scala
+--- before
+--- after
+package com.tidewave.routing.http
+
+import sttp.tapir.*
+import sttp.tapir.json.circe.*
+import cats.effect.IO
+import sttp.tapir.server.http4s.Http4sServerInterpreter
+import org.http4s.HttpRoutes
+
+class IsochroneEndpoints(logic: IsochroneLogic):
+  private val isochroneEndpoint = endpoint.post.in("isochrones").in(jsonBody[IsochroneRequest]).out(jsonBody[IsochroneResponse])
+
+  val routes: HttpRoutes[IO] =
+    Http4sServerInterpreter[IO]().toRoutes(isochroneEndpoint.serverLogicSuccess(logic.compute))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] two skunk repositories in the same change carry an identical import block
+--- file: server/src/main/scala/com/meridian/geo/RegionRepository.scala
+--- before
+--- after
+package com.meridian.geo
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class RegionRepository(pool: Resource[IO, Session[IO]]):
+  private val byCode = sql"SELECT name FROM region WHERE code = $varchar".query(varchar)
+
+  def name(code: String): IO[Option[String]] =
+    pool.use(_.option(byCode)(code))
+--- file: server/src/main/scala/com/meridian/geo/CountryRepository.scala
+--- before
+--- after
+package com.meridian.geo
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class CountryRepository(pool: Resource[IO, Session[IO]]):
+  private val all = sql"SELECT iso2 FROM country ORDER BY iso2".query(bpchar(2))
+
+  def codes: IO[List[String]] =
+    pool.use(_.execute(all))
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] scala-cli report script sums monthly rainfall maps with foldLeft(Map.empty)(_ |+| _)
+--- file: scripts/rainfall-report.sc
+--- before
+--- after
+import cats.syntax.semigroup.*
+import java.time.YearMonth
+
+case class Reading(station: String, month: YearMonth, millimetres: Double)
+
+val readings = List(
+  Reading("GVA", YearMonth.of(2026, 3), 41.2),
+  Reading("ZRH", YearMonth.of(2026, 3), 58.9),
+  Reading("GVA", YearMonth.of(2026, 4), 63.0)
+)
+
+val perStation = readings
+  .map(reading => Map(reading.station -> reading.millimetres))
+  .foldLeft(Map.empty[String, Double])(_ |+| _)
+
+perStation.foreach((station, total) => println(s"$station: $total mm"))
+--- file: scripts/snow-days.sc
+--- before
+--- after
+val snowfallCm = List(0.0, 2.5, 11.0, 0.0, 4.0)
+
+val snowDays = snowfallCm.count(_ > 1)
+
+println(s"snow days: $snowDays")
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] package-less aggregation helper folds route segment stats with Monoid empty
+--- file: server/src/main/scala/SegmentStats.scala
+--- before
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class SegmentStats(meters: Long, seconds: Long, turns: Int)
+
+object SegmentStats:
+  given Monoid[SegmentStats] with
+    def empty: SegmentStats = SegmentStats(0, 0, 0)
+    def combine(a: SegmentStats, b: SegmentStats): SegmentStats =
+      SegmentStats(a.meters + b.meters, a.seconds + b.seconds, a.turns + b.turns)
+
+  def total(segments: List[SegmentStats]): SegmentStats =
+    segments.foldLeft(Monoid[SegmentStats].empty)(_ |+| _)
+--- file: server/src/test/scala/SegmentStatsSuite.scala
+--- before
+--- after
+import munit.FunSuite
+
+class SegmentStatsSuite extends FunSuite:
+  test("total of no segments is zero"):
+    assertEquals(SegmentStats.total(List.empty), SegmentStats(0, 0, 0))
+
+  test("total adds every field"):
+    val segments = List(SegmentStats(100, 20, 1), SegmentStats(250, 40, 2))
+    assertEquals(SegmentStats.total(segments), SegmentStats(350, 60, 3))
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] script merges tile hit counters per zoom with foldLeft(Monoid.empty)(_ |+| _), and adds a sibling script
+--- file: scripts/tile-hits.sc
+--- before
+import cats.syntax.semigroup.*
+
+val logLines = scala.io.Source.fromFile("tile-access.log").getLines().toList
+
+val perZoom = logLines.flatMap(_.split(' ').lift(2)).groupMapReduce(identity)(_ => 1)(_ + _)
+
+println(perZoom)
+--- after
+import cats.kernel.Monoid
+import cats.syntax.semigroup.*
+
+val logLines = scala.io.Source.fromFile("tile-access.log").getLines().toList
+
+val perZoom = logLines
+  .flatMap(_.split(' ').lift(2))
+  .map(zoom => Map(zoom -> 1))
+  .foldLeft(Monoid.empty[Map[String, Int]])(_ |+| _)
+
+println(perZoom)
+--- file: scripts/tile-misses.sc
+--- before
+--- after
+val logLines = scala.io.Source.fromFile("tile-misses.log").getLines().toList
+
+val missing = logLines.filter(_.contains("404")).size
+
+println(s"missing tiles: $missing")
+=== END
+=== TURN
+note: [near cats.foldleft-combine-pattern] script fixed to use combineAll instead of foldLeft(empty)(_ |+| _)
+--- file: scripts/station-uptime.sc
+--- before
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class Uptime(onlineMinutes: Long, offlineMinutes: Long)
+
+given Monoid[Uptime] = Monoid.instance(Uptime(0, 0), (a, b) => Uptime(a.onlineMinutes + b.onlineMinutes, a.offlineMinutes + b.offlineMinutes))
+
+val samples = List(Uptime(1400, 40), Uptime(1440, 0), Uptime(1300, 140))
+
+val total = samples.foldLeft(Monoid[Uptime].empty)(_ |+| _)
+
+println(total)
+--- after
+import cats.Monoid
+import cats.syntax.foldable.*
+
+case class Uptime(onlineMinutes: Long, offlineMinutes: Long)
+
+given Monoid[Uptime] = Monoid.instance(Uptime(0, 0), (a, b) => Uptime(a.onlineMinutes + b.onlineMinutes, a.offlineMinutes + b.offlineMinutes))
+
+val samples = List(Uptime(1400, 40), Uptime(1440, 0), Uptime(1300, 140))
+
+val total = samples.combineAll
+
+println(total)
+--- file: scripts/station-latency.sc
+--- before
+--- after
+val latencies = List(120L, 95L, 210L)
+
+println(s"mean latency: ${latencies.sum / latencies.size} ms")
+=== END
+=== TURN
+note: [near cats.foldleft-combine-pattern] route cost aggregation uses foldMap and a plain numeric foldLeft
+--- file: server/src/main/scala/com/tidewave/routing/CostModel.scala
+--- before
+package com.tidewave.routing
+
+import cats.Monoid
+
+case class Cost(tolls: BigDecimal, fuel: BigDecimal)
+
+object Cost:
+  given Monoid[Cost] = Monoid.instance(Cost(0, 0), (a, b) => Cost(a.tolls + b.tolls, a.fuel + b.fuel))
+--- after
+package com.tidewave.routing
+
+import cats.Monoid
+import cats.syntax.foldable.*
+
+case class Cost(tolls: BigDecimal, fuel: BigDecimal)
+
+object Cost:
+  given Monoid[Cost] = Monoid.instance(Cost(0, 0), (a, b) => Cost(a.tolls + b.tolls, a.fuel + b.fuel))
+
+  def ofLegs(legs: List[Leg]): Cost = legs.foldMap(leg => Cost(leg.tolls, leg.fuel))
+
+  def totalMeters(legs: List[Leg]): Long = legs.foldLeft(0L)(_ + _.meters)
+--- file: server/src/test/scala/com/tidewave/routing/CostModelSuite.scala
+--- before
+--- after
+package com.tidewave.routing
+
+import munit.FunSuite
+
+class CostModelSuite extends FunSuite:
+  test("no legs cost nothing"):
+    assertEquals(Cost.ofLegs(List.empty), Cost(0, 0))
+=== END
+=== TURN
+note: [near factor-out.repeated-numeric-literal] wind chill coefficients extracted to named constants referenced from two calculators
+--- file: server/src/main/scala/com/meridian/weather/comfort/WindChill.scala
+--- before
+--- after
+package com.meridian.weather.comfort
+
+object WindChill:
+  val Offset = 13.12
+  val TemperatureFactor = 0.6215
+  val WindFactor = 11.37
+  val CrossFactor = 0.3965
+
+  def celsius(temperature: Double, windKmh: Double): Double =
+    val windTerm = math.pow(windKmh, 0.16)
+    Offset + TemperatureFactor * temperature - WindFactor * windTerm + CrossFactor * temperature * windTerm
+--- file: server/src/main/scala/com/meridian/weather/comfort/FeelsLike.scala
+--- before
+package com.meridian.weather.comfort
+
+object FeelsLike:
+  def celsius(temperature: Double, windKmh: Double, humidity: Double): Double =
+    if temperature <= 10 then temperature else HeatIndex.celsius(temperature, humidity)
+--- after
+package com.meridian.weather.comfort
+
+object FeelsLike:
+  def celsius(temperature: Double, windKmh: Double, humidity: Double): Double =
+    if temperature <= 10 && windKmh > 4.8 then WindChill.celsius(temperature, windKmh)
+    else if temperature <= 10 then temperature
+    else HeatIndex.celsius(temperature, humidity)
+=== END
+=== TURN
+note: [near factor-out.repeated-numeric-literal] zoom scale factor used only twice across two files
+--- file: server/src/main/scala/com/tidewave/maps/ScaleBar.scala
+--- before
+--- after
+package com.tidewave.maps
+
+object ScaleBar:
+  def metersPerPixel(latitude: Double, zoom: Int): Double =
+    156543.03392 * math.cos(math.toRadians(latitude)) / math.pow(2, zoom)
+--- file: server/src/main/scala/com/tidewave/maps/Viewport.scala
+--- before
+package com.tidewave.maps
+
+case class Viewport(center: LatLon, zoom: Int, widthPx: Int, heightPx: Int)
+--- after
+package com.tidewave.maps
+
+case class Viewport(center: LatLon, zoom: Int, widthPx: Int, heightPx: Int):
+  def widthMeters: Double =
+    widthPx * 156543.03392 * math.cos(math.toRadians(center.lat)) / math.pow(2, zoom)
+=== END
+=== TURN
+note: [near factor-out.duplicate-import-block] two new services share most imports but one adds fs2, so blocks differ
+--- file: server/src/main/scala/com/meridian/weather/alerts/AlertService.scala
+--- before
+--- after
+package com.meridian.weather.alerts
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+
+class AlertService(rules: AlertRules, notifier: Notifier)(using Logger[IO]):
+  def evaluate(observations: List[Observation]): IO[List[Alert]] =
+    val alerts = observations.flatMap(rules.triggered)
+    alerts.traverse(alert => notifier.send(alert).as(alert))
+--- file: server/src/main/scala/com/meridian/weather/alerts/AlertFeed.scala
+--- before
+--- after
+package com.meridian.weather.alerts
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import fs2.Stream
+import org.typelevel.log4cats.Logger
+
+class AlertFeed(service: AlertService, source: ObservationSource)(using Logger[IO]):
+  def stream: Stream[IO, Alert] =
+    source.observations
+      .groupWithin(100, scala.concurrent.duration.FiniteDuration(5, "seconds"))
+      .evalMap(chunk => service.evaluate(chunk.toList))
+      .flatMap(Stream.emits)
+=== END
+=== TURN
+note: [near factor-out.no-utils-object] polyline helpers placed in a domain-named Polyline module with extension methods instead of Utils
+--- file: server/src/main/scala/com/tidewave/maps/Polyline.scala
+--- before
+--- after
+package com.tidewave.maps
+
+opaque type Polyline = List[LatLon]
+
+object Polyline:
+  def apply(points: List[LatLon]): Polyline = points
+
+  extension (polyline: Polyline)
+    def points: List[LatLon] = polyline
+    def simplified(step: Int): Polyline = polyline.zipWithIndex.collect:
+      case (point, index) if index % step == 0 => point
+--- file: server/src/main/scala/com/tidewave/maps/TrackExporter.scala
+--- before
+package com.tidewave.maps
+
+class TrackExporter:
+  def export(points: List[LatLon]): String =
+    points.map(point => s"${point.lat},${point.lon}").mkString(";")
+--- after
+package com.tidewave.maps
+
+class TrackExporter:
+  def export(points: List[LatLon]): String =
+    Polyline(points).simplified(3).points.map(point => s"${point.lat},${point.lon}").mkString(";")
+=== END
+=== TURN
+note: [near factor-out.no-utils-object] existing Utils object untouched while the edit changes another part of the file and a caller
+--- file: server/src/main/scala/com/meridian/routing/Utils.scala
+--- before
+package com.meridian.routing
+
+object Utils:
+  def kmhToMs(kmh: Double): Double = kmh / 3.6
+--- after
+package com.meridian.routing
+
+object Utils:
+  def kmhToMs(kmh: Double): Double = kmh / 3.6
+  def msToKmh(ms: Double): Double = ms * 3.6
+--- file: server/src/main/scala/com/meridian/routing/SpeedProfile.scala
+--- before
+package com.meridian.routing
+
+case class SpeedProfile(motorwayKmh: Int, urbanKmh: Int)
+--- after
+package com.meridian.routing
+
+case class SpeedProfile(motorwayKmh: Int, urbanKmh: Int):
+  def motorwayMs: Double = Utils.kmhToMs(motorwayKmh)
+=== END
+=== TURN
+note: [clean] add a forecast horizon parameter to the forecast service and its test
+--- file: server/src/main/scala/com/meridian/weather/ForecastService.scala
+--- before
+package com.meridian.weather
+
+import cats.effect.IO
+
+class ForecastService(model: ForecastModel):
+  def forecast(station: StationId): IO[List[HourlyForecast]] =
+    model.predict(station, hours = 24)
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+
+class ForecastService(model: ForecastModel):
+  def forecast(station: StationId, horizon: ForecastHorizon): IO[List[HourlyForecast]] =
+    model.predict(station, hours = horizon.hours)
+--- file: server/src/test/scala/com/meridian/weather/ForecastServiceSuite.scala
+--- before
+package com.meridian.weather
+
+import cats.effect.IO
+import munit.CatsEffectSuite
+
+class ForecastServiceSuite extends CatsEffectSuite:
+  test("forecast returns one entry per hour"):
+    val service = ForecastService(FixedModel)
+    service.forecast(StationId("GVA")).map(result => assertEquals(result.size, 24))
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+import munit.CatsEffectSuite
+
+class ForecastServiceSuite extends CatsEffectSuite:
+  test("forecast returns one entry per hour of the horizon"):
+    val service = ForecastService(FixedModel)
+    service.forecast(StationId("GVA"), ForecastHorizon.TwoDays).map(result => assertEquals(result.size, 48))
+=== END
+=== TURN
+note: [clean] add a closed enum for road classes and use it in the edge type
+--- file: server/src/main/scala/com/tidewave/routing/RoadClass.scala
+--- before
+--- after
+package com.tidewave.routing
+
+enum RoadClass:
+  case Motorway, Primary, Secondary, Residential, Track
+--- file: server/src/main/scala/com/tidewave/routing/Edge.scala
+--- before
+package com.tidewave.routing
+
+case class Edge(from: NodeId, to: NodeId, meters: Long)
+--- after
+package com.tidewave.routing
+
+case class Edge(from: NodeId, to: NodeId, meters: Long, roadClass: RoadClass):
+  def drivable: Boolean = roadClass != RoadClass.Track
+=== END
+=== TURN
+note: [clean] wire the geocode endpoint logic to a cache and log cache misses
+--- file: server/src/main/scala/com/meridian/geo/GeocodeLogic.scala
+--- before
+package com.meridian.geo
+
+import cats.effect.IO
+
+class GeocodeLogic(client: GeocodeClient):
+  def lookup(query: String): IO[List[Place]] =
+    client.search(query)
+--- after
+package com.meridian.geo
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class GeocodeLogic(client: GeocodeClient, cache: PlaceCache)(using Logger[IO]):
+  def lookup(query: String): IO[List[Place]] =
+    cache.get(query).flatMap:
+      case Some(places) => IO.pure(places)
+      case None =>
+        Logger[IO].debug(s"geocode cache miss for $query") *>
+          client.search(query).flatTap(cache.put(query, _))
+--- file: server/src/main/scala/com/meridian/geo/PlaceCache.scala
+--- before
+--- after
+package com.meridian.geo
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class PlaceCache(entries: Ref[IO, Map[String, List[Place]]]):
+  def get(query: String): IO[Option[List[Place]]] = entries.get.map(_.get(query))
+  def put(query: String, places: List[Place]): IO[Unit] = entries.update(_.updated(query, places))
+=== END
+=== TURN
+note: [clean] add a streaming observation ingester and register it in the app wiring
+--- file: server/src/main/scala/com/meridian/weather/ingest/ObservationIngester.scala
+--- before
+--- after
+package com.meridian.weather.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class ObservationIngester(feed: ObservationFeed, repository: ObservationRepository):
+  def run: Stream[IO, Unit] =
+    feed.observations
+      .groupWithin(500, 2.seconds)
+      .evalMap(chunk => repository.insertMany(chunk.toList))
+--- file: server/src/main/scala/com/meridian/weather/WeatherApp.scala
+--- before
+package com.meridian.weather
+
+import cats.effect.IO
+import cats.effect.IOApp
+
+object WeatherApp extends IOApp.Simple:
+  def run: IO[Unit] =
+    Wiring.server.useForever
+--- after
+package com.meridian.weather
+
+import cats.effect.IO
+import cats.effect.IOApp
+import com.meridian.weather.ingest.ObservationIngester
+
+object WeatherApp extends IOApp.Simple:
+  def run: IO[Unit] =
+    Wiring.resources.use: resources =>
+      val ingester = ObservationIngester(resources.feed, resources.observations)
+      ingester.run.compile.drain.both(Wiring.server.useForever).void
+=== END

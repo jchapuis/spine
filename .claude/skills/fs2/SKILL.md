@@ -10,7 +10,7 @@ mechanical_checks:
   - id: fs2.no-unbounded-par-eval-map
     tool: ripgrep
     severity: error
-    pattern: '\.parEvalMap(Unbounded|Unordered)\s*\('
+    pattern: '\.parEvalMap(Unordered)?Unbounded\b'
     files_must_import: ['^import fs2']
     message: 'Use `.parEvalMap(n)` with an explicit bound — never the unbounded variants in production pipelines'
     references: ['fs2#parallelism']

@@ -25,7 +25,16 @@ if [ ! -d "$KEV_DIR/.git" ]; then
 fi
 
 cd "$KEV_DIR"
+echo "kev-serve: serving $MODEL on http://127.0.0.1:$PORT  (Ctrl-C to stop)"
+if [ -e /dev/kfd ]; then
+  # AMD GPU: kev's lock resolves the CUDA torch build, so the ROCm one goes into the venv by hand and is run without
+  # `uv run`, which would sync it back. fla supplies the fused kernels; HIP graphs do not fit in 16 GB of VRAM.
+  echo "kev-serve: installing ROCm deps (first run downloads torch)…"
+  uv venv --allow-existing --python 3.13
+  uv pip install --index-url https://download.pytorch.org/whl/rocm6.4 "torch==2.8.0+rocm6.4"
+  uv pip install -e ".[serve]" "flash-linear-attention==0.5.2"
+  KEV_CUDA_GRAPHS="${KEV_CUDA_GRAPHS:-0}" exec .venv/bin/python -m kev.serve --run "$MODEL" --port "$PORT"
+fi
 echo "kev-serve: syncing deps (first run downloads torch/mlx; the model downloads on first serve)…"
 uv sync --extra serve
-echo "kev-serve: serving $MODEL on http://127.0.0.1:$PORT  (Ctrl-C to stop)"
 exec uv run --extra serve python -m kev.serve --run "$MODEL" --port "$PORT"

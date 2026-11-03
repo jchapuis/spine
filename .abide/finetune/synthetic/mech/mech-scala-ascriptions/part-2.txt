@@ -1,0 +1,681 @@
+=== EDIT
+note: private val holding a regex, ascribed with Regex
+--- file: server/src/main/scala/com/codeshop/search/QueryParser.scala
+--- before
+package com.codeshop.search
+
+object QueryParser:
+  def terms(query: String): List[String] =
+    query.split("\\s+").toList.filter(_.nonEmpty)
+--- after
+package com.codeshop.search
+
+import scala.util.matching.Regex
+
+object QueryParser:
+  private val quoted: Regex = "\"([^\"]+)\"".r
+
+  def terms(query: String): List[String] =
+    val phrases = quoted.findAllMatchIn(query).map(_.group(1)).toList
+    val rest = quoted.replaceAllIn(query, " ")
+    phrases ++ rest.split("\\s+").toList.filter(_.nonEmpty)
+=== END
+=== EDIT
+note: local val with Option ascription inside a service method
+--- file: server/src/main/scala/com/harbor/booking/BookingService.scala
+--- before
+package com.harbor.booking
+
+import cats.effect.IO
+
+case class Berth(id: String, lengthMeters: Int)
+
+class BookingService(berths: List[Berth]):
+  def assign(boatLength: Int): IO[Option[Berth]] =
+    IO.pure(berths.find(_.lengthMeters >= boatLength))
+--- after
+package com.harbor.booking
+
+import cats.effect.IO
+
+case class Berth(id: String, lengthMeters: Int)
+
+class BookingService(berths: List[Berth]):
+  def assign(boatLength: Int): IO[Option[Berth]] =
+    val tightest: Option[Berth] =
+      berths.filter(_.lengthMeters >= boatLength).minByOption(_.lengthMeters)
+    IO.pure(tightest)
+=== END
+=== EDIT
+note: private def returning IO[Unit] added to a notifier
+--- file: server/src/main/scala/com/beacon/notifications/EmailNotifier.scala
+--- before
+package com.beacon.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class EmailNotifier(send: (String, String) => IO[Unit])(using Logger[IO]):
+  def notify(address: String, body: String): IO[Unit] =
+    send(address, body)
+--- after
+package com.beacon.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class EmailNotifier(send: (String, String) => IO[Unit])(using Logger[IO]):
+  def notify(address: String, body: String): IO[Unit] =
+    send(address, body).handleErrorWith(logFailure(address))
+
+  private def logFailure(address: String)(error: Throwable): IO[Unit] =
+    Logger[IO].warn(error)(s"email to $address failed")
+=== END
+=== EDIT
+note: private[this] val with an ascription
+--- file: server/src/main/scala/com/volta/energy/MeterReader.scala
+--- before
+package com.volta.energy
+
+import cats.effect.IO
+
+class MeterReader(poll: String => IO[Double]):
+  def kwh(meterId: String): IO[Double] =
+    poll(meterId).map(_ / 1000)
+--- after
+package com.volta.energy
+
+import cats.effect.IO
+
+class MeterReader(poll: String => IO[Double]):
+  private[this] val wattHoursPerKwh: Double = 1000
+
+  def kwh(meterId: String): IO[Double] =
+    poll(meterId).map(_ / wattHoursPerKwh)
+=== END
+=== EDIT
+note: nested local def in a recursive helper keeps its return type, gate still flags local defs
+--- file: server/src/main/scala/com/acme/ledger/BalanceWalker.scala
+--- before
+package com.acme.ledger
+
+case class Entry(account: String, cents: Long)
+
+object BalanceWalker:
+  def runningTotals(entries: List[Entry]): List[Long] =
+    entries.scanLeft(0L)((acc, e) => acc + e.cents).tail
+--- after
+package com.acme.ledger
+
+import scala.annotation.tailrec
+
+case class Entry(account: String, cents: Long)
+
+object BalanceWalker:
+  def runningTotals(entries: List[Entry]): List[Long] =
+    entries.scanLeft(0L)((acc, e) => acc + e.cents).tail
+
+  def firstOverdraft(entries: List[Entry]): Option[Int] =
+    @tailrec
+    def loop(rest: List[Entry], balance: Long, index: Int): Option[Int] =
+      rest match
+        case Nil => None
+        case e :: tail =>
+          val next = balance + e.cents
+          if next < 0 then Some(index) else loop(tail, next, index + 1)
+    loop(entries, 0L, 0)
+=== END
+=== EDIT
+note: public recursive def with return type, member not local, no fire
+--- file: server/src/main/scala/com/orbit/maps/QuadKey.scala
+--- before
+package com.orbit.maps
+
+object QuadKey:
+  def depth(key: String): Int = key.length
+--- after
+package com.orbit.maps
+
+object QuadKey:
+  def depth(key: String): Int = key.length
+
+  def ancestors(key: String): List[String] =
+    if key.isEmpty then Nil else key :: ancestors(key.dropRight(1))
+=== END
+=== EDIT
+note: protected def with type parameter on a generic Tapir endpoint base
+--- file: server/src/main/scala/com/lumen/auth/SecuredEndpoints.scala
+--- before
+package com.lumen.auth
+
+import sttp.tapir.*
+
+trait SecuredEndpoints:
+  val base = endpoint.securityIn(auth.bearer[String]())
+--- after
+package com.lumen.auth
+
+import sttp.tapir.*
+
+trait SecuredEndpoints:
+  val base = endpoint.securityIn(auth.bearer[String]())
+
+  protected def versioned[A](path: String, input: EndpointInput[A]): EndpointInput[A] =
+    "v1" / path / input
+=== END
+=== EDIT
+note: override protected def keeps ascription, line starts with override so ripgrep pattern misses it
+--- file: server/src/main/scala/com/acme/catalog/ProductRepository.scala
+--- before
+package com.acme.catalog
+
+import cats.effect.IO
+import skunk.Session
+
+class ProductRepository(session: Session[IO]) extends BaseRepository(session):
+  def all: IO[List[String]] = IO.pure(Nil)
+--- after
+package com.acme.catalog
+
+import cats.effect.IO
+import skunk.Session
+
+class ProductRepository(session: Session[IO]) extends BaseRepository(session):
+  def all: IO[List[String]] = IO.pure(Nil)
+
+  override protected def tableName(suffix: String): String =
+    s"product_$suffix"
+=== END
+=== EDIT
+note: clean edit, adds a munit test for QuadKey
+--- file: server/src/test/scala/com/orbit/maps/QuadKeySuite.scala
+--- before
+--- after
+package com.orbit.maps
+
+import munit.FunSuite
+
+class QuadKeySuite extends FunSuite:
+  test("ancestors walk up to the root"):
+    assertEquals(QuadKey.ancestors("021"), List("021", "02", "0"))
+
+  test("empty key has no ancestors"):
+    assertEquals(QuadKey.ancestors(""), Nil)
+=== END
+=== EDIT
+note: local val with ascription in a munit test body
+--- file: server/src/test/scala/com/acme/billing/InvoiceTotalsSuite.scala
+--- before
+--- after
+package com.acme.billing
+
+import munit.CatsEffectSuite
+
+class InvoiceTotalsSuite extends CatsEffectSuite:
+  test("net total multiplies quantity by unit price"):
+    val lines: List[LineItem] = List(LineItem("A", 2, 150L), LineItem("B", 1, 99L))
+    assertEquals(InvoiceTotals(lines).netCents, 399L)
+
+  test("gross total adds vat"):
+    InvoiceTotals(List(LineItem("A", 1, 1000L))).grossCents.assertEquals(1077L)
+=== END
+=== EDIT
+note: private val ascription dropped and replaced by a typed constructor (fix edit)
+--- file: server/src/main/scala/com/harbor/booking/WaitList.scala
+--- before
+package com.harbor.booking
+
+import scala.collection.immutable.Queue
+
+class WaitList:
+  private val empty: Queue[String] = Queue.empty
+
+  def start: Queue[String] = empty
+--- after
+package com.harbor.booking
+
+import scala.collection.immutable.Queue
+
+class WaitList:
+  private val empty = Queue.empty[String]
+
+  def start: Queue[String] = empty
+=== END
+=== EDIT
+note: private def in Laminar component returning HtmlElement
+--- file: app/src/main/scala/com/tempo/scheduling/ui/CalendarGrid.scala
+--- before
+package com.tempo.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+class CalendarGrid(days: List[String]):
+  def render: HtmlElement =
+    div(cls := "grid", days.map(d => div(d)))
+--- after
+package com.tempo.scheduling.ui
+
+import com.raquo.laminar.api.L.*
+
+class CalendarGrid(days: List[String]):
+  def render: HtmlElement =
+    div(cls := "grid", days.map(dayCell))
+
+  private def dayCell(day: String): HtmlElement =
+    div(cls := "day", span(cls := "label", day))
+=== END
+=== EDIT
+note: local val ascription in Laminar render method
+--- file: app/src/main/scala/com/quanta/analytics/ui/ChartPanel.scala
+--- before
+package com.quanta.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object ChartPanel:
+  def apply(points: Signal[List[Double]]): HtmlElement =
+    div(cls := "chart", child.text <-- points.map(_.size.toString))
+--- after
+package com.quanta.analytics.ui
+
+import com.raquo.laminar.api.L.*
+
+object ChartPanel:
+  def apply(points: Signal[List[Double]]): HtmlElement =
+    val maxLabel: Signal[String] = points.map(_.maxOption.fold("-")(_.toString))
+    div(
+      cls := "chart",
+      child.text <-- points.map(_.size.toString),
+      span(cls := "max", child.text <-- maxLabel)
+    )
+=== END
+=== EDIT
+note: pre-existing protected def ascription untouched, edit changes a public method body
+--- file: server/src/main/scala/com/lumen/auth/HeaderVerifier.scala
+--- before
+package com.lumen.auth
+
+import cats.effect.IO
+
+class HeaderVerifier(known: Set[String]):
+  def verify(header: String): IO[Boolean] =
+    IO.pure(token(header).exists(known.contains))
+
+  protected def token(header: String): Option[String] =
+    Option(header.stripPrefix("Bearer ")).filter(_.nonEmpty)
+--- after
+package com.lumen.auth
+
+import cats.effect.IO
+
+class HeaderVerifier(known: Set[String]):
+  def verify(header: String): IO[Boolean] =
+    IO.pure(token(header.trim).exists(known.contains))
+
+  protected def token(header: String): Option[String] =
+    Option(header.stripPrefix("Bearer ")).filter(_.nonEmpty)
+=== END
+=== EDIT
+note: private val Map ascription in a currency converter
+--- file: server/src/main/scala/com/payflow/payments/CurrencyConverter.scala
+--- before
+package com.payflow.payments
+
+object CurrencyConverter:
+  def toChf(amount: BigDecimal, currency: String): Option[BigDecimal] =
+    if currency == "CHF" then Some(amount) else None
+--- after
+package com.payflow.payments
+
+object CurrencyConverter:
+  private val rates: Map[String, BigDecimal] = Map(
+    "CHF" -> BigDecimal(1),
+    "EUR" -> BigDecimal("0.94"),
+    "USD" -> BigDecimal("0.88")
+  )
+
+  def toChf(amount: BigDecimal, currency: String): Option[BigDecimal] =
+    rates.get(currency).map(amount * _)
+=== END
+=== EDIT
+note: identifier containing private and val words, no ascription
+--- file: server/src/main/scala/com/codeshop/compliance/VisibilityReport.scala
+--- before
+package com.codeshop.compliance
+
+case class VisibilityReport(publicCount: Int)
+--- after
+package com.codeshop.compliance
+
+case class VisibilityReport(publicCount: Int, privateValCount: Int):
+  def privateRatio = privateValCount.toDouble / (publicCount + privateValCount).max(1)
+=== END
+=== EDIT
+note: local def with ascribed return type inside a fold helper
+--- file: server/src/main/scala/com/volta/energy/TariffCalculator.scala
+--- before
+package com.volta.energy
+
+case class Usage(hour: Int, kwh: Double)
+
+object TariffCalculator:
+  def cost(usages: List[Usage]): BigDecimal =
+    usages.map(u => BigDecimal(u.kwh) * BigDecimal("0.27")).sum
+--- after
+package com.volta.energy
+
+case class Usage(hour: Int, kwh: Double)
+
+object TariffCalculator:
+  def cost(usages: List[Usage]): BigDecimal =
+    def rate(hour: Int): BigDecimal =
+      if hour >= 22 || hour < 6 then BigDecimal("0.19") else BigDecimal("0.27")
+    usages.map(u => BigDecimal(u.kwh) * rate(u.hour)).sum
+=== END
+=== EDIT
+note: private def with two parameter lists and Stream return type
+--- file: server/src/main/scala/com/fleetline/fleet/PositionFeed.scala
+--- before
+package com.fleetline.fleet
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+case class Position(vehicleId: String, lat: Double, lon: Double)
+
+class PositionFeed(latest: String => IO[Position]):
+  def track(vehicleId: String): Stream[IO, Position] =
+    Stream.awakeEvery[IO](5.seconds).evalMap(_ => latest(vehicleId))
+--- after
+package com.fleetline.fleet
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+case class Position(vehicleId: String, lat: Double, lon: Double)
+
+class PositionFeed(latest: String => IO[Position]):
+  def track(vehicleId: String): Stream[IO, Position] =
+    polling(vehicleId)(5.seconds).changes
+
+  private def polling(vehicleId: String)(every: FiniteDuration): Stream[IO, Position] =
+    Stream.awakeEvery[IO](every).evalMap(_ => latest(vehicleId))
+=== END
+=== EDIT
+note: clean edit, rename a method parameter in a public API
+--- file: server/src/main/scala/com/fleetline/fleet/VehicleRegistry.scala
+--- before
+package com.fleetline.fleet
+
+import cats.effect.IO
+
+trait VehicleRegistry:
+  def lookup(id: String): IO[Option[String]]
+--- after
+package com.fleetline.fleet
+
+import cats.effect.IO
+
+trait VehicleRegistry:
+  def lookup(vehicleId: String): IO[Option[String]]
+  def register(vehicleId: String, plate: String): IO[Unit]
+=== END
+=== EDIT
+note: protected lazy val ascribed in an abstract http client
+--- file: server/src/main/scala/com/skyline/weather/StationClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.Uri
+import org.http4s.client.Client
+
+abstract class StationClient(client: Client[IO], baseUri: Uri):
+  def fetch(stationId: String): IO[String] =
+    client.expect[String](baseUri / "stations" / stationId)
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.Uri
+import org.http4s.client.Client
+
+abstract class StationClient(client: Client[IO], baseUri: Uri):
+  protected lazy val stationsRoot: Uri = baseUri / "stations"
+
+  def fetch(stationId: String): IO[String] =
+    client.expect[String](stationsRoot / stationId)
+=== END
+=== EDIT
+note: local val inside an IO.flatMap lambda block ascribed with a case class type
+--- file: server/src/main/scala/com/harbor/booking/InvoiceMailer.scala
+--- before
+package com.harbor.booking
+
+import cats.effect.IO
+
+case class Mail(to: String, subject: String, body: String)
+
+class InvoiceMailer(send: Mail => IO[Unit], lookupEmail: String => IO[String]):
+  def mail(berthId: String, total: BigDecimal): IO[Unit] =
+    lookupEmail(berthId).flatMap(to => send(Mail(to, "Invoice", total.toString)))
+--- after
+package com.harbor.booking
+
+import cats.effect.IO
+
+case class Mail(to: String, subject: String, body: String)
+
+class InvoiceMailer(send: Mail => IO[Unit], lookupEmail: String => IO[String]):
+  def mail(berthId: String, total: BigDecimal): IO[Unit] =
+    lookupEmail(berthId).flatMap: to =>
+      val mail: Mail = Mail(to, s"Invoice for berth $berthId", s"Total: CHF $total")
+      send(mail)
+=== END
+=== EDIT
+note: private def ascription removed from helper (fix edit)
+--- file: server/src/main/scala/com/codeshop/search/Highlighter.scala
+--- before
+package com.codeshop.search
+
+object Highlighter:
+  def highlight(text: String, term: String): String =
+    text.replace(term, wrap(term))
+
+  private def wrap(term: String): String = s"<mark>$term</mark>"
+--- after
+package com.codeshop.search
+
+object Highlighter:
+  def highlight(text: String, term: String): String =
+    text.replace(term, wrap(term))
+
+  private def wrap(term: String) = s"<mark>$term</mark>"
+=== END
+=== EDIT
+note: private def with tuple return type in a geo helper
+--- file: server/src/main/scala/com/orbit/geo/BoundingBox.scala
+--- before
+package com.orbit.geo
+
+case class Point(lat: Double, lon: Double)
+
+case class BoundingBox(southWest: Point, northEast: Point)
+
+object BoundingBox:
+  def around(points: List[Point]): Option[BoundingBox] =
+    Option.when(points.nonEmpty):
+      BoundingBox(
+        Point(points.map(_.lat).min, points.map(_.lon).min),
+        Point(points.map(_.lat).max, points.map(_.lon).max)
+      )
+--- after
+package com.orbit.geo
+
+case class Point(lat: Double, lon: Double)
+
+case class BoundingBox(southWest: Point, northEast: Point)
+
+object BoundingBox:
+  def around(points: List[Point]): Option[BoundingBox] =
+    Option.when(points.nonEmpty):
+      val (minLat, maxLat) = range(points.map(_.lat))
+      val (minLon, maxLon) = range(points.map(_.lon))
+      BoundingBox(Point(minLat, minLon), Point(maxLat, maxLon))
+
+  private def range(values: List[Double]): (Double, Double) =
+    (values.min, values.max)
+=== END
+=== EDIT
+note: public val with type ascription on an object, public API is fine
+--- file: server/src/main/scala/com/payflow/payments/PaymentsConfig.scala
+--- before
+package com.payflow.payments
+
+import scala.concurrent.duration.*
+
+object PaymentsConfig:
+  val captureTimeout = 30.seconds
+--- after
+package com.payflow.payments
+
+import scala.concurrent.duration.*
+
+object PaymentsConfig:
+  val captureTimeout: FiniteDuration = 30.seconds
+  val maxRetries: Int = 3
+=== END
+=== EDIT
+note: local val ascription in a case clause of a match
+--- file: server/src/main/scala/com/fleetline/fleet/Dispatcher.scala
+--- before
+package com.fleetline.fleet
+
+enum Request:
+  case Pickup(address: String)
+  case Return(vehicleId: String)
+
+object Dispatcher:
+  def describe(request: Request): String =
+    request match
+      case Request.Pickup(address)  => s"pickup at $address"
+      case Request.Return(vehicleId) => s"return $vehicleId"
+--- after
+package com.fleetline.fleet
+
+enum Request:
+  case Pickup(address: String)
+  case Return(vehicleId: String)
+
+object Dispatcher:
+  def describe(request: Request): String =
+    request match
+      case Request.Pickup(address) =>
+        val street: String = address.takeWhile(_ != ',')
+        s"pickup at $street"
+      case Request.Return(vehicleId) => s"return $vehicleId"
+=== END
+=== EDIT
+note: clean edit, adds a skunk command to a repository without ascriptions on private members
+--- file: server/src/main/scala/com/acme/ledger/EntryRepository.scala
+--- before
+package com.acme.ledger
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class EntryRepository(session: Session[IO]):
+  private val count = sql"select count(*) from entry".query(int8)
+
+  def total: IO[Long] = session.unique(count)
+--- after
+package com.acme.ledger
+
+import cats.effect.IO
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+class EntryRepository(session: Session[IO]):
+  private val count = sql"select count(*) from entry".query(int8)
+  private val insert = sql"insert into entry (account, cents) values ($text, $int8)".command
+
+  def total: IO[Long] = session.unique(count)
+
+  def add(account: String, cents: Long): IO[Unit] =
+    session.prepare(insert).flatMap(_.execute((account, cents))).void
+=== END
+=== EDIT
+note: private val Ordering given as explicit val with ascription
+--- file: server/src/main/scala/com/codeshop/search/Ranking.scala
+--- before
+package com.codeshop.search
+
+case class Hit(docId: String, score: Double)
+
+object Ranking:
+  def rank(hits: List[Hit]): List[Hit] =
+    hits.sortBy(-_.score)
+--- after
+package com.codeshop.search
+
+case class Hit(docId: String, score: Double)
+
+object Ranking:
+  private val byScoreThenId: Ordering[Hit] =
+    Ordering.by[Hit, Double](-_.score).orElseBy(_.docId)
+
+  def rank(hits: List[Hit]): List[Hit] =
+    hits.sorted(using byScoreThenId)
+=== END
+=== EDIT
+note: local val ascription removed in a forecast method (fix edit)
+--- file: server/src/main/scala/com/skyline/weather/RainOutlook.scala
+--- before
+package com.skyline.weather
+
+object RainOutlook:
+  def label(probabilities: List[Double]): String =
+    val peak: Double = probabilities.maxOption.getOrElse(0.0)
+    if peak > 0.6 then "rain likely" else "mostly dry"
+--- after
+package com.skyline.weather
+
+object RainOutlook:
+  def label(probabilities: List[Double]): String =
+    val peak = probabilities.maxOption.getOrElse(0.0)
+    if peak > 0.6 then "rain likely" else "mostly dry"
+=== END
+=== EDIT
+note: private def with Iron refined return type in a domain parser
+--- file: server/src/main/scala/com/greenleaf/inventory/SkuParser.scala
+--- before
+package com.greenleaf.inventory
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.*
+
+type Sku = String :| Match["[A-Z]{3}-[0-9]{4}"]
+
+object SkuParser:
+  def parse(raw: String): Either[String, Sku] =
+    raw.refineEither[Match["[A-Z]{3}-[0-9]{4}"]]
+--- after
+package com.greenleaf.inventory
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.*
+
+type Sku = String :| Match["[A-Z]{3}-[0-9]{4}"]
+
+object SkuParser:
+  def parse(raw: String): Either[String, Sku] =
+    normalize(raw).refineEither[Match["[A-Z]{3}-[0-9]{4}"]]
+
+  private def normalize(raw: String): String =
+    raw.trim.toUpperCase.replace('_', '-')
+=== END

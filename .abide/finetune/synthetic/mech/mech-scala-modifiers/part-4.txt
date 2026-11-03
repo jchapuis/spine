@@ -1,0 +1,684 @@
+=== EDIT
+note: multi-line final case class deriving codec and schema
+--- file: server/src/main/scala/com/tempo/booking/BookingRequest.scala
+--- before
+--- after
+package com.tempo.booking
+
+import io.circe.Codec
+import sttp.tapir.Schema
+
+final case class BookingRequest(
+    roomId: String,
+    startsAt: java.time.Instant,
+    durationMinutes: Int,
+    attendees: List[String]
+) derives Codec.AsObject, Schema
+
+object BookingRequest:
+  def solo(roomId: String, startsAt: java.time.Instant): BookingRequest =
+    BookingRequest(roomId, startsAt, 30, Nil)
+=== END
+=== EDIT
+note: private final class Impl hidden behind companion apply
+--- file: server/src/main/scala/com/cartograph/maps/Geocoder.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.IO
+
+trait Geocoder:
+  def lookup(address: String): IO[Option[(Double, Double)]]
+--- after
+package com.cartograph.maps
+
+import cats.effect.IO
+
+trait Geocoder:
+  def lookup(address: String): IO[Option[(Double, Double)]]
+
+object Geocoder:
+  def apply(index: Map[String, (Double, Double)]): Geocoder = Impl(index)
+
+  private final class Impl(index: Map[String, (Double, Double)]) extends Geocoder:
+    def lookup(address: String): IO[Option[(Double, Double)]] =
+      IO.pure(index.get(address.trim.toLowerCase))
+=== END
+=== EDIT
+note: top-level final def in a package file
+--- file: server/src/main/scala/com/datahive/ingest/checksums.scala
+--- before
+package com.datahive.ingest
+
+import java.security.MessageDigest
+
+def sha256(bytes: Array[Byte]): Array[Byte] =
+  MessageDigest.getInstance("SHA-256").digest(bytes)
+--- after
+package com.datahive.ingest
+
+import java.security.MessageDigest
+
+def sha256(bytes: Array[Byte]): Array[Byte] =
+  MessageDigest.getInstance("SHA-256").digest(bytes)
+
+final def hexDigest(bytes: Array[Byte]): String =
+  sha256(bytes).map(b => f"$b%02x").mkString
+=== END
+=== EDIT
+note: private[scheduling] case class for cron field parsing
+--- file: server/src/main/scala/com/tempo/scheduling/Cron.scala
+--- before
+package com.tempo.scheduling
+
+case class Cron(expression: String)
+
+object Cron:
+  def parse(raw: String): Option[Cron] =
+    Option.when(raw.split(' ').length == 5)(Cron(raw))
+--- after
+package com.tempo.scheduling
+
+case class Cron(expression: String)
+
+private[scheduling] case class CronField(name: String, min: Int, max: Int)
+
+object Cron:
+  val fields = List(CronField("minute", 0, 59), CronField("hour", 0, 23))
+
+  def parse(raw: String): Option[Cron] =
+    Option.when(raw.split(' ').length == 5)(Cron(raw))
+=== END
+=== EDIT
+note: frontend theme gets a Default val with ascription
+--- file: app/src/main/scala/com/orbit/ui/charts/ChartTheme.scala
+--- before
+package com.orbit.ui.charts
+
+import com.raquo.laminar.api.L.*
+
+case class ChartTheme(stroke: String, fill: String, gridOpacity: Double):
+  def mods: Seq[Modifier[HtmlElement]] =
+    Seq(styleAttr := s"--stroke: $stroke; --fill: $fill")
+--- after
+package com.orbit.ui.charts
+
+import com.raquo.laminar.api.L.*
+
+case class ChartTheme(stroke: String, fill: String, gridOpacity: Double):
+  def mods: Seq[Modifier[HtmlElement]] =
+    Seq(styleAttr := s"--stroke: $stroke; --fill: $fill")
+
+object ChartTheme:
+  val Default: ChartTheme = ChartTheme("#1f6feb", "#cfe2ff", 0.2)
+=== END
+=== EDIT
+note: nowarn on unused explicit parameter in an http4s route builder
+--- file: server/src/main/scala/com/acme/health/HealthRoutes.scala
+--- before
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+object HealthRoutes:
+  def routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("up")
+--- after
+package com.acme.health
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+import scala.annotation.nowarn
+
+object HealthRoutes:
+  @nowarn("msg=unused explicit parameter")
+  def routes(version: String): HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("up")
+=== END
+=== EDIT
+note: final case class messages nested in a protocol object
+--- file: server/src/main/scala/com/acme/chat/Protocol.scala
+--- before
+package com.acme.chat
+
+object Protocol:
+  case class Join(room: String, user: String)
+--- after
+package com.acme.chat
+
+object Protocol:
+  case class Join(room: String, user: String)
+  final case class Leave(room: String, user: String)
+  final case class Say(room: String, user: String, text: String)
+=== END
+=== EDIT
+note: final class extending AnyVal for a meter reading
+--- file: server/src/main/scala/com/meterly/quota/Kwh.scala
+--- before
+--- after
+package com.meterly.quota
+
+final class Kwh(val value: Double) extends AnyVal:
+  def +(other: Kwh): Kwh = Kwh(value + other.value)
+  def toWh: Double = value * 1000
+
+object Kwh:
+  def zero: Kwh = Kwh(0)
+=== END
+=== EDIT
+note: final def in a Laminar component trait
+--- file: app/src/main/scala/com/orbit/ui/Component.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+trait Component:
+  def body: HtmlElement
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+trait Component:
+  def body: HtmlElement
+
+  final def withTestId(id: String): HtmlElement =
+    body.amend(dataAttr("testid") := id)
+=== END
+=== EDIT
+note: private[com] lazy val on shared http client config
+--- file: server/src/main/scala/com/acme/http/HttpDefaults.scala
+--- before
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+object HttpDefaults:
+  val connectTimeout = 5.seconds
+--- after
+package com.acme.http
+
+import scala.concurrent.duration.*
+
+object HttpDefaults:
+  val connectTimeout = 5.seconds
+
+  private[com] lazy val userAgent =
+    s"acme-http/${sys.props.getOrElse("app.version", "dev")}"
+=== END
+=== EDIT
+note: rate limits companion gains Default value
+--- file: server/src/main/scala/com/acme/ratelimit/Limits.scala
+--- before
+package com.acme.ratelimit
+
+import scala.concurrent.duration.*
+
+case class Limits(requests: Int, window: FiniteDuration, burst: Int)
+
+object Limits:
+  def perMinute(requests: Int): Limits = Limits(requests, 1.minute, requests / 10)
+--- after
+package com.acme.ratelimit
+
+import scala.concurrent.duration.*
+
+case class Limits(requests: Int, window: FiniteDuration, burst: Int)
+
+object Limits:
+  def perMinute(requests: Int): Limits = Limits(requests, 1.minute, requests / 10)
+
+  val Default = perMinute(600)
+=== END
+=== EDIT
+note: bare nowarn on a whole object
+--- file: server/src/main/scala/com/legacy/interop/JavaCollections.scala
+--- before
+package com.legacy.interop
+
+import scala.jdk.CollectionConverters.*
+
+object JavaCollections:
+  def toScala(list: java.util.List[String]): List[String] =
+    list.asScala.toList
+--- after
+package com.legacy.interop
+
+import scala.annotation.nowarn
+import scala.jdk.CollectionConverters.*
+
+@nowarn
+object JavaCollections:
+  def toScala(list: java.util.List[String]): List[String] =
+    list.asScala.toList
+
+  def toJava(list: List[String]): java.util.List[String] =
+    list.asJava
+=== END
+=== EDIT
+note: final def template method in abstract job runner
+--- file: server/src/main/scala/com/tempo/scheduling/JobRunner.scala
+--- before
+package com.tempo.scheduling
+
+import cats.effect.IO
+
+abstract class JobRunner:
+  def step(name: String): IO[Unit]
+--- after
+package com.tempo.scheduling
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+abstract class JobRunner:
+  def step(name: String): IO[Unit]
+
+  final def runAll(names: List[String]): IO[Unit] =
+    names.traverse(step).void
+=== END
+=== EDIT
+note: protected[ingest] val on abstract source
+--- file: server/src/main/scala/com/datahive/ingest/Source.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+abstract class Source(name: String):
+  def records: Stream[IO, String]
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+abstract class Source(name: String):
+  def records: Stream[IO, String]
+
+  protected[ingest] val metricPrefix = s"ingest.$name"
+=== END
+=== EDIT
+note: final class wrapping an http4s client resource
+--- file: server/src/main/scala/com/skyline/weather/ForecastClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.Uri
+import org.http4s.client.Client
+
+final class ForecastClient(client: Client[IO], base: Uri):
+  def raw(station: String): IO[String] =
+    client.expect[String](base / "forecast" / station)
+=== END
+=== EDIT
+note: drop final from Laminar trait def, fix
+--- file: app/src/main/scala/com/orbit/ui/Panel.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+trait Panel:
+  def title: String
+  def content: HtmlElement
+
+  final def render: HtmlElement =
+    div(cls := "panel", h2(title), content)
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+trait Panel:
+  def title: String
+  def content: HtmlElement
+
+  def render: HtmlElement =
+    div(cls := "panel", h2(title), content)
+=== END
+=== EDIT
+note: exhaustive match replaces nowarn, fix
+--- file: server/src/main/scala/com/acme/orders/StatusLabel.scala
+--- before
+package com.acme.orders
+
+import scala.annotation.nowarn
+
+object StatusLabel:
+  @nowarn("msg=match may not be exhaustive")
+  def of(status: OrderStatus): String = status match
+    case OrderStatus.Open    => "open"
+    case OrderStatus.Shipped => "shipped"
+--- after
+package com.acme.orders
+
+object StatusLabel:
+  def of(status: OrderStatus): String = status match
+    case OrderStatus.Open      => "open"
+    case OrderStatus.Shipped   => "shipped"
+    case OrderStatus.Cancelled => "cancelled"
+=== END
+=== EDIT
+note: Default removed, caller passes geofence explicitly, fix
+--- file: server/src/main/scala/com/cartograph/maps/Geofence.scala
+--- before
+package com.cartograph.maps
+
+case class Geofence(lat: Double, lon: Double, radiusMeters: Double)
+
+object Geofence:
+  val Default = Geofence(0, 0, 500)
+
+  def contains(fence: Geofence, lat: Double, lon: Double): Boolean =
+    math.hypot(lat - fence.lat, lon - fence.lon) * 111000 <= fence.radiusMeters
+--- after
+package com.cartograph.maps
+
+case class Geofence(lat: Double, lon: Double, radiusMeters: Double)
+
+object Geofence:
+  def contains(fence: Geofence, lat: Double, lon: Double): Boolean =
+    math.hypot(lat - fence.lat, lon - fence.lon) * 111000 <= fence.radiusMeters
+=== END
+=== EDIT
+note: pre-existing final case class, edit only adds companion method
+--- file: server/src/main/scala/com/legacy/billing/Charge.scala
+--- before
+package com.legacy.billing
+
+final case class Charge(accountId: String, amountCents: Long)
+
+object Charge:
+  def zero(accountId: String): Charge = Charge(accountId, 0)
+--- after
+package com.legacy.billing
+
+final case class Charge(accountId: String, amountCents: Long)
+
+object Charge:
+  def zero(accountId: String): Charge = Charge(accountId, 0)
+
+  def total(charges: List[Charge]): Long =
+    charges.map(_.amountCents).sum
+=== END
+=== EDIT
+note: pre-existing private[auth] untouched, edit changes another method
+--- file: server/src/main/scala/com/keystone/auth/TokenParser.scala
+--- before
+package com.keystone.auth
+
+object TokenParser:
+  def bearer(header: String): Option[String] =
+    Option.when(header.startsWith("Bearer "))(header.drop(7))
+
+  private[auth] def segments(token: String): List[String] =
+    token.split('.').toList
+--- after
+package com.keystone.auth
+
+object TokenParser:
+  def bearer(header: String): Option[String] =
+    Option.when(header.startsWith("Bearer "))(header.drop(7).trim).filter(_.nonEmpty)
+
+  private[auth] def segments(token: String): List[String] =
+    token.split('.').toList
+=== END
+=== EDIT
+note: default parameter values rather than a Default companion, near miss
+--- file: server/src/main/scala/com/acme/search/SearchApi.scala
+--- before
+package com.acme.search
+
+import cats.effect.IO
+
+class SearchApi(index: SearchIndex):
+  def query(term: String): IO[List[Hit]] =
+    index.find(term, 20, 0)
+--- after
+package com.acme.search
+
+import cats.effect.IO
+
+class SearchApi(index: SearchIndex):
+  def query(term: String, limit: Int = 20, offset: Int = 0): IO[List[Hit]] =
+    index.find(term, limit, offset)
+=== END
+=== EDIT
+note: log message mentions final settlement and warnings, near miss
+--- file: server/src/main/scala/com/acme/payments/Settlement.scala
+--- before
+package com.acme.payments
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Settlement(using logger: Logger[IO]):
+  def close(batchId: String): IO[Unit] =
+    IO.unit
+--- after
+package com.acme.payments
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Settlement(using logger: Logger[IO]):
+  def close(batchId: String): IO[Unit] =
+    logger.info(s"final settlement closed for batch $batchId, no warnings raised")
+=== END
+=== EDIT
+note: tailrec annotation on helper, not a suppression, near miss
+--- file: server/src/main/scala/com/northwind/routing/PathLength.scala
+--- before
+package com.northwind.routing
+
+object PathLength:
+  def hops(path: List[String]): Int = path.size - 1
+--- after
+package com.northwind.routing
+
+import scala.annotation.tailrec
+
+object PathLength:
+  def hops(path: List[String]): Int = path.size - 1
+
+  @tailrec
+  def distance(path: List[(Double, Double)], acc: Double): Double = path match
+    case (x1, y1) :: (x2, y2) :: rest =>
+      distance((x2, y2) :: rest, acc + math.hypot(x2 - x1, y2 - y1))
+    case _ => acc
+=== END
+=== EDIT
+note: plain protected def on base repository, near miss
+--- file: server/src/main/scala/com/greenleaf/inventory/BaseRepo.scala
+--- before
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+abstract class BaseRepo(table: String):
+  def count: IO[Long]
+--- after
+package com.greenleaf.inventory
+
+import cats.effect.IO
+
+abstract class BaseRepo(table: String):
+  def count: IO[Long]
+
+  protected def qualified(column: String): String =
+    s"$table.$column"
+=== END
+=== EDIT
+note: munit test for cron parsing, clean
+--- file: server/src/test/scala/com/tempo/scheduling/CronSuite.scala
+--- before
+package com.tempo.scheduling
+
+import munit.FunSuite
+
+class CronSuite extends FunSuite:
+  test("accepts five fields"):
+    assert(Cron.parse("0 * * * *").isDefined)
+--- after
+package com.tempo.scheduling
+
+import munit.FunSuite
+
+class CronSuite extends FunSuite:
+  test("accepts five fields"):
+    assert(Cron.parse("0 * * * *").isDefined)
+
+  test("rejects four fields"):
+    assertEquals(Cron.parse("0 * * *"), None)
+=== END
+=== EDIT
+note: fs2 stream batches events with groupWithin, clean
+--- file: server/src/main/scala/com/datahive/ingest/EventBatcher.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+class EventBatcher(sink: List[String] => IO[Unit]):
+  def run(events: Stream[IO, String]): Stream[IO, Unit] =
+    events.evalMap(e => sink(List(e)))
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class EventBatcher(sink: List[String] => IO[Unit]):
+  def run(events: Stream[IO, String]): Stream[IO, Unit] =
+    events
+      .groupWithin(500, 2.seconds)
+      .evalMap(chunk => sink(chunk.toList))
+=== END
+=== EDIT
+note: iron refined port type introduced, clean
+--- file: server/src/main/scala/com/acme/http/Port.scala
+--- before
+--- after
+package com.acme.http
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.*
+
+type PortRange = Interval.Closed[1, 65535]
+
+object Port extends RefinedType[Int, PortRange]
+type Port = Port.T
+
+case class Endpoint(host: String, port: Port)
+=== END
+=== EDIT
+note: Ref-based counter in a service, clean
+--- file: server/src/main/scala/com/meterly/quota/UsageCounter.scala
+--- before
+package com.meterly.quota
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class UsageCounter(ref: Ref[IO, Map[String, Long]]):
+  def get(account: String): IO[Long] =
+    ref.get.map(_.getOrElse(account, 0L))
+--- after
+package com.meterly.quota
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class UsageCounter(ref: Ref[IO, Map[String, Long]]):
+  def get(account: String): IO[Long] =
+    ref.get.map(_.getOrElse(account, 0L))
+
+  def add(account: String, units: Long): IO[Unit] =
+    ref.update(m => m.updated(account, m.getOrElse(account, 0L) + units))
+=== END
+=== EDIT
+note: http4s route for geocoding added, clean
+--- file: server/src/main/scala/com/cartograph/maps/GeoRoutes.scala
+--- before
+package com.cartograph.maps
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class GeoRoutes(geocoder: Geocoder):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "ping" => Ok("pong")
+--- after
+package com.cartograph.maps
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class GeoRoutes(geocoder: Geocoder):
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case GET -> Root / "ping" => Ok("pong")
+    case GET -> Root / "geocode" / address =>
+      geocoder.lookup(address).flatMap(_.fold(NotFound())(p => Ok(s"${p(0)},${p(1)}")))
+=== END
+=== EDIT
+note: Default def on a theme companion in Laminar settings panel
+--- file: app/src/main/scala/com/orbit/ui/settings/Density.scala
+--- before
+package com.orbit.ui.settings
+
+import com.raquo.laminar.api.L.*
+
+enum Density:
+  case Compact, Comfortable
+
+case class LayoutPrefs(density: Density, sidebarOpen: Boolean)
+--- after
+package com.orbit.ui.settings
+
+import com.raquo.laminar.api.L.*
+
+enum Density:
+  case Compact, Comfortable
+
+case class LayoutPrefs(density: Density, sidebarOpen: Boolean)
+
+object LayoutPrefs:
+  def Default = LayoutPrefs(Density.Comfortable, sidebarOpen = true)
+
+  val store = Var(Default)
+=== END
+=== EDIT
+note: final case class for a test fixture builder in scheduling tests
+--- file: server/src/test/scala/com/tempo/scheduling/SlotFixtures.scala
+--- before
+package com.tempo.scheduling
+
+object SlotFixtures:
+  val morning = Slot(open = true, lengthMinutes = 60)
+--- after
+package com.tempo.scheduling
+
+object SlotFixtures:
+  val morning = Slot(open = true, lengthMinutes = 60)
+
+  final case class Day(slots: List[Slot]):
+    def freeMinutes: Int = slots.filter(_.open).map(_.lengthMinutes).sum
+
+  val busyDay = Day(List(morning, Slot(open = false, lengthMinutes = 120)))
+=== END

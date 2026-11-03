@@ -1,0 +1,641 @@
+=== EDIT
+note: mutable constructor parameter on a class
+--- file: server/src/main/scala/com/harbor/fleet/Vessel.scala
+--- before
+package com.harbor.fleet
+
+class Vessel(val name: String, val capacityTeu: Int)
+--- after
+package com.harbor.fleet
+
+class Vessel(val name: String, val capacityTeu: Int, var berth: Option[String])
+=== END
+=== EDIT
+note: var field on a case class for mutable status
+--- file: server/src/main/scala/com/harbor/fleet/Crew.scala
+--- before
+package com.harbor.fleet
+
+case class CrewMember(name: String, rank: String)
+--- after
+package com.harbor.fleet
+
+case class CrewMember(name: String, rank: String, var onShore: Boolean)
+=== END
+=== EDIT
+note: crew member copy instead of mutation, clean
+--- file: server/src/main/scala/com/harbor/fleet/Roster.scala
+--- before
+package com.harbor.fleet
+
+case class Sailor(name: String, onShore: Boolean)
+
+object Roster:
+  def onBoard(sailors: List[Sailor]): List[Sailor] = sailors.filterNot(_.onShore)
+--- after
+package com.harbor.fleet
+
+case class Sailor(name: String, onShore: Boolean)
+
+object Roster:
+  def onBoard(sailors: List[Sailor]): List[Sailor] = sailors.filterNot(_.onShore)
+
+  def sendAshore(sailors: List[Sailor], name: String): List[Sailor] =
+    sailors.map: sailor =>
+      if sailor.name == name then sailor.copy(onShore = true) else sailor
+=== END
+=== EDIT
+note: return inside IO.blocking lambda
+--- file: server/src/main/scala/com/datahive/storage/BlobReader.scala
+--- before
+package com.datahive.storage
+
+import cats.effect.IO
+import java.nio.file.Files
+import java.nio.file.Path
+
+class BlobReader(root: Path):
+  def exists(key: String): IO[Boolean] =
+    IO.blocking(Files.exists(root.resolve(key)))
+--- after
+package com.datahive.storage
+
+import cats.effect.IO
+import java.nio.file.Files
+import java.nio.file.Path
+
+class BlobReader(root: Path):
+  def exists(key: String): IO[Boolean] =
+    IO.blocking(Files.exists(root.resolve(key)))
+
+  def sizeOf(key: String): IO[Long] =
+    IO.blocking:
+      val target = root.resolve(key)
+      if !Files.exists(target) then return IO.pure(0L)
+      Files.size(target)
+=== END
+=== EDIT
+note: GADT-like expression tree as sealed trait with type parameter
+--- file: server/src/main/scala/com/acme/rules/Expr.scala
+--- before
+--- after
+package com.acme.rules
+
+sealed trait Expr[A]
+
+object Expr:
+  case class Literal(value: Int) extends Expr[Int]
+  case class Flag(value: Boolean) extends Expr[Boolean]
+  case class Add(left: Expr[Int], right: Expr[Int]) extends Expr[Int]
+  case class IfThenElse[A](condition: Expr[Boolean], whenTrue: Expr[A], whenFalse: Expr[A]) extends Expr[A]
+=== END
+=== EDIT
+note: GADT expression tree as enum
+--- file: server/src/main/scala/com/acme/rules/Formula.scala
+--- before
+--- after
+package com.acme.rules
+
+enum Formula[A]:
+  case Constant(value: Int) extends Formula[Int]
+  case Toggle(value: Boolean) extends Formula[Boolean]
+  case Sum(left: Formula[Int], right: Formula[Int]) extends Formula[Int]
+
+object Formula:
+  def evaluate[A](formula: Formula[A]): A = formula match
+    case Constant(value)   => value
+    case Toggle(value)     => value
+    case Sum(left, right)  => evaluate(left) + evaluate(right)
+=== END
+=== EDIT
+note: while loop in a test to wait for a condition
+--- file: server/src/test/scala/com/acme/notifications/OutboxSuite.scala
+--- before
+package com.acme.notifications
+
+import munit.FunSuite
+
+class OutboxSuite extends FunSuite:
+  test("starts empty"):
+    assert(Outbox.inMemory().pending.isEmpty)
+--- after
+package com.acme.notifications
+
+import munit.FunSuite
+
+class OutboxSuite extends FunSuite:
+  test("starts empty"):
+    assert(Outbox.inMemory().pending.isEmpty)
+
+  test("eventually flushes"):
+    val outbox = Outbox.inMemory()
+    outbox.enqueue("hello")
+    outbox.flushAsync()
+    while outbox.pending.nonEmpty do Thread.sleep(10)
+    assert(outbox.pending.isEmpty)
+=== END
+=== EDIT
+note: sealed abstract class in test fixtures
+--- file: server/src/test/scala/com/acme/rules/RuleFixtures.scala
+--- before
+package com.acme.rules
+
+object RuleFixtures:
+  val threshold = 10
+--- after
+package com.acme.rules
+
+object RuleFixtures:
+  val threshold = 10
+
+  sealed abstract class Scenario(val label: String)
+  case object Baseline extends Scenario("baseline")
+  case object Spike extends Scenario("spike")
+=== END
+=== EDIT
+note: SignallingRef for stop flag instead of var, clean
+--- file: server/src/main/scala/com/datahive/ingest/IngestWorker.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+class IngestWorker(pull: IO[List[String]]):
+  def batches: Stream[IO, List[String]] = Stream.repeatEval(pull)
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import fs2.concurrent.SignallingRef
+
+class IngestWorker(pull: IO[List[String]]):
+  def batches: Stream[IO, List[String]] = Stream.repeatEval(pull)
+
+  def runUntilStopped(stop: SignallingRef[IO, Boolean]): Stream[IO, List[String]] =
+    batches.interruptWhen(stop)
+=== END
+=== EDIT
+note: method named returnsEmpty and string mentioning sealed; identifiers only
+--- file: server/src/test/scala/com/greenleaf/inventory/ReorderPlannerSuite.scala
+--- before
+package com.greenleaf.inventory
+
+import munit.FunSuite
+
+class ReorderPlannerSuite extends FunSuite:
+  test("empty stock list"):
+    assertEquals(ReorderPlanner.belowThreshold(Nil), Nil)
+--- after
+package com.greenleaf.inventory
+
+import munit.FunSuite
+
+class ReorderPlannerSuite extends FunSuite:
+  test("empty stock list"):
+    assertEquals(ReorderPlanner.belowThreshold(Nil), Nil)
+
+  test("sealed crates above reorder point are not returned"):
+    val sealedCrate = Stock("crate-7", onHand = 40, reorderPoint = 10)
+    assertEquals(ReorderPlanner.belowThreshold(List(sealedCrate)), Nil)
+=== END
+=== EDIT
+note: var in object holding a singleton connection
+--- file: server/src/main/scala/com/legacy/db/ConnectionHolder.scala
+--- before
+package com.legacy.db
+
+import java.sql.Connection
+import java.sql.DriverManager
+
+object ConnectionHolder:
+  def open(url: String): Connection = DriverManager.getConnection(url)
+--- after
+package com.legacy.db
+
+import java.sql.Connection
+import java.sql.DriverManager
+
+object ConnectionHolder:
+  private var current: Option[Connection] = None
+
+  def open(url: String): Connection = DriverManager.getConnection(url)
+
+  def shared(url: String): Connection =
+    current.getOrElse:
+      val connection = open(url)
+      current = Some(connection)
+      connection
+=== END
+=== EDIT
+note: replace singleton var with Resource, fix
+--- file: server/src/main/scala/com/legacy/db/PoolHolder.scala
+--- before
+package com.legacy.db
+
+import java.sql.Connection
+import java.sql.DriverManager
+
+object PoolHolder:
+  private var current: Option[Connection] = None
+
+  def shared(url: String): Connection =
+    current.getOrElse:
+      val connection = DriverManager.getConnection(url)
+      current = Some(connection)
+      connection
+--- after
+package com.legacy.db
+
+import cats.effect.IO
+import cats.effect.Resource
+import java.sql.Connection
+import java.sql.DriverManager
+
+object PoolHolder:
+  def connection(url: String): Resource[IO, Connection] =
+    Resource.fromAutoCloseable(IO.blocking(DriverManager.getConnection(url)))
+=== END
+=== EDIT
+note: return from within foldLeft lambda
+--- file: server/src/main/scala/com/acme/billing/CreditLimit.scala
+--- before
+package com.acme.billing
+
+object CreditLimit:
+  val defaultLimitCents = 500000L
+--- after
+package com.acme.billing
+
+object CreditLimit:
+  val defaultLimitCents = 500000L
+
+  def firstBreach(chargesCents: List[Long], limitCents: Long): Option[Int] =
+    chargesCents.zipWithIndex.foldLeft(0L): (running, entry) =>
+      val (amount, index) = entry
+      val next = running + amount
+      if next > limitCents then return Some(index)
+      next
+    None
+=== END
+=== EDIT
+note: first breach with scanLeft, clean
+--- file: server/src/main/scala/com/acme/billing/SpendingCap.scala
+--- before
+package com.acme.billing
+
+object SpendingCap:
+  val defaultCapCents = 250000L
+--- after
+package com.acme.billing
+
+object SpendingCap:
+  val defaultCapCents = 250000L
+
+  def firstBreach(chargesCents: List[Long], capCents: Long): Option[Int] =
+    chargesCents.scanLeft(0L)(_ + _).tail.indexWhere(_ > capCents) match
+      case -1    => None
+      case index => Some(index)
+=== END
+=== EDIT
+note: notification channel modelled with sealed trait and payloads
+--- file: server/src/main/scala/com/acme/notifications/Channel.scala
+--- before
+package com.acme.notifications
+
+case class Notification(recipient: String, body: String)
+--- after
+package com.acme.notifications
+
+case class Notification(recipient: String, body: String, channel: Channel)
+
+sealed trait Channel
+object Channel:
+  case class Email(address: String) extends Channel
+  case class Sms(phoneNumber: String) extends Channel
+  case class Push(deviceToken: String) extends Channel
+=== END
+=== EDIT
+note: change default zoom in file already containing var; edit elsewhere
+--- file: app/src/main/scala/com/cartograph/ui/MapView.scala
+--- before
+package com.cartograph.ui
+
+import com.raquo.laminar.api.L.*
+
+object MapView:
+  private var lastCenter = (46.52, 6.63)
+  val defaultZoom = 10
+
+  def apply(): HtmlElement =
+    div(cls := "map", onClick --> (_ => lastCenter = (46.52, 6.63)))
+--- after
+package com.cartograph.ui
+
+import com.raquo.laminar.api.L.*
+
+object MapView:
+  private var lastCenter = (46.52, 6.63)
+  val defaultZoom = 12
+
+  def apply(): HtmlElement =
+    div(cls := "map", onClick --> (_ => lastCenter = (46.52, 6.63)))
+=== END
+=== EDIT
+note: add enum method in a file, clean
+--- file: server/src/main/scala/com/portline/logistics/ContainerSize.scala
+--- before
+package com.portline.logistics
+
+enum ContainerSize:
+  case TwentyFoot, FortyFoot, FortyFiveFoot
+--- after
+package com.portline.logistics
+
+enum ContainerSize:
+  case TwentyFoot, FortyFoot, FortyFiveFoot
+
+  def teu: Int = this match
+    case TwentyFoot    => 1
+    case FortyFoot     => 2
+    case FortyFiveFoot => 2
+=== END
+=== EDIT
+note: while true loop reading from socket
+--- file: server/src/main/scala/com/legacy/net/LineServer.scala
+--- before
+package com.legacy.net
+
+import java.io.BufferedReader
+
+class LineServer(reader: BufferedReader):
+  def firstLine: Option[String] = Option(reader.readLine())
+--- after
+package com.legacy.net
+
+import java.io.BufferedReader
+
+class LineServer(reader: BufferedReader):
+  def firstLine: Option[String] = Option(reader.readLine())
+
+  def echoAll(write: String => Unit): Unit =
+    var line = reader.readLine()
+    while line != null do
+      write(line)
+      line = reader.readLine()
+=== END
+=== EDIT
+note: lines via fs2 io instead of loop, clean
+--- file: server/src/main/scala/com/datahive/ingest/LineReader.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.io.file.Files
+import fs2.io.file.Path
+
+object LineReader:
+  def bytes(path: Path): fs2.Stream[IO, Byte] = Files[IO].readAll(path)
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.io.file.Files
+import fs2.io.file.Path
+import fs2.text
+
+object LineReader:
+  def bytes(path: Path): fs2.Stream[IO, Byte] = Files[IO].readAll(path)
+
+  def lines(path: Path): fs2.Stream[IO, String] =
+    bytes(path).through(text.utf8.decode).through(text.lines).filter(_.nonEmpty)
+=== END
+=== EDIT
+note: return Unit from side-effecting method early
+--- file: server/src/main/scala/com/acme/audit/AuditLogger.scala
+--- before
+package com.acme.audit
+
+class AuditLogger(write: String => Unit):
+  def record(actor: String, action: String): Unit =
+    write(s"$actor did $action")
+--- after
+package com.acme.audit
+
+class AuditLogger(write: String => Unit):
+  def record(actor: String, action: String): Unit =
+    if actor == "system" then return
+    write(s"$actor did $action")
+=== END
+=== EDIT
+note: weekday sealed trait in scheduling replaced with java DayOfWeek, fix
+--- file: server/src/main/scala/com/tempo/scheduling/Recurrence.scala
+--- before
+package com.tempo.scheduling
+
+sealed trait Weekday
+case object Monday extends Weekday
+case object Friday extends Weekday
+
+case class Recurrence(day: Weekday, hour: Int)
+--- after
+package com.tempo.scheduling
+
+import java.time.DayOfWeek
+
+case class Recurrence(day: DayOfWeek, hour: Int)
+=== END
+=== EDIT
+note: add case to existing enum, clean
+--- file: server/src/main/scala/com/keystone/auth/Role.scala
+--- before
+package com.keystone.auth
+
+enum Role:
+  case Viewer, Editor, Admin
+--- after
+package com.keystone.auth
+
+enum Role:
+  case Viewer, Editor, Admin, Auditor
+
+  def canWrite: Boolean = this == Editor || this == Admin
+=== END
+=== EDIT
+note: var counter in a stream map step
+--- file: server/src/main/scala/com/datahive/ingest/RowNumberer.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+object RowNumberer:
+  def rows(source: Stream[IO, String]): Stream[IO, String] = source
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+object RowNumberer:
+  def rows(source: Stream[IO, String]): Stream[IO, String] = source
+
+  def numbered(source: Stream[IO, String]): Stream[IO, (Long, String)] =
+    var rowNumber = 0L
+    source.map: row =>
+      rowNumber += 1
+      (rowNumber, row)
+=== END
+=== EDIT
+note: zipWithIndex numbering, clean
+--- file: server/src/main/scala/com/datahive/ingest/RecordIndexer.scala
+--- before
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+object RecordIndexer:
+  def records(source: Stream[IO, String]): Stream[IO, String] = source
+--- after
+package com.datahive.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+object RecordIndexer:
+  def records(source: Stream[IO, String]): Stream[IO, String] = source
+
+  def indexed(source: Stream[IO, String]): Stream[IO, (String, Long)] =
+    source.zipWithIndex.map((record, index) => (record, index + 1))
+=== END
+=== EDIT
+note: map tile coordinate sealed trait with multi-line case classes
+--- file: server/src/main/scala/com/cartograph/maps/Geometry.scala
+--- before
+--- after
+package com.cartograph.maps
+
+sealed trait Geometry
+
+case class Point(
+    latitude: Double,
+    longitude: Double
+) extends Geometry
+
+case class Polygon(
+    vertices: List[Point]
+) extends Geometry
+=== END
+=== EDIT
+note: while loop exponential backoff delay computation
+--- file: server/src/main/scala/com/acme/scheduling/Backoff.scala
+--- before
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+object Backoff:
+  val base: FiniteDuration = 100.millis
+--- after
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+object Backoff:
+  val base: FiniteDuration = 100.millis
+
+  def delayFor(attempt: Int, cap: FiniteDuration): FiniteDuration =
+    var delay = base
+    var remaining = attempt
+    while remaining > 0 && delay < cap do
+      delay = delay * 2
+      remaining -= 1
+    delay.min(cap)
+=== END
+=== EDIT
+note: backoff via iterate, clean
+--- file: server/src/main/scala/com/acme/scheduling/Jitter.scala
+--- before
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+object Jitter:
+  val base: FiniteDuration = 200.millis
+--- after
+package com.acme.scheduling
+
+import scala.concurrent.duration.*
+
+object Jitter:
+  val base: FiniteDuration = 200.millis
+
+  def delayFor(attempt: Int, cap: FiniteDuration): FiniteDuration =
+    Iterator.iterate(base)(_ * 2).drop(attempt).next().min(cap)
+=== END
+=== EDIT
+note: tapir error output enum, clean
+--- file: server/src/main/scala/com/acme/orders/OrderErrors.scala
+--- before
+package com.acme.orders
+
+import sttp.tapir.*
+
+object OrderErrors:
+  val notFound = statusCode(sttp.model.StatusCode.NotFound)
+--- after
+package com.acme.orders
+
+import sttp.tapir.*
+
+enum OrderError:
+  case NotFound(orderId: String)
+  case AlreadyShipped(orderId: String)
+
+object OrderErrors:
+  val notFound = statusCode(sttp.model.StatusCode.NotFound)
+=== END
+=== EDIT
+note: return used to exit a nested helper def
+--- file: server/src/main/scala/com/keystone/auth/ScopeChecker.scala
+--- before
+package com.keystone.auth
+
+object ScopeChecker:
+  def hasScope(granted: Set[String], required: String): Boolean =
+    granted.contains(required)
+--- after
+package com.keystone.auth
+
+object ScopeChecker:
+  def hasScope(granted: Set[String], required: String): Boolean =
+    granted.contains(required)
+
+  def hasAll(granted: Set[String], required: List[String]): Boolean =
+    def check(remaining: List[String]): Boolean =
+      remaining match
+        case Nil => return true
+        case head :: tail => hasScope(granted, head) && check(tail)
+    check(required)
+=== END
+=== EDIT
+note: fix return statement by using forall
+--- file: server/src/main/scala/com/keystone/auth/GrantChecker.scala
+--- before
+package com.keystone.auth
+
+object GrantChecker:
+  def hasAll(granted: Set[String], required: List[String]): Boolean =
+    for scope <- required do
+      if !granted.contains(scope) then return false
+    true
+--- after
+package com.keystone.auth
+
+object GrantChecker:
+  def hasAll(granted: Set[String], required: List[String]): Boolean =
+    required.forall(granted.contains)
+=== END

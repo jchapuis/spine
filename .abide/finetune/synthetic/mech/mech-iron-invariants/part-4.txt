@@ -1,0 +1,671 @@
+=== EDIT
+note: require on a non-empty list of recipients in a notifications service
+--- file: server/src/main/scala/com/beacon/notify/Broadcaster.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+class Broadcaster(mailer: Mailer):
+
+  def broadcast(recipients: List[Address], message: Message): IO[Unit] =
+    recipients.traverse_(mailer.send(_, message))
+--- after
+package com.beacon.notify
+
+import cats.effect.IO
+import cats.syntax.foldable.*
+
+class Broadcaster(mailer: Mailer):
+
+  def broadcast(recipients: List[Address], message: Message): IO[Unit] =
+    require(recipients.nonEmpty, "broadcast needs at least one recipient")
+    recipients.traverse_(mailer.send(_, message))
+=== END
+
+=== EDIT
+note: take a NonEmptyList of recipients instead of checking at runtime
+--- file: server/src/main/scala/com/beacon/notify/Digest.scala
+--- before
+package com.beacon.notify
+
+import cats.effect.IO
+import cats.syntax.foldable.*
+
+class Digest(mailer: Mailer):
+
+  def send(recipients: List[Address], digest: Message): IO[Unit] =
+    recipients.traverse_(mailer.send(_, digest))
+--- after
+package com.beacon.notify
+
+import cats.data.NonEmptyList
+import cats.effect.IO
+import cats.syntax.foldable.*
+
+class Digest(mailer: Mailer):
+
+  def send(recipients: NonEmptyList[Address], digest: Message): IO[Unit] =
+    recipients.traverse_(mailer.send(_, digest))
+=== END
+
+=== EDIT
+note: email address constant assumed from a literal in notification defaults
+--- file: server/src/main/scala/com/beacon/notify/Defaults.scala
+--- before
+package com.beacon.notify
+
+import io.github.iltotore.iron.*
+
+object Defaults:
+  val subjectPrefix: String = "[beacon]"
+--- after
+package com.beacon.notify
+
+import io.github.iltotore.iron.*
+
+object Defaults:
+  val subjectPrefix: String = "[beacon]"
+  val sender: EmailAddress = "no-reply@beacon.example".assume[EmailRule]
+  val support: EmailAddress = "support@beacon.example".assume[EmailRule]
+=== END
+
+=== EDIT
+note: notification channel id alias over UUID inside an object
+--- file: server/src/main/scala/com/beacon/notify/Channels.scala
+--- before
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+
+trait Channels:
+  def mute(channel: UUID): IO[Unit]
+--- after
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+
+object Channels:
+  type ChannelId = UUID
+
+trait Channels:
+  def mute(channel: Channels.ChannelId): IO[Unit]
+  def unmute(channel: Channels.ChannelId): IO[Unit]
+=== END
+
+=== EDIT
+note: add unmute to channels trait, previous bare alias stays as is
+--- file: server/src/main/scala/com/beacon/notify/Subscriptions.scala
+--- before
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+
+type SubscriptionId = UUID
+
+trait Subscriptions:
+  def cancel(subscription: SubscriptionId): IO[Unit]
+--- after
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+
+type SubscriptionId = UUID
+
+trait Subscriptions:
+  def cancel(subscription: SubscriptionId): IO[Unit]
+  def pause(subscription: SubscriptionId): IO[Unit]
+=== END
+
+=== EDIT
+note: replace subscription id alias with refined subtype (fix)
+--- file: server/src/main/scala/com/beacon/notify/Topics.scala
+--- before
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+
+type TopicId = UUID
+
+trait Topics:
+  def archive(topic: TopicId): IO[Unit]
+--- after
+package com.beacon.notify
+
+import java.util.UUID
+import cats.effect.IO
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.any.Pure
+
+type TopicId = TopicId.T
+object TopicId extends RefinedSubtype[UUID, Pure]
+
+trait Topics:
+  def archive(topic: TopicId): IO[Unit]
+=== END
+
+=== EDIT
+note: refineUnsafe a retry count from a header
+--- file: server/src/main/scala/com/beacon/notify/RetryPolicy.scala
+--- before
+package com.beacon.notify
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+import org.http4s.Headers
+
+object RetryPolicy:
+  val defaultAttempts: Int :| Interval.Closed[1, 10] = 3
+--- after
+package com.beacon.notify
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.numeric.Interval
+import org.http4s.Headers
+
+object RetryPolicy:
+  val defaultAttempts: Int :| Interval.Closed[1, 10] = 3
+
+  def fromHeaders(headers: Headers): Int :| Interval.Closed[1, 10] =
+    headers.get(org.typelevel.ci.CIString("X-Retry")).map(_.head.value.toInt).fold(defaultAttempts)(
+      _.refineUnsafe[Interval.Closed[1, 10]]
+    )
+=== END
+
+=== EDIT
+note: add a doc page generator, unrelated
+--- file: server/src/main/scala/com/beacon/docs/Changelog.scala
+--- before
+package com.beacon.docs
+
+object Changelog:
+  def entries: List[String] = List("initial release")
+--- after
+package com.beacon.docs
+
+object Changelog:
+  def entries: List[String] = List("initial release", "add digest emails")
+
+  def render: String = entries.map(e => s"- $e").mkString("\n")
+=== END
+
+=== EDIT
+note: add require on a parsed version in a release service
+--- file: server/src/main/scala/com/beacon/release/Versions.scala
+--- before
+package com.beacon.release
+
+object Versions:
+  def parse(raw: String): Option[Version] =
+    raw.split('.').toList.traverse(_.toIntOption).collect:
+      case major :: minor :: patch :: Nil => Version(major, minor, patch)
+--- after
+package com.beacon.release
+
+object Versions:
+  def parse(raw: String): Option[Version] =
+    raw.split('.').toList.traverse(_.toIntOption).collect:
+      case major :: minor :: patch :: Nil => Version(major, minor, patch)
+
+  def bump(current: Version, next: Version): Version =
+    require(next > current, s"$next is not newer than $current")
+    next
+=== END
+
+=== EDIT
+note: assume a literal in a skunk fragment helper
+--- file: server/src/main/scala/com/stockpile/inventory/db/Tables.scala
+--- before
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+
+object Tables:
+  def qualified(schema: SchemaName, table: TableName): String = s"$schema.$table"
+--- after
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+
+object Tables:
+  def qualified(schema: SchemaName, table: TableName): String = s"$schema.$table"
+
+  val stockLevels: TableName = "stock_levels".assume[Identifier]
+=== END
+
+=== EDIT
+note: build table names with the refined constructor
+--- file: server/src/main/scala/com/stockpile/inventory/db/Schema.scala
+--- before
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+
+object Schema:
+  val inventory: SchemaName = SchemaName("inventory")
+--- after
+package com.stockpile.inventory.db
+
+import io.github.iltotore.iron.*
+
+object Schema:
+  val inventory: SchemaName = SchemaName("inventory")
+  val audit: SchemaName = SchemaName("audit")
+=== END
+
+=== EDIT
+note: add a bounded parallel frames fetch to the radar client, nothing invariant-related
+--- file: server/src/main/scala/com/skyline/weather/RadarClient.scala
+--- before
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class RadarClient(http: Client[IO]):
+  def frame(at: FrameRef): IO[Array[Byte]] = http.expect[Array[Byte]](s"/radar/$at")
+--- after
+package com.skyline.weather
+
+import cats.effect.IO
+import org.http4s.client.Client
+
+class RadarClient(http: Client[IO]):
+  def frame(at: FrameRef): IO[Array[Byte]] = http.expect[Array[Byte]](s"/radar/$at")
+
+  def frames(refs: List[FrameRef]): IO[List[Array[Byte]]] =
+    IO.parTraverseN(4)(refs)(frame)
+=== END
+
+=== EDIT
+note: require on interval ordering in a weather aggregation function
+--- file: server/src/main/scala/com/skyline/weather/Aggregates.scala
+--- before
+package com.skyline.weather
+
+import java.time.Instant
+
+object Aggregates:
+  def mean(observations: List[Observation]): Option[Double] =
+    Option.when(observations.nonEmpty)(observations.map(_.celsius).sum / observations.size)
+--- after
+package com.skyline.weather
+
+import java.time.Instant
+
+object Aggregates:
+  def mean(observations: List[Observation]): Option[Double] =
+    Option.when(observations.nonEmpty)(observations.map(_.celsius).sum / observations.size)
+
+  def window(observations: List[Observation], from: Instant, to: Instant): List[Observation] =
+    require(!to.isBefore(from))
+    observations.filter(o => !o.at.isBefore(from) && o.at.isBefore(to))
+=== END
+
+=== EDIT
+note: add a second unit symbol via the refined constructor
+--- file: server/src/main/scala/com/skyline/weather/Units.scala
+--- before
+package com.skyline.weather
+
+import com.skyline.weather.refined.given
+
+object Units:
+  val celsius: UnitSymbol = UnitSymbol("C")
+--- after
+package com.skyline.weather
+
+import com.skyline.weather.refined.given
+
+object Units:
+  val celsius: UnitSymbol = UnitSymbol("C")
+  val fahrenheit: UnitSymbol = UnitSymbol("F")
+=== END
+
+=== EDIT
+note: device id alias over String in IoT ingest
+--- file: server/src/main/scala/com/sensora/iot/Readings.scala
+--- before
+package com.sensora.iot
+
+import java.time.Instant
+
+case class Reading(device: String, value: Double, at: Instant)
+--- after
+package com.sensora.iot
+
+import java.time.Instant
+
+type DeviceId = String
+type FirmwareId = Long
+
+case class Reading(device: DeviceId, firmware: FirmwareId, value: Double, at: Instant)
+=== END
+
+=== EDIT
+note: firmware version as a refined subtype and device ids as RefinedSubtype
+--- file: server/src/main/scala/com/sensora/iot/Devices.scala
+--- before
+package com.sensora.iot
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+case class Device(name: String)
+--- after
+package com.sensora.iot
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+type DeviceSerial = DeviceSerial.T
+object DeviceSerial extends RefinedSubtype[String, Match["[A-F0-9]{12}"]]
+
+case class Device(serial: DeviceSerial, name: String)
+=== END
+
+=== EDIT
+note: device serial parsed with applyUnsafe in an fs2 ingest pipe
+--- file: server/src/main/scala/com/sensora/iot/IngestPipe.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Pipe
+import io.github.iltotore.iron.*
+
+object IngestPipe:
+  def apply(store: ReadingStore): Pipe[IO, RawFrame, Unit] =
+    _.evalMap(frame => store.save(frame.serial, frame.value))
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Pipe
+import io.github.iltotore.iron.*
+
+object IngestPipe:
+  def apply(store: ReadingStore): Pipe[IO, RawFrame, Unit] =
+    _.evalMap(frame => store.save(DeviceSerial.applyUnsafe(frame.serial), frame.value))
+=== END
+
+=== EDIT
+note: ingest pipe drops invalid serials through option and logs them
+--- file: server/src/main/scala/com/sensora/iot/ValidatingPipe.scala
+--- before
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Pipe
+
+object ValidatingPipe:
+  def apply(store: ReadingStore): Pipe[IO, RawFrame, Unit] =
+    _.evalMap(frame => store.saveRaw(frame))
+--- after
+package com.sensora.iot
+
+import cats.effect.IO
+import fs2.Pipe
+
+object ValidatingPipe:
+  def apply(store: ReadingStore, rejects: Rejects): Pipe[IO, RawFrame, Unit] =
+    _.evalMap: frame =>
+      DeviceSerial.either(frame.serial) match
+        case Right(serial) => store.save(serial, frame.value)
+        case Left(reason) => rejects.record(frame, reason)
+=== END
+
+=== EDIT
+note: tests compare readings, with a static expected value
+--- file: server/src/test/scala/com/sensora/iot/ReadingsSuite.scala
+--- before
+package com.sensora.iot
+
+import munit.FunSuite
+
+class ReadingsSuite extends FunSuite:
+
+  test("average of a single reading is itself"):
+    assertEquals(Readings.average(List(Fixtures.reading)), Some(Fixtures.reading.value))
+--- after
+package com.sensora.iot
+
+import munit.FunSuite
+
+class ReadingsSuite extends FunSuite:
+
+  test("average of a single reading is itself"):
+    assertEquals(Readings.average(List(Fixtures.reading)), Some(Fixtures.reading.value))
+
+  test("average of nothing is empty"):
+    assertEquals(Readings.average(Nil), None)
+=== END
+
+=== EDIT
+note: require in a scala-cli script that migrates data
+--- file: scripts/Backfill.sc
+--- before
+//> using scala 3.5.2
+
+@main def backfill(days: Int): Unit =
+  println(s"backfilling $days days")
+--- after
+//> using scala 3.5.2
+
+@main def backfill(days: Int): Unit =
+  require(days > 0 && days <= 365)
+  println(s"backfilling $days days")
+=== END
+
+=== EDIT
+note: rename a parameter in a method that sits next to an untouched require
+--- file: server/src/main/scala/com/acme/billing/Credits.scala
+--- before
+package com.acme.billing
+
+class Credits(store: CreditStore):
+
+  def grant(account: AccountRef, amount: BigDecimal): CreditNote =
+    require(amount > 0)
+    store.grant(account, amount)
+
+  def expire(acct: AccountRef): Unit = store.expire(acct)
+--- after
+package com.acme.billing
+
+class Credits(store: CreditStore):
+
+  def grant(account: AccountRef, amount: BigDecimal): CreditNote =
+    require(amount > 0)
+    store.grant(account, amount)
+
+  def expire(account: AccountRef): Unit = store.expire(account)
+=== END
+
+=== EDIT
+note: refineUnsafe with explicit type application on a nested call
+--- file: server/src/main/scala/com/acme/billing/TaxIds.scala
+--- before
+package com.acme.billing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+object TaxIds:
+  type VatRule = Match["CHE-[0-9]{3}\\.[0-9]{3}\\.[0-9]{3}"]
+--- after
+package com.acme.billing
+
+import io.github.iltotore.iron.*
+import io.github.iltotore.iron.constraint.string.Match
+
+object TaxIds:
+  type VatRule = Match["CHE-[0-9]{3}\\.[0-9]{3}\\.[0-9]{3}"]
+
+  def normalise(raw: String): String :| VatRule =
+    raw.replace(" ", "").toUpperCase.refineUnsafe[VatRule]
+=== END
+
+=== EDIT
+note: vat number normalised through refineOption
+--- file: server/src/main/scala/com/acme/billing/VatNumbers.scala
+--- before
+package com.acme.billing
+
+import io.github.iltotore.iron.*
+
+object VatNumbers:
+  def clean(raw: String): String = raw.replace(" ", "").toUpperCase
+--- after
+package com.acme.billing
+
+import io.github.iltotore.iron.*
+
+object VatNumbers:
+  def clean(raw: String): String = raw.replace(" ", "").toUpperCase
+
+  def parse(raw: String): Option[String :| TaxIds.VatRule] =
+    clean(raw).refineOption[TaxIds.VatRule]
+=== END
+
+=== EDIT
+note: invoice number alias with Id suffix in billing over Long
+--- file: server/src/main/scala/com/acme/billing/InvoiceNumbers.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class InvoiceNumbers(counter: Ref[IO, Long]):
+  def next: IO[Long] = counter.updateAndGet(_ + 1)
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Ref
+
+type InvoiceSeqId = Long
+
+class InvoiceNumbers(counter: Ref[IO, InvoiceSeqId]):
+  def next: IO[InvoiceSeqId] = counter.updateAndGet(_ + 1)
+=== END
+
+=== EDIT
+note: require on currency match when adding money
+--- file: server/src/main/scala/com/acme/billing/Money.scala
+--- before
+package com.acme.billing
+
+case class Money(amount: BigDecimal, currency: Currency):
+  def negate: Money = copy(amount = -amount)
+--- after
+package com.acme.billing
+
+case class Money(amount: BigDecimal, currency: Currency):
+  def negate: Money = copy(amount = -amount)
+
+  def +(other: Money): Money =
+    require(currency == other.currency, s"cannot add $currency to ${other.currency}")
+    Money(amount + other.amount, currency)
+=== END
+
+=== EDIT
+note: money addition returns Either on currency mismatch
+--- file: server/src/main/scala/com/acme/billing/Amount.scala
+--- before
+package com.acme.billing
+
+case class Amount(value: BigDecimal, currency: Currency)
+--- after
+package com.acme.billing
+
+case class Amount(value: BigDecimal, currency: Currency):
+  def plus(other: Amount): Either[BillingError, Amount] =
+    Either.cond(
+      currency == other.currency,
+      Amount(value + other.value, currency),
+      BillingError.CurrencyMismatch(currency, other.currency)
+    )
+=== END
+
+=== EDIT
+note: add a laminar badge component, nothing invariant-related
+--- file: app/src/main/scala/com/acme/ui/StatusBadge.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object StatusBadge:
+  def apply(status: Signal[InvoiceStatus]): HtmlElement =
+    span(cls := "badge", text <-- status.map(_.toString))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object StatusBadge:
+  def apply(status: Signal[InvoiceStatus]): HtmlElement =
+    span(
+      cls := "badge",
+      cls("badge-overdue") <-- status.map(_ == InvoiceStatus.Overdue),
+      text <-- status.map(_.toString)
+    )
+=== END
+
+=== EDIT
+note: laminar invoice page assumes a literal route slug
+--- file: app/src/main/scala/com/acme/ui/InvoiceNav.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object InvoiceNav:
+  def apply(): HtmlElement =
+    nav(a(href := "/invoices", "Invoices"))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object InvoiceNav:
+  val draftsSlug: NavSlug = "drafts".assume[NavRule]
+
+  def apply(): HtmlElement =
+    nav(a(href := "/invoices", "Invoices"), a(href := s"/invoices/$draftsSlug", "Drafts"))
+=== END
+
+=== EDIT
+note: remove an assume on a literal in favour of the constructor (fix)
+--- file: app/src/main/scala/com/acme/ui/ReportsNav.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object ReportsNav:
+  val monthly: NavSlug = "monthly".assume[NavRule]
+
+  def apply(): HtmlElement = nav(a(href := s"/reports/$monthly", "Monthly"))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+import io.github.iltotore.iron.*
+
+object ReportsNav:
+  val monthly: NavSlug = NavSlug("monthly")
+
+  def apply(): HtmlElement = nav(a(href := s"/reports/$monthly", "Monthly"))
+=== END

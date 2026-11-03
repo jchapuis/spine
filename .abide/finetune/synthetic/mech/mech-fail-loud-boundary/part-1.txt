@@ -1,0 +1,695 @@
+=== EDIT
+note: default a missing display name to the empty string
+--- file: server/src/main/scala/com/gatekeep/auth/ProfileView.scala
+--- before
+package com.gatekeep.auth
+
+case class ProfileView(id: UserId, email: Email, displayName: Option[String])
+
+object ProfileView:
+
+  def from(user: User): ProfileView =
+    ProfileView(user.id, user.email, user.displayName)
+--- after
+package com.gatekeep.auth
+
+case class ProfileView(id: UserId, email: Email, displayName: String)
+
+object ProfileView:
+
+  def from(user: User): ProfileView =
+    ProfileView(user.id, user.email, user.displayName.getOrElse(""))
+=== END
+
+=== EDIT
+note: narrow yaml values to strings with collect
+--- file: server/src/main/scala/com/orbital/config/YamlTags.scala
+--- before
+package com.orbital.config
+
+object YamlTags:
+
+  def keys(document: Map[String, Any]): Set[String] =
+    document.keySet
+--- after
+package com.orbital.config
+
+object YamlTags:
+
+  def keys(document: Map[String, Any]): Set[String] =
+    document.keySet
+
+  def tags(document: Map[String, Any]): List[String] =
+    document.get("tags").toList.flatMap:
+      case values: List[?] => values.collect { case tag: String => tag }
+      case _               => List.empty
+=== END
+
+=== EDIT
+note: report the job runtime in hours with toUnit
+--- file: server/src/main/scala/com/metricly/analytics/JobReport.scala
+--- before
+package com.metricly.analytics
+
+import scala.concurrent.duration.FiniteDuration
+
+case class JobReport(name: JobName, runtime: FiniteDuration, rows: Long)
+--- after
+package com.metricly.analytics
+
+import java.util.concurrent.TimeUnit.HOURS
+import scala.concurrent.duration.FiniteDuration
+
+case class JobReport(name: JobName, runtime: FiniteDuration, rows: Long):
+
+  def rowsPerHour: Double =
+    rows / runtime.toUnit(HOURS)
+=== END
+
+=== EDIT
+note: keep the display name optional and render a placeholder in the view
+--- file: server/src/main/scala/com/gatekeep/auth/MemberView.scala
+--- before
+package com.gatekeep.auth
+
+case class MemberView(id: UserId, email: Email)
+
+object MemberView:
+
+  def from(user: User): MemberView =
+    MemberView(user.id, user.email)
+--- after
+package com.gatekeep.auth
+
+case class MemberView(id: UserId, email: Email, displayName: Option[DisplayName])
+
+object MemberView:
+
+  def from(user: User): MemberView =
+    MemberView(user.id, user.email, user.displayName)
+=== END
+
+=== EDIT
+note: decode string tags with an explicit error for non-strings
+--- file: server/src/main/scala/com/orbital/config/YamlLabels.scala
+--- before
+package com.orbital.config
+
+object YamlLabels:
+
+  def keys(document: Map[String, Any]): Set[String] =
+    document.keySet
+--- after
+package com.orbital.config
+
+import cats.syntax.traverse.*
+
+object YamlLabels:
+
+  def keys(document: Map[String, Any]): Set[String] =
+    document.keySet
+
+  def labels(values: List[Any]): Either[ConfigError, List[String]] =
+    values.traverse:
+      case label: String => Right(label)
+      case other         => Left(ConfigError.NotAString("labels", other.toString))
+=== END
+
+=== EDIT
+note: query parameter falls back to empty string
+--- file: server/src/main/scala/com/stockly/inventory/SearchRoutes.scala
+--- before
+package com.stockly.inventory
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class SearchRoutes(search: CatalogSearch[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case request @ GET -> Root / "search" =>
+      search.all.flatMap(Ok(_))
+--- after
+package com.stockly.inventory
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class SearchRoutes(search: CatalogSearch[IO]):
+
+  val routes: HttpRoutes[IO] = HttpRoutes.of[IO]:
+    case request @ GET -> Root / "search" =>
+      val term = request.params.get("q").getOrElse("")
+      search.matching(term).flatMap(Ok(_))
+=== END
+
+=== EDIT
+note: braceless collect narrowing kafka header values to strings
+--- file: server/src/main/scala/com/telio/messaging/HeaderReader.scala
+--- before
+package com.telio.messaging
+
+object HeaderReader:
+
+  def names(headers: Map[String, Any]): List[String] =
+    headers.keys.toList.sorted
+--- after
+package com.telio.messaging
+
+object HeaderReader:
+
+  def names(headers: Map[String, Any]): List[String] =
+    headers.keys.toList.sorted
+
+  def textValues(headers: Map[String, Any]): List[String] =
+    headers.values.toList.collect:
+      case text: String => text
+=== END
+
+=== EDIT
+note: express the timeout in minutes and seconds with toUnit
+--- file: server/src/main/scala/com/freightly/routing/SlaFormatter.scala
+--- before
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object SlaFormatter:
+
+  def label(window: FiniteDuration): String =
+    s"${window.toMinutes} min"
+--- after
+package com.freightly.routing
+
+import java.util.concurrent.TimeUnit.{MINUTES, SECONDS}
+import scala.concurrent.duration.FiniteDuration
+
+object SlaFormatter:
+
+  def label(window: FiniteDuration): String =
+    s"${window.toMinutes} min"
+
+  def precise(window: FiniteDuration): String =
+    f"${window.toUnit(MINUTES)}%.1f min (${window.toUnit(SECONDS)}%.0f s)"
+=== END
+
+=== EDIT
+note: use toMinutes and toSeconds on FiniteDuration
+--- file: server/src/main/scala/com/freightly/routing/EtaFormatter.scala
+--- before
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object EtaFormatter:
+
+  def label(eta: FiniteDuration): String =
+    s"${eta.toMinutes} min"
+--- after
+package com.freightly.routing
+
+import scala.concurrent.duration.FiniteDuration
+
+object EtaFormatter:
+
+  def label(eta: FiniteDuration): String =
+    if eta.toMinutes >= 1 then s"${eta.toMinutes} min" else s"${eta.toSeconds} s"
+=== END
+
+=== EDIT
+note: getOrElse with a meaningful placeholder, not empty
+--- file: server/src/main/scala/com/acme/billing/InvoicePdf.scala
+--- before
+package com.acme.billing
+
+object InvoicePdf:
+
+  def title(invoice: Invoice): String =
+    s"Invoice ${invoice.number.value}"
+--- after
+package com.acme.billing
+
+object InvoicePdf:
+
+  def title(invoice: Invoice): String =
+    s"Invoice ${invoice.number.value}"
+
+  def reference(invoice: Invoice): String =
+    invoice.purchaseOrder.map(_.value).getOrElse("no purchase order")
+=== END
+
+=== EDIT
+note: tapir header default to empty string
+--- file: server/src/main/scala/com/gatekeep/auth/AuditLogic.scala
+--- before
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class AuditLogic(audit: AuditLog[IO]):
+
+  def record(user: UserId, action: AuditAction, userAgent: Option[String]): IO[Unit] =
+    audit.append(AuditEntry(user, action))
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class AuditLogic(audit: AuditLog[IO]):
+
+  def record(user: UserId, action: AuditAction, userAgent: Option[String]): IO[Unit] =
+    audit.append(AuditEntry(user, action, userAgent.getOrElse("")))
+=== END
+
+=== EDIT
+note: tapir audit keeps the user agent optional
+--- file: server/src/main/scala/com/gatekeep/auth/LoginAuditLogic.scala
+--- before
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class LoginAuditLogic(audit: AuditLog[IO]):
+
+  def record(user: UserId, userAgent: Option[UserAgent]): IO[Unit] =
+    audit.append(AuditEntry(user, AuditAction.Login))
+--- after
+package com.gatekeep.auth
+
+import cats.effect.IO
+
+class LoginAuditLogic(audit: AuditLog[IO]):
+
+  def record(user: UserId, userAgent: Option[UserAgent]): IO[Unit] =
+    audit.append(AuditEntry(user, AuditAction.Login, userAgent))
+=== END
+
+=== EDIT
+note: narrow the timezone metadata value to String with collect
+--- file: server/src/main/scala/com/skyline/weather/StationMetadata.scala
+--- before
+package com.skyline.weather
+
+object StationMetadata:
+
+  def elevation(meta: Map[String, Any]): Option[Double] =
+    meta.get("elevation").collect:
+      case value: Double => value
+--- after
+package com.skyline.weather
+
+object StationMetadata:
+
+  def elevation(meta: Map[String, Any]): Option[Double] =
+    meta.get("elevation").collect:
+      case value: Double => value
+
+  def timezone(meta: Map[String, Any]): Option[String] =
+    meta.get("timezone").collect:
+      case zone: String => zone
+=== END
+
+=== EDIT
+note: existing getOrElse("") untouched, edit adds a method below
+--- file: server/src/main/scala/com/acme/orders/ShippingLabel.scala
+--- before
+package com.acme.orders
+
+object ShippingLabel:
+
+  def addressLine2(address: Address): String =
+    address.line2.getOrElse("")
+--- after
+package com.acme.orders
+
+object ShippingLabel:
+
+  def addressLine2(address: Address): String =
+    address.line2.getOrElse("")
+
+  def postcode(address: Address): String =
+    address.postcode.value
+=== END
+
+=== EDIT
+note: remove getOrElse("") and keep the line optional
+--- file: server/src/main/scala/com/acme/orders/ReturnLabel.scala
+--- before
+package com.acme.orders
+
+object ReturnLabel:
+
+  def addressLines(address: Address): List[String] =
+    List(address.line1, address.line2.getOrElse(""), address.city)
+--- after
+package com.acme.orders
+
+object ReturnLabel:
+
+  def addressLines(address: Address): List[String] =
+    List(Some(address.line1), address.line2, Some(address.city)).flatten
+=== END
+
+=== EDIT
+note: collect strings out of a Scala.js dynamic array in the frontend
+--- file: app/src/main/scala/com/cartograph/maps/ui/SearchSuggestions.scala
+--- before
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SearchSuggestions:
+
+  def apply(results: Signal[List[String]]): HtmlElement =
+    ul(children <-- results.map(_.map(result => li(result))))
+--- after
+package com.cartograph.maps.ui
+
+import com.raquo.laminar.api.L.*
+import scala.scalajs.js
+
+object SearchSuggestions:
+
+  def apply(results: Signal[List[String]]): HtmlElement =
+    ul(children <-- results.map(_.map(result => li(result))))
+
+  def fromResponse(raw: js.Array[Any]): List[String] =
+    raw.toList.collect { case name: String => name }
+=== END
+
+=== EDIT
+note: Laminar input shows the optional value or empty string
+--- file: app/src/main/scala/com/acme/billing/ui/CustomerForm.scala
+--- before
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object CustomerForm:
+
+  def apply(customer: Var[CustomerDraft]): HtmlElement =
+    form(
+      input(controlled(value <-- customer.signal.map(_.name), onInput.mapToValue --> customer.updater[String]((c, v) => c.copy(name = v))))
+    )
+--- after
+package com.acme.billing.ui
+
+import com.raquo.laminar.api.L.*
+
+object CustomerForm:
+
+  def apply(customer: Var[CustomerDraft]): HtmlElement =
+    form(
+      input(controlled(value <-- customer.signal.map(_.name), onInput.mapToValue --> customer.updater[String]((c, v) => c.copy(name = v)))),
+      input(controlled(value <-- customer.signal.map(_.vatNumber.getOrElse("")), onInput.mapToValue --> customer.updater[String]((c, v) => c.copy(vatNumber = Some(v)))))
+    )
+=== END
+
+=== EDIT
+note: toUnit(MILLISECONDS) for a latency histogram
+--- file: server/src/main/scala/com/metricly/analytics/LatencyRecorder.scala
+--- before
+package com.metricly.analytics
+
+import cats.effect.IO
+import scala.concurrent.duration.FiniteDuration
+
+class LatencyRecorder(histogram: Histogram[IO]):
+
+  def record(elapsed: FiniteDuration): IO[Unit] =
+    histogram.observe(elapsed.toMillis.toDouble)
+--- after
+package com.metricly.analytics
+
+import cats.effect.IO
+import java.util.concurrent.TimeUnit.MILLISECONDS
+import scala.concurrent.duration.FiniteDuration
+
+class LatencyRecorder(histogram: Histogram[IO]):
+
+  def record(elapsed: FiniteDuration): IO[Unit] =
+    histogram.observe(elapsed.toUnit(MILLISECONDS))
+=== END
+
+=== EDIT
+note: duration accessor extension instead of toUnit
+--- file: server/src/main/scala/com/metricly/analytics/DurationSyntax.scala
+--- before
+--- after
+package com.metricly.analytics
+
+import scala.concurrent.duration.FiniteDuration
+
+object DurationSyntax:
+
+  extension (duration: FiniteDuration)
+    def inHours: Double = duration.toNanos.toDouble / 3.6e12
+    def inMinutes: Double = duration.toNanos.toDouble / 6e10
+    def inSeconds: Double = duration.toNanos.toDouble / 1e9
+=== END
+
+=== EDIT
+note: toUnit with a fully qualified TimeUnit does not match the bare form
+--- file: server/src/main/scala/com/planwise/scheduling/ShiftLength.scala
+--- before
+package com.planwise.scheduling
+
+import scala.concurrent.duration.FiniteDuration
+
+case class ShiftLength(value: FiniteDuration)
+--- after
+package com.planwise.scheduling
+
+import java.util.concurrent.TimeUnit
+import scala.concurrent.duration.FiniteDuration
+
+case class ShiftLength(value: FiniteDuration):
+
+  def hours: Double =
+    value.toUnit(TimeUnit.HOURS)
+=== END
+
+=== EDIT
+note: add a skunk command to archive stale carts
+--- file: server/src/main/scala/com/acme/payments/CartSql.scala
+--- before
+package com.acme.payments
+
+import skunk.*
+import skunk.implicits.*
+
+object CartSql:
+
+  val delete: Command[CartId] =
+    sql"delete from carts where id = ${CartCodecs.cartId}".command
+--- after
+package com.acme.payments
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object CartSql:
+
+  val delete: Command[CartId] =
+    sql"delete from carts where id = ${CartCodecs.cartId}".command
+
+  val archiveOlderThan: Command[java.time.OffsetDateTime] =
+    sql"update carts set archived = true where updated_at < $timestamptz".command
+=== END
+
+=== EDIT
+note: pattern collect on a sealed enum, not String
+--- file: server/src/main/scala/com/planwise/scheduling/BookingSummary.scala
+--- before
+package com.planwise.scheduling
+
+object BookingSummary:
+
+  def count(bookings: List[Booking]): Int =
+    bookings.size
+--- after
+package com.planwise.scheduling
+
+object BookingSummary:
+
+  def count(bookings: List[Booking]): Int =
+    bookings.size
+
+  def confirmed(bookings: List[Booking]): List[Booking.Confirmed] =
+    bookings.collect:
+      case confirmed: Booking.Confirmed => confirmed
+=== END
+
+=== EDIT
+note: test fixture getOrElse("") on an env lookup
+--- file: server/src/test/scala/com/skyline/weather/ForecastClientIntegrationSuite.scala
+--- before
+package com.skyline.weather
+
+import munit.CatsEffectSuite
+
+class ForecastClientIntegrationSuite extends CatsEffectSuite:
+
+  test("hourly returns 24 entries"):
+    ForecastClientFixtures.client.use(_.hourly(LocationFixtures.geneva)).map(_.size).assertEquals(24)
+--- after
+package com.skyline.weather
+
+import munit.CatsEffectSuite
+
+class ForecastClientIntegrationSuite extends CatsEffectSuite:
+
+  private val apiKey = sys.env.get("FORECAST_API_KEY").getOrElse("")
+
+  test("hourly returns 24 entries"):
+    assume(apiKey.nonEmpty)
+    ForecastClientFixtures.client(apiKey).use(_.hourly(LocationFixtures.geneva)).map(_.size).assertEquals(24)
+=== END
+
+=== EDIT
+note: collect strings from json array values with circe asString
+--- file: server/src/main/scala/com/skyline/weather/AlertKeywords.scala
+--- before
+package com.skyline.weather
+
+import io.circe.Json
+
+object AlertKeywords:
+
+  def count(json: Json): Int =
+    json.asArray.map(_.size).getOrElse(0)
+--- after
+package com.skyline.weather
+
+import io.circe.{Decoder, Json}
+
+object AlertKeywords:
+
+  def count(json: Json): Int =
+    json.asArray.map(_.size).getOrElse(0)
+
+  def keywords(json: Json): Decoder.Result[List[String]] =
+    json.as[List[String]]
+=== END
+
+=== EDIT
+note: collect with a String-typed case inside a nested tuple map
+--- file: server/src/main/scala/com/orbital/config/FeatureFlags.scala
+--- before
+package com.orbital.config
+
+object FeatureFlags:
+
+  def enabled(raw: Map[String, Any]): Set[String] =
+    raw.collect { case (name, true) => name }.toSet
+--- after
+package com.orbital.config
+
+object FeatureFlags:
+
+  def enabled(raw: Map[String, Any]): Set[String] =
+    raw.collect { case (name, true) => name }.toSet
+
+  def variants(raw: Map[String, Any]): List[String] =
+    raw.values.toList.collect { case variant: String => variant }.distinct
+=== END
+
+=== EDIT
+note: use a dedicated codec instead of collecting strings
+--- file: server/src/main/scala/com/orbital/config/RolloutGroups.scala
+--- before
+package com.orbital.config
+
+object RolloutGroups:
+
+  def all: List[RolloutGroup] =
+    RolloutGroup.values.toList
+--- after
+package com.orbital.config
+
+import io.circe.Json
+
+object RolloutGroups:
+
+  def all: List[RolloutGroup] =
+    RolloutGroup.values.toList
+
+  def parse(json: Json): Either[ConfigError, List[RolloutGroup]] =
+    json.as[List[RolloutGroup]].left.map(failure => ConfigError.Invalid("rollout", failure.message))
+=== END
+
+=== EDIT
+note: rename a value in the session config
+--- file: server/src/main/scala/com/gatekeep/auth/SessionConfig.scala
+--- before
+package com.gatekeep.auth
+
+import scala.concurrent.duration.*
+
+case class SessionConfig(ttl: FiniteDuration, refreshWindow: FiniteDuration)
+
+object SessionConfig:
+
+  val default: SessionConfig = SessionConfig(12.hours, 30.minutes)
+--- after
+package com.gatekeep.auth
+
+import scala.concurrent.duration.*
+
+case class SessionConfig(ttl: FiniteDuration, refreshWindow: FiniteDuration)
+
+object SessionConfig:
+
+  val standard: SessionConfig = SessionConfig(12.hours, 30.minutes)
+=== END
+
+=== EDIT
+note: toUnit(SECONDS) passed to a metrics gauge and to a log line
+--- file: server/src/main/scala/com/telio/messaging/LagMonitor.scala
+--- before
+package com.telio.messaging
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+import scala.concurrent.duration.FiniteDuration
+
+class LagMonitor(gauge: Gauge[IO])(using logger: Logger[IO]):
+
+  def report(topic: Topic, lag: FiniteDuration): IO[Unit] =
+    gauge.set(topic.value, lag.toSeconds.toDouble)
+--- after
+package com.telio.messaging
+
+import cats.effect.IO
+import java.util.concurrent.TimeUnit.SECONDS
+import org.typelevel.log4cats.Logger
+import scala.concurrent.duration.FiniteDuration
+
+class LagMonitor(gauge: Gauge[IO])(using logger: Logger[IO]):
+
+  def report(topic: Topic, lag: FiniteDuration): IO[Unit] =
+    val seconds = lag.toUnit(SECONDS)
+    gauge.set(topic.value, seconds) *> logger.debug(s"${topic.value} lag ${seconds}s")
+=== END
+
+=== EDIT
+note: getOrElse on Option[Int] is unrelated
+--- file: server/src/main/scala/com/stockly/inventory/PageRequest.scala
+--- before
+package com.stockly.inventory
+
+case class PageRequest(page: Int, size: Int)
+--- after
+package com.stockly.inventory
+
+case class PageRequest(page: Int, size: Int)
+
+object PageRequest:
+
+  def from(page: Option[Int], size: Option[Int]): PageRequest =
+    PageRequest(page.getOrElse(0), size.getOrElse(Paging.defaultSize))
+=== END

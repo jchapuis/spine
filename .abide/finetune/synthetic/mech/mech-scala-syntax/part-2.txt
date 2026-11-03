@@ -1,0 +1,784 @@
+=== EDIT
+note: traverse with a braced lambda to load each order
+--- file: server/src/main/scala/com/fernhill/orders/OrderLoader.scala
+--- before
+package com.fernhill.orders
+
+import cats.effect.IO
+
+case class OrderId(value: String)
+case class Order(id: OrderId, total: BigDecimal)
+
+trait OrderStore:
+  def get(id: OrderId): IO[Order]
+
+class OrderLoader(store: OrderStore):
+  def one(id: OrderId): IO[Order] = store.get(id)
+--- after
+package com.fernhill.orders
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class OrderId(value: String)
+case class Order(id: OrderId, total: BigDecimal)
+
+trait OrderStore:
+  def get(id: OrderId): IO[Order]
+
+class OrderLoader(store: OrderStore):
+  def one(id: OrderId): IO[Order] = store.get(id)
+
+  def many(ids: List[OrderId]): IO[List[Order]] =
+    ids.traverse { id =>
+      store.get(id)
+    }
+=== END
+
+=== EDIT
+note: foreach with braces to log each failed delivery
+--- file: server/src/main/scala/com/acme/notifications/DeliveryReport.scala
+--- before
+package com.acme.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+case class Delivery(recipient: String, delivered: Boolean)
+
+class DeliveryReport(logger: Logger[IO]):
+  def summary(deliveries: List[Delivery]): IO[Unit] =
+    logger.info(s"${deliveries.count(_.delivered)} of ${deliveries.size} delivered")
+--- after
+package com.acme.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+case class Delivery(recipient: String, delivered: Boolean)
+
+class DeliveryReport(logger: Logger[IO]):
+  def summary(deliveries: List[Delivery]): IO[Unit] =
+    logger.info(s"${deliveries.count(_.delivered)} of ${deliveries.size} delivered")
+
+  def printFailures(deliveries: List[Delivery]): Unit =
+    deliveries.filterNot(_.delivered).foreach { delivery => println(delivery.recipient) }
+=== END
+
+=== EDIT
+note: braced map with a case over grouped sessions
+--- file: server/src/main/scala/com/acme/analytics/SessionStats.scala
+--- before
+package com.acme.analytics
+
+case class Session(userId: String, seconds: Long)
+
+object SessionStats:
+  def users(sessions: List[Session]): Set[String] =
+    sessions.map(_.userId).toSet
+--- after
+package com.acme.analytics
+
+case class Session(userId: String, seconds: Long)
+
+object SessionStats:
+  def users(sessions: List[Session]): Set[String] =
+    sessions.map(_.userId).toSet
+
+  def secondsPerUser(sessions: List[Session]): Map[String, Long] =
+    sessions.groupBy(_.userId).map { case (userId, userSessions) => userId -> userSessions.map(_.seconds).sum }
+=== END
+
+=== EDIT
+note: braced filter in a Laminar signal
+--- file: app/src/main/scala/com/acme/ui/TodoList.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Todo(title: String, done: Boolean)
+
+object TodoList:
+  def render(todos: Signal[List[Todo]]): HtmlElement =
+    ul(children <-- todos.map(_.map(todo => li(todo.title))))
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+case class Todo(title: String, done: Boolean)
+
+object TodoList:
+  def render(todos: Signal[List[Todo]]): HtmlElement =
+    ul(children <-- todos.map(_.map(todo => li(todo.title))))
+
+  def openCount(todos: Signal[List[Todo]]): Signal[Int] =
+    todos.map(_.filter { todo => !todo.done }.size)
+=== END
+
+=== EDIT
+note: braced flatMap inside an fs2 pipeline
+--- file: server/src/main/scala/com/acme/ingest/CsvIngest.scala
+--- before
+package com.acme.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import fs2.text
+
+class CsvIngest(source: Stream[IO, Byte]):
+  def lines: Stream[IO, String] =
+    source.through(text.utf8.decode).through(text.lines)
+--- after
+package com.acme.ingest
+
+import cats.effect.IO
+import fs2.Stream
+import fs2.text
+
+class CsvIngest(source: Stream[IO, Byte]):
+  def lines: Stream[IO, String] =
+    source.through(text.utf8.decode).through(text.lines)
+
+  def cells: Stream[IO, String] =
+    lines.flatMap { line => Stream.emits(line.split(",").toList) }
+=== END
+
+=== EDIT
+note: parenthesised if with braces in a test
+--- file: server/src/test/scala/com/acme/payments/RefundSuite.scala
+--- before
+package com.acme.payments
+
+import munit.FunSuite
+
+class RefundSuite extends FunSuite:
+  test("refund never exceeds the charge"):
+    assert(Refund.cap(BigDecimal(50), BigDecimal(80)) == BigDecimal(50))
+--- after
+package com.acme.payments
+
+import munit.FunSuite
+
+class RefundSuite extends FunSuite:
+  test("refund never exceeds the charge"):
+    assert(Refund.cap(BigDecimal(50), BigDecimal(80)) == BigDecimal(50))
+
+  test("zero charge refunds nothing"):
+    val refunded = Refund.cap(BigDecimal(0), BigDecimal(10))
+    if (refunded != BigDecimal(0)) {
+      fail(s"expected nothing refunded but got $refunded")
+    }
+=== END
+
+=== EDIT
+note: early-exit style guard written with parens and braces inside IO block
+--- file: server/src/main/scala/com/acme/inventory/StockAdjuster.scala
+--- before
+package com.acme.inventory
+
+import cats.effect.IO
+
+trait StockLedger:
+  def add(sku: String, delta: Int): IO[Unit]
+
+class StockAdjuster(ledger: StockLedger):
+  def adjust(sku: String, delta: Int): IO[Unit] =
+    ledger.add(sku, delta)
+--- after
+package com.acme.inventory
+
+import cats.effect.IO
+
+trait StockLedger:
+  def add(sku: String, delta: Int): IO[Unit]
+
+class StockAdjuster(ledger: StockLedger):
+  def adjust(sku: String, delta: Int): IO[Unit] =
+    if (delta == 0) {
+      IO.unit
+    } else {
+      ledger.add(sku, delta)
+    }
+=== END
+
+=== EDIT
+note: if without else in parens and braces, emitting a metric
+--- file: server/src/main/scala/com/acme/metrics/LatencyRecorder.scala
+--- before
+package com.acme.metrics
+
+import cats.effect.IO
+
+trait Histogram:
+  def observe(millis: Long): IO[Unit]
+
+class LatencyRecorder(histogram: Histogram, slowCounter: IO[Unit]):
+  def record(millis: Long): IO[Unit] =
+    histogram.observe(millis)
+--- after
+package com.acme.metrics
+
+import cats.effect.IO
+
+trait Histogram:
+  def observe(millis: Long): IO[Unit]
+
+class LatencyRecorder(histogram: Histogram, slowCounter: IO[Unit]):
+  def record(millis: Long): IO[Unit] =
+    histogram.observe(millis) *> {
+      if (millis > 1000) { slowCounter }
+      else IO.unit
+    }
+=== END
+
+=== EDIT
+note: section divider comment in a Laminar component
+--- file: app/src/main/scala/com/acme/ui/CheckoutForm.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object CheckoutForm:
+  val email = Var("")
+
+  def render: HtmlElement =
+    form(
+      input(typ := "email", controlled(value <-- email, onInput.mapToValue --> email))
+    )
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object CheckoutForm:
+  val email = Var("")
+  val coupon = Var("")
+
+  def render: HtmlElement =
+    form(
+      input(typ := "email", controlled(value <-- email, onInput.mapToValue --> email)),
+      // ---- coupon ----
+      input(placeholder := "Coupon", controlled(value <-- coupon, onInput.mapToValue --> coupon))
+    )
+=== END
+
+=== EDIT
+note: multi-line scaladoc on a new case class
+--- file: server/src/main/scala/com/brightcart/payments/Chargeback.scala
+--- before
+--- after
+package com.brightcart.payments
+
+import java.time.Instant
+
+/**
+ * A disputed card payment.
+ *
+ * @param reason the network reason code
+ */
+case class Chargeback(paymentId: String, reason: String, openedAt: Instant)
+
+object Chargeback:
+  def isFraud(chargeback: Chargeback): Boolean = chargeback.reason.startsWith("10.")
+=== END
+
+=== EDIT
+note: comment in a test explaining the fixture
+--- file: server/src/test/scala/com/acme/routing/RouteResolverSuite.scala
+--- before
+package com.acme.routing
+
+import munit.CatsEffectSuite
+
+class RouteResolverSuite extends CatsEffectSuite:
+  test("unknown route has no stops"):
+    RouteFixtures.resolver.stopsOf("nope").assertEquals(List.empty)
+--- after
+package com.acme.routing
+
+import munit.CatsEffectSuite
+
+class RouteResolverSuite extends CatsEffectSuite:
+  test("unknown route has no stops"):
+    RouteFixtures.resolver.stopsOf("nope").assertEquals(List.empty)
+
+  test("known route returns stops in order"):
+    // r-1 has three stops seeded in RouteFixtures
+    RouteFixtures.resolver.stopsOf("r-1").map(_.map(_.id)).assertEquals(List("a", "b", "c"))
+=== END
+
+=== EDIT
+note: inline block comment on a parameter
+--- file: server/src/main/scala/com/acme/maps/BoundingBox.scala
+--- before
+package com.acme.maps
+
+case class BoundingBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double)
+
+object BoundingBox:
+  def contains(box: BoundingBox, lat: Double, lon: Double): Boolean =
+    lat >= box.minLat && lat <= box.maxLat && lon >= box.minLon && lon <= box.maxLon
+--- after
+package com.acme.maps
+
+case class BoundingBox(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double)
+
+object BoundingBox:
+  def contains(box: BoundingBox, lat: Double, lon: Double): Boolean =
+    lat >= box.minLat && lat <= box.maxLat && lon >= box.minLon && lon <= box.maxLon
+
+  def expand(box: BoundingBox, margin: Double /* degrees */): BoundingBox =
+    BoundingBox(box.minLat - margin, box.minLon - margin, box.maxLat + margin, box.maxLon + margin)
+=== END
+
+=== EDIT
+note: cats.syntax.all in a test suite
+--- file: server/src/test/scala/com/acme/inventory/ReorderPlannerSuite.scala
+--- before
+package com.acme.inventory
+
+import munit.FunSuite
+
+class ReorderPlannerSuite extends FunSuite:
+  test("no minimums means no shortfalls"):
+    assertEquals(ReorderPlanner.shortfalls(Map.empty, Map.empty), List.empty)
+--- after
+package com.acme.inventory
+
+import cats.syntax.all.*
+import munit.FunSuite
+
+class ReorderPlannerSuite extends FunSuite:
+  test("no minimums means no shortfalls"):
+    assertEquals(ReorderPlanner.shortfalls(Map.empty, Map.empty), List.empty)
+
+  test("missing stock counts as zero"):
+    val minimums = Map(Sku("X") -> 2)
+    assertEquals(ReorderPlanner.shortfalls(Map.empty, minimums), Sku("X").pure[List])
+=== END
+
+=== EDIT
+note: replace two specific imports with cats.syntax.all
+--- file: server/src/main/scala/com/acme/scheduling/CalendarMerge.scala
+--- before
+package com.acme.scheduling
+
+import cats.syntax.foldable.*
+import cats.syntax.semigroup.*
+
+import java.time.LocalDate
+
+case class Busy(days: Set[LocalDate])
+
+object CalendarMerge:
+  def merge(calendars: List[Busy]): Set[LocalDate] =
+    calendars.map(_.days).combineAll
+--- after
+package com.acme.scheduling
+
+import cats.syntax.all.*
+
+import java.time.LocalDate
+
+case class Busy(days: Set[LocalDate])
+
+object CalendarMerge:
+  def merge(calendars: List[Busy]): Set[LocalDate] =
+    calendars.map(_.days).combineAll
+
+  def overlap(left: Busy, right: Busy): Set[LocalDate] =
+    left.days.intersect(right.days)
+=== END
+
+=== EDIT
+note: stream groupBy positional access in fs2 pipeline
+--- file: server/src/main/scala/com/acme/ingest/EventCounter.scala
+--- before
+package com.acme.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+case class Event(kind: String, payload: String)
+
+class EventCounter(events: Stream[IO, Event]):
+  def total: IO[Long] = events.compile.count
+--- after
+package com.acme.ingest
+
+import cats.effect.IO
+import fs2.Stream
+
+case class Event(kind: String, payload: String)
+
+class EventCounter(events: Stream[IO, Event]):
+  def total: IO[Long] = events.compile.count
+
+  def byKind: IO[Map[String, Int]] =
+    events.compile.toList.map(_.groupBy(_.kind).toList.map(group => group._1 -> group._2.size).toMap)
+=== END
+
+=== EDIT
+note: assert on positional tuple fields in a test
+--- file: server/src/test/scala/com/acme/payments/FxQuoteSuite.scala
+--- before
+package com.acme.payments
+
+import munit.FunSuite
+
+class FxQuoteSuite extends FunSuite:
+  test("rejects a pair without a slash"):
+    assertEquals(FxQuote.parsePair("EURUSD"), None)
+--- after
+package com.acme.payments
+
+import munit.FunSuite
+
+class FxQuoteSuite extends FunSuite:
+  test("rejects a pair without a slash"):
+    assertEquals(FxQuote.parsePair("EURUSD"), None)
+
+  test("splits base and counter"):
+    val parsed = FxQuote.parsePair("EUR/USD").get
+    assertEquals(parsed._1, "EUR")
+    assertEquals(parsed._2, "USD")
+=== END
+
+=== EDIT
+note: tuple3 third element via _3
+--- file: server/src/main/scala/com/skyline/weather/Extremes.scala
+--- before
+package com.skyline.weather
+
+object Extremes:
+  def range(values: List[Double]): Option[(Double, Double)] =
+    for
+      low  <- values.minOption
+      high <- values.maxOption
+    yield (low, high)
+--- after
+package com.skyline.weather
+
+object Extremes:
+  def range(values: List[Double]): Option[(Double, Double)] =
+    for
+      low  <- values.minOption
+      high <- values.maxOption
+    yield (low, high)
+
+  def hottestDay(days: List[(String, Double, Double)]): Option[String] =
+    days.maxByOption(_._3).map(day => day._1)
+=== END
+
+=== EDIT
+note: near miss - foldLeft with explicit seed and colon lambda
+--- file: server/src/main/scala/com/acme/billing/Ledger.scala
+--- before
+package com.acme.billing
+
+case class Entry(account: String, amount: BigDecimal)
+
+object Ledger:
+  def accounts(entries: List[Entry]): Set[String] = entries.map(_.account).toSet
+--- after
+package com.acme.billing
+
+case class Entry(account: String, amount: BigDecimal)
+
+object Ledger:
+  def accounts(entries: List[Entry]): Set[String] = entries.map(_.account).toSet
+
+  def balances(entries: List[Entry]): Map[String, BigDecimal] =
+    entries.foldLeft(Map.empty[String, BigDecimal]): (balances, entry) =>
+      balances.updatedWith(entry.account)(current => Some(current.getOrElse(BigDecimal(0)) + entry.amount))
+=== END
+
+=== EDIT
+note: near miss - collect with colon and indented cases
+--- file: server/src/main/scala/com/acme/auth/ClaimReader.scala
+--- before
+package com.acme.auth
+
+enum Claim:
+  case Subject(id: String)
+  case Role(name: String)
+  case Expiry(epochSeconds: Long)
+
+object ClaimReader:
+  def subject(claims: List[Claim]): Option[String] =
+    claims.collectFirst:
+      case Claim.Subject(id) => id
+--- after
+package com.acme.auth
+
+enum Claim:
+  case Subject(id: String)
+  case Role(name: String)
+  case Expiry(epochSeconds: Long)
+
+object ClaimReader:
+  def subject(claims: List[Claim]): Option[String] =
+    claims.collectFirst:
+      case Claim.Subject(id) => id
+
+  def roles(claims: List[Claim]): List[String] =
+    claims.collect:
+      case Claim.Role(name) => name
+=== END
+
+=== EDIT
+note: near miss - named tuple fields instead of positional
+--- file: server/src/main/scala/com/acme/analytics/Funnel.scala
+--- before
+package com.acme.analytics
+
+object Funnel:
+  def conversion(visits: Int, purchases: Int): Double =
+    if visits == 0 then 0.0 else purchases.toDouble / visits
+--- after
+package com.acme.analytics
+
+object Funnel:
+  def conversion(visits: Int, purchases: Int): Double =
+    if visits == 0 then 0.0 else purchases.toDouble / visits
+
+  def step(visits: Int, purchases: Int) =
+    (visits = visits, purchases = purchases, rate = conversion(visits, purchases))
+
+  def describe(visits: Int, purchases: Int): String =
+    val funnel = step(visits, purchases)
+    s"${funnel.purchases}/${funnel.visits} (${funnel.rate})"
+=== END
+
+=== EDIT
+note: near miss - identifier containing an underscore digit but not tuple access
+--- file: server/src/main/scala/com/acme/maps/Projection.scala
+--- before
+package com.acme.maps
+
+enum Projection:
+  case WebMercator, Wgs84
+--- after
+package com.acme.maps
+
+enum Projection:
+  case WebMercator, Wgs84
+
+object Projection:
+  def epsgCode(projection: Projection): String =
+    projection match
+      case Projection.WebMercator => "EPSG:3857"
+      case Projection.Wgs84       => "EPSG:4326"
+=== END
+
+=== EDIT
+note: fix - swap cats.syntax.all for the module actually used
+--- file: server/src/main/scala/com/acme/payments/SettlementService.scala
+--- before
+package com.acme.payments
+
+import cats.effect.IO
+import cats.syntax.all.*
+
+case class Settlement(merchantId: String, amount: BigDecimal)
+
+class SettlementService(ledger: Ledger):
+  def settleAll(settlements: List[Settlement]): IO[List[String]] =
+    settlements.traverse(ledger.post)
+
+trait Ledger:
+  def post(settlement: Settlement): IO[String]
+--- after
+package com.acme.payments
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+case class Settlement(merchantId: String, amount: BigDecimal)
+
+class SettlementService(ledger: Ledger):
+  def settleAll(settlements: List[Settlement]): IO[List[String]] =
+    settlements.traverse(ledger.post)
+
+trait Ledger:
+  def post(settlement: Settlement): IO[String]
+=== END
+
+=== EDIT
+note: fix - destructure instead of _1/_2
+--- file: server/src/main/scala/com/acme/inventory/WarehouseSplit.scala
+--- before
+package com.acme.inventory
+
+object WarehouseSplit:
+  def describe(split: (Int, Int)): String =
+    s"east=${split._1} west=${split._2}"
+--- after
+package com.acme.inventory
+
+object WarehouseSplit:
+  def describe(split: (Int, Int)): String =
+    val (east, west) = split
+    s"east=$east west=$west"
+=== END
+
+=== EDIT
+note: comment already present, edit changes another line
+--- file: server/src/main/scala/com/acme/scheduling/Holidays.scala
+--- before
+package com.acme.scheduling
+
+import java.time.LocalDate
+
+object Holidays:
+  // fixed-date holidays only
+  val fixed = Set((1, 1), (12, 25))
+
+  def isHoliday(date: LocalDate): Boolean =
+    fixed.contains((date.getMonthValue, date.getDayOfMonth))
+--- after
+package com.acme.scheduling
+
+import java.time.LocalDate
+
+object Holidays:
+  // fixed-date holidays only
+  val fixed = Set((1, 1), (5, 1), (12, 25))
+
+  def isHoliday(date: LocalDate): Boolean =
+    fixed.contains((date.getMonthValue, date.getDayOfMonth))
+=== END
+
+=== EDIT
+note: clean - add a tapir endpoint
+--- file: server/src/main/scala/com/acme/orders/OrderEndpoints.scala
+--- before
+package com.acme.orders
+
+import sttp.tapir.*
+
+object OrderEndpoints:
+  val cancel = endpoint.post.in("orders" / path[String]("id") / "cancel")
+--- after
+package com.acme.orders
+
+import sttp.tapir.*
+
+object OrderEndpoints:
+  val cancel = endpoint.post.in("orders" / path[String]("id") / "cancel")
+
+  val reopen = endpoint.post.in("orders" / path[String]("id") / "reopen")
+=== END
+
+=== EDIT
+note: clean - extend a for comprehension
+--- file: server/src/main/scala/com/acme/auth/LoginService.scala
+--- before
+package com.acme.auth
+
+import cats.effect.IO
+
+trait Users:
+  def find(email: String): IO[Option[String]]
+
+trait Sessions:
+  def open(userId: String): IO[String]
+
+class LoginService(users: Users, sessions: Sessions):
+  def login(email: String): IO[Option[String]] =
+    users.find(email).flatMap:
+      case Some(userId) => sessions.open(userId).map(Some(_))
+      case None         => IO.pure(None)
+--- after
+package com.acme.auth
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+
+trait Users:
+  def find(email: String): IO[Option[String]]
+
+trait Sessions:
+  def open(userId: String): IO[String]
+
+class LoginService(users: Users, sessions: Sessions):
+  def login(email: String): IO[Option[String]] =
+    for
+      userId  <- users.find(email.trim.toLowerCase)
+      session <- userId.traverse(sessions.open)
+    yield session
+=== END
+
+=== EDIT
+note: clean - Laminar button with onClick
+--- file: app/src/main/scala/com/acme/ui/Counter.scala
+--- before
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object Counter:
+  val count = Var(0)
+
+  def render: HtmlElement =
+    div(
+      child.text <-- count.signal.map(_.toString)
+    )
+--- after
+package com.acme.ui
+
+import com.raquo.laminar.api.L.*
+
+object Counter:
+  val count = Var(0)
+
+  def render: HtmlElement =
+    div(
+      child.text <-- count.signal.map(_.toString),
+      button("+1", onClick --> (_ => count.update(_ + 1)))
+    )
+=== END
+
+=== EDIT
+note: clean - new opaque type with smart constructor
+--- file: server/src/main/scala/com/acme/payments/Iban.scala
+--- before
+--- after
+package com.acme.payments
+
+opaque type Iban = String
+
+object Iban:
+  def parse(raw: String): Either[String, Iban] =
+    val compact = raw.replace(" ", "").toUpperCase
+    if compact.length >= 15 && compact.take(2).forall(_.isLetter) then Right(compact)
+    else Left(s"invalid IBAN: $raw")
+
+  extension (iban: Iban) def country: String = iban.take(2)
+=== END
+
+=== EDIT
+note: clean - change a log message
+--- file: server/src/main/scala/com/acme/notifications/Mailer.scala
+--- before
+package com.acme.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Mailer(logger: Logger[IO], send: (String, String) => IO[Unit]):
+  def notify(recipient: String, body: String): IO[Unit] =
+    send(recipient, body) *> logger.info(s"mail sent")
+--- after
+package com.acme.notifications
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class Mailer(logger: Logger[IO], send: (String, String) => IO[Unit]):
+  def notify(recipient: String, body: String): IO[Unit] =
+    send(recipient, body) *> logger.info(s"mail sent to $recipient (${body.length} chars)")
+=== END

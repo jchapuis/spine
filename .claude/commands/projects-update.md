@@ -22,6 +22,7 @@ Update the project registry and prefix shorthands in `projects/projects.md`, and
         `ln -sfn ../../../.abide/rubric.json projects/<dir>/.abide/rubric.json`
       - Report created / already correct / replaced.
 
-6. Confirm all changes to the user. Remind them that per-edit enforcement also needs a
-   one-time, per-project `npx @coldtea/abide init --project` (installs the agent hooks) and a
-   running local kev server — both documented in `.claude/skills/compliance-gate/README.md`.
+6. Confirm all changes to the user. Remind them that per-edit enforcement also needs a running
+   `kev-serve` and a one-time `.claude/skills/compliance-gate/bin/abide-enable projects/<dir>` per
+   project (never `abide init`, which would overwrite the shared rubric). Both are documented in
+   `.claude/skills/compliance-gate/README.md`.

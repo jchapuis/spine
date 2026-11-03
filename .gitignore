@@ -42,6 +42,9 @@ tools/
 .abide/finetune/runs/
 .abide/finetune/synthetic/*.jsonl
 .abide/finetune/synthetic/split*/
+# Mined from real project history (gritmaps is private): trains the model, never committed to this public repo
+.abide/finetune/synthetic/real-mech/
+.abide/finetune/synthetic/*.log
 __pycache__/
 
 # macOS

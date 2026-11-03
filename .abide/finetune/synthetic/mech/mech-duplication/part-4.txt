@@ -1,0 +1,979 @@
+=== TURN
+note: [pos factor-out.no-utils-object] add a Utils object with token helpers and call it from the session service
+--- file: server/src/main/scala/com/kestrel/auth/Utils.scala
+--- before
+--- after
+package com.kestrel.auth
+
+import java.security.SecureRandom
+import java.util.Base64
+
+object Utils:
+  private val random = SecureRandom()
+
+  def randomToken(bytes: Int): String =
+    val buffer = Array.ofDim[Byte](bytes)
+    random.nextBytes(buffer)
+    Base64.getUrlEncoder.withoutPadding.encodeToString(buffer)
+
+  def maskToken(token: String): String =
+    token.take(4) + "*" * (token.length - 4).max(0)
+--- file: server/src/main/scala/com/kestrel/auth/SessionService.scala
+--- before
+package com.kestrel.auth
+
+import cats.effect.IO
+import java.time.Instant
+
+class SessionService(store: SessionStore):
+  def open(userId: UserId, now: Instant): IO[Session] =
+    val session = Session(SessionId(java.util.UUID.randomUUID().toString), userId, now)
+    store.save(session).as(session)
+
+  def close(id: SessionId): IO[Unit] =
+    store.delete(id)
+--- after
+package com.kestrel.auth
+
+import cats.effect.IO
+import java.time.Instant
+
+class SessionService(store: SessionStore):
+  def open(userId: UserId, now: Instant): IO[Session] =
+    val session = Session(SessionId(Utils.randomToken(32)), userId, now)
+    store.save(session).as(session)
+
+  def close(id: SessionId): IO[Unit] =
+    store.delete(id)
+=== END
+
+=== TURN
+note: [pos factor-out.no-utils-object] dump cron parsing helpers into a nested Utils object inside the scheduler package object
+--- file: server/src/main/scala/com/kestrel/scheduling/CronSupport.scala
+--- before
+--- after
+package com.kestrel.scheduling
+
+import java.time.DayOfWeek
+
+object CronSupport:
+  object Utils:
+    def parseDay(raw: String): Option[DayOfWeek] =
+      DayOfWeek.values.find(_.toString.take(3).equalsIgnoreCase(raw))
+
+    def parseHour(raw: String): Option[Int] =
+      raw.toIntOption.filter(hour => hour >= 0 && hour < 24)
+--- file: server/src/main/scala/com/kestrel/scheduling/JobScheduleParser.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.data.ValidatedNel
+import cats.syntax.apply.*
+import cats.syntax.validated.*
+
+object JobScheduleParser:
+  def parse(day: String, hour: String): ValidatedNel[String, WeeklySlot] =
+    (validDay(day), validHour(hour)).mapN(WeeklySlot.apply)
+
+  private def validDay(raw: String) =
+    raw.invalidNel[java.time.DayOfWeek]
+
+  private def validHour(raw: String) =
+    raw.invalidNel[Int]
+--- after
+package com.kestrel.scheduling
+
+import cats.data.ValidatedNel
+import cats.syntax.apply.*
+import cats.syntax.validated.*
+
+object JobScheduleParser:
+  def parse(day: String, hour: String): ValidatedNel[String, WeeklySlot] =
+    (validDay(day), validHour(hour)).mapN(WeeklySlot.apply)
+
+  private def validDay(raw: String) =
+    CronSupport.Utils.parseDay(raw).toValidNel(s"unknown day $raw")
+
+  private def validHour(raw: String) =
+    CronSupport.Utils.parseHour(raw).toValidNel(s"invalid hour $raw")
+=== END
+
+=== TURN
+note: [pos factor-out.no-utils-object] add Utils with amount formatting for receipts and a test for it
+--- file: server/src/main/scala/com/paystream/payments/Utils.scala
+--- before
+--- after
+package com.paystream.payments
+
+import java.math.RoundingMode
+import java.util.Currency
+
+object Utils:
+  def formatMinor(amountMinor: Long, currency: Currency): String =
+    val scale = currency.getDefaultFractionDigits
+    val major = BigDecimal(amountMinor, scale).setScale(scale, RoundingMode.HALF_EVEN)
+    s"${currency.getCurrencyCode} $major"
+--- file: server/src/test/scala/com/paystream/payments/UtilsSuite.scala
+--- before
+--- after
+package com.paystream.payments
+
+import java.util.Currency
+import munit.FunSuite
+
+class UtilsSuite extends FunSuite:
+  test("formats euro cents with two decimals"):
+    assertEquals(Utils.formatMinor(1999L, Currency.getInstance("EUR")), "EUR 19.99")
+
+  test("formats yen without decimals"):
+    assertEquals(Utils.formatMinor(500L, Currency.getInstance("JPY")), "JPY 500")
+=== END
+
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] paste the same card-fee line into three fee calculators
+--- file: server/src/main/scala/com/paystream/payments/fees/CardFees.scala
+--- before
+package com.paystream.payments.fees
+
+object CardFees:
+  def forAmount(amount: BigDecimal): BigDecimal =
+    amount * BigDecimal("0.019")
+--- after
+package com.paystream.payments.fees
+
+object CardFees:
+  def forAmount(amount: BigDecimal): BigDecimal =
+    val percentage = amount * 0.029
+    percentage.max(BigDecimal(0.30))
+--- file: server/src/main/scala/com/paystream/payments/fees/WalletFees.scala
+--- before
+--- after
+package com.paystream.payments.fees
+
+object WalletFees:
+  def forAmount(amount: BigDecimal, crossBorder: Boolean): BigDecimal =
+    val percentage = amount * 0.029
+    if crossBorder then percentage * 2 else percentage
+--- file: server/src/main/scala/com/paystream/payments/fees/RefundFees.scala
+--- before
+--- after
+package com.paystream.payments.fees
+
+object RefundFees:
+  def reversal(amount: BigDecimal): BigDecimal =
+    val percentage = amount * 0.029
+    -percentage
+=== END
+
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same backoff multiplier line in a retry policy used three times across two schedulers
+--- file: server/src/main/scala/com/kestrel/scheduling/ReminderScheduler.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ReminderScheduler(dispatcher: ReminderDispatcher):
+  def run(reminder: Reminder): IO[Unit] =
+    dispatcher.send(reminder)
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class ReminderScheduler(dispatcher: ReminderDispatcher):
+  def run(reminder: Reminder): IO[Unit] =
+    Retry
+      .exponential(
+        dispatcher.send(reminder),
+        initial = 200.millis,
+        factor = 1.75
+      )
+      .void
+
+  def runUrgent(reminder: Reminder): IO[Unit] =
+    Retry
+      .exponential(
+        dispatcher.sendUrgent(reminder),
+        initial = 200.millis,
+        factor = 1.75
+      )
+      .void
+--- file: server/src/main/scala/com/kestrel/scheduling/DigestScheduler.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class DigestScheduler(mailer: DigestMailer):
+  def run(digest: Digest): IO[Unit] =
+    mailer.deliver(digest)
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class DigestScheduler(mailer: DigestMailer):
+  def run(digest: Digest): IO[Unit] =
+    Retry
+      .exponential(
+        mailer.deliver(digest),
+        initial = 200.millis,
+        factor = 1.75
+      )
+      .void
+=== END
+
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] histogram bucket boundaries copied verbatim into three endpoint metrics
+--- file: server/src/main/scala/com/kestrel/metrics/HttpMetrics.scala
+--- before
+--- after
+package com.kestrel.metrics
+
+class HttpMetrics(registry: HistogramRegistry):
+  val requestLatency =
+    registry.histogram("http_request_seconds")(
+      buckets = List(0.005, 0.01, 0.05, 0.1, 0.5, 1.0)
+    )
+--- file: server/src/main/scala/com/kestrel/metrics/DbMetrics.scala
+--- before
+--- after
+package com.kestrel.metrics
+
+class DbMetrics(registry: HistogramRegistry):
+  val queryLatency =
+    registry.histogram("db_query_seconds")(
+      buckets = List(0.005, 0.01, 0.05, 0.1, 0.5, 1.0)
+    )
+
+  val poolWait =
+    registry.histogram("db_pool_wait_seconds")(
+      buckets = List(0.005, 0.01, 0.05, 0.1, 0.5, 1.0)
+    )
+=== END
+
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] add an annual billing discount guard to a test and two plan calculators with the same line
+--- file: server/src/main/scala/com/paystream/payments/plans/AnnualPlan.scala
+--- before
+package com.paystream.payments.plans
+
+object AnnualPlan:
+  def price(monthly: BigDecimal): BigDecimal =
+    monthly * 12
+--- after
+package com.paystream.payments.plans
+
+object AnnualPlan:
+  def price(monthly: BigDecimal): BigDecimal =
+    val discounted = monthly * 12 * (1 - 0.15)
+    discounted.setScale(2, BigDecimal.RoundingMode.HALF_UP)
+--- file: server/src/main/scala/com/paystream/payments/plans/TeamPlan.scala
+--- before
+package com.paystream.payments.plans
+
+object TeamPlan:
+  def price(monthlyPerSeat: BigDecimal, seats: Int, annual: Boolean): BigDecimal =
+    monthlyPerSeat * seats * (if annual then 12 else 1)
+--- after
+package com.paystream.payments.plans
+
+object TeamPlan:
+  def price(monthlyPerSeat: BigDecimal, seats: Int, annual: Boolean): BigDecimal =
+    val monthly = monthlyPerSeat * seats
+    if annual then
+      val discounted = monthly * 12 * (1 - 0.15)
+      discounted.setScale(2, BigDecimal.RoundingMode.HALF_UP)
+    else monthly
+--- file: server/src/test/scala/com/paystream/payments/plans/AnnualPlanSuite.scala
+--- before
+--- after
+package com.paystream.payments.plans
+
+import munit.FunSuite
+
+class AnnualPlanSuite extends FunSuite:
+  test("annual price applies the yearly discount"):
+    val monthly = BigDecimal(10)
+    val discounted = monthly * 12 * (1 - 0.15)
+    assertEquals(AnnualPlan.price(monthly), discounted.setScale(2, BigDecimal.RoundingMode.HALF_UP))
+=== END
+
+=== TURN
+note: [pos factor-out.duplicate-import-block] new refresh-token routes file copies the login routes import block verbatim
+--- file: server/src/main/scala/com/kestrel/auth/http/LoginRoutes.scala
+--- before
+package com.kestrel.auth.http
+
+import cats.effect.IO
+import com.kestrel.auth.SessionService
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class LoginRoutes(sessions: SessionService):
+  val routes = HttpRoutes.of[IO]:
+    case POST -> Root / "login" => Ok("login")
+--- after
+package com.kestrel.auth.http
+
+import cats.effect.IO
+import com.kestrel.auth.SessionService
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class LoginRoutes(sessions: SessionService):
+  val routes = HttpRoutes.of[IO]:
+    case POST -> Root / "login"  => Ok("login")
+    case POST -> Root / "logout" => NoContent()
+--- file: server/src/main/scala/com/kestrel/auth/http/RefreshRoutes.scala
+--- before
+--- after
+package com.kestrel.auth.http
+
+import cats.effect.IO
+import com.kestrel.auth.SessionService
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class RefreshRoutes(sessions: SessionService):
+  val routes = HttpRoutes.of[IO]:
+    case POST -> Root / "refresh" => Ok("refreshed")
+=== END
+
+=== TURN
+note: [pos factor-out.duplicate-import-block] split payout repository in two; second file reorders the same skunk imports
+--- file: server/src/main/scala/com/paystream/payments/payouts/PayoutQueries.scala
+--- before
+--- after
+package com.paystream.payments.payouts
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
+
+object PayoutQueries:
+  val insert: Command[(String, Long)] =
+    sql"INSERT INTO payouts (merchant_id, amount_minor) VALUES ($varchar, $int8)".command
+
+  val pendingFor: Query[String, Long] =
+    sql"SELECT amount_minor FROM payouts WHERE merchant_id = $varchar AND status = 'pending'".query(int8)
+--- file: server/src/main/scala/com/paystream/payments/payouts/PayoutAuditQueries.scala
+--- before
+--- after
+package com.paystream.payments.payouts
+
+import skunk.implicits.*
+import skunk.codec.all.*
+import skunk.*
+
+object PayoutAuditQueries:
+  val record: Command[(String, String)] =
+    sql"INSERT INTO payout_audit (payout_id, event) VALUES ($varchar, $text)".command
+=== END
+
+=== TURN
+note: [pos factor-out.duplicate-import-block] add a cron job test that copies the existing job test's imports wholesale
+--- file: server/src/test/scala/com/kestrel/scheduling/NightlyJobSuite.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import cats.effect.testkit.TestControl
+import munit.CatsEffectSuite
+import scala.concurrent.duration.*
+
+class NightlyJobSuite extends CatsEffectSuite:
+  test("nightly job runs once per day"):
+    val program = NightlyJob.countRuns(2.days)
+    TestControl.executeEmbed(program).assertEquals(2)
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import cats.effect.testkit.TestControl
+import munit.CatsEffectSuite
+import scala.concurrent.duration.*
+
+class NightlyJobSuite extends CatsEffectSuite:
+  test("nightly job runs once per day"):
+    val program = NightlyJob.countRuns(2.days)
+    TestControl.executeEmbed(program).assertEquals(2)
+
+  test("nightly job does not run within the first day"):
+    TestControl.executeEmbed(NightlyJob.countRuns(23.hours)).assertEquals(0)
+--- file: server/src/test/scala/com/kestrel/scheduling/HourlyJobSuite.scala
+--- before
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import cats.effect.testkit.TestControl
+import munit.CatsEffectSuite
+import scala.concurrent.duration.*
+
+class HourlyJobSuite extends CatsEffectSuite:
+  test("hourly job runs every hour"):
+    TestControl.executeEmbed(HourlyJob.countRuns(5.hours)).assertEquals(5)
+=== END
+
+=== TURN
+note: [pos factor-out.duplicate-import-block] metrics exporters for prometheus and statsd share the identical import block
+--- file: server/src/main/scala/com/kestrel/metrics/export/PrometheusExporter.scala
+--- before
+--- after
+package com.kestrel.metrics.export
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import com.kestrel.metrics.CounterRegistry
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class PrometheusExporter(registry: CounterRegistry, sink: String => IO[Unit]):
+  def stream(every: FiniteDuration): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](every).evalMap: _ =>
+      registry.snapshot.flatMap: counters =>
+        counters.toList.traverse((name, value) => sink(s"$name $value")).void
+--- file: server/src/main/scala/com/kestrel/metrics/export/StatsdExporter.scala
+--- before
+--- after
+package com.kestrel.metrics.export
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import com.kestrel.metrics.CounterRegistry
+import fs2.Stream
+import scala.concurrent.duration.*
+
+class StatsdExporter(registry: CounterRegistry, send: String => IO[Unit]):
+  def stream(every: FiniteDuration): Stream[IO, Unit] =
+    Stream.awakeEvery[IO](every).evalMap: _ =>
+      registry.snapshot.flatMap: counters =>
+        counters.toList.traverse((name, value) => send(s"$name:$value|c")).void
+=== END
+
+=== TURN
+note: [pos cats.foldleft-combine-pattern] monthly revenue script sums per-merchant maps with foldLeft(Map.empty)(_ |+| _)
+--- file: scripts/monthly-revenue.sc
+--- before
+--- after
+import cats.syntax.semigroup.*
+import scala.io.Source
+
+val rows = Source.fromFile("payments.csv").getLines().drop(1).toList
+
+val perMerchant = rows.map: line =>
+  line.split(',') match
+    case Array(merchant, amount) => Map(merchant -> amount.trim.toLong)
+    case _                       => Map.empty[String, Long]
+
+val totals = perMerchant.foldLeft(Map.empty[String, Long])(_ |+| _)
+
+totals.toList.sortBy(-_._2).foreach((merchant, total) => println(s"$merchant,$total"))
+--- file: scripts/README-revenue.sc
+--- before
+--- after
+import scala.io.Source
+
+val header = Source.fromFile("payments.csv").getLines().take(1).mkString
+println(s"columns: $header")
+=== END
+
+=== TURN
+note: [pos cats.foldleft-combine-pattern] package-less session stats aggregator combines per-node counts with foldLeft(Monoid.empty)
+--- file: server/src/main/scala/SessionStats.scala
+--- before
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class NodeSessions(active: Long, expired: Long)
+
+object NodeSessions:
+  given Monoid[NodeSessions] = Monoid.instance(
+    NodeSessions(0, 0),
+    (left, right) => NodeSessions(left.active + right.active, left.expired + right.expired)
+  )
+
+object SessionStats:
+  def cluster(nodes: List[NodeSessions]): NodeSessions =
+    nodes.foldLeft(Monoid.empty[NodeSessions])(_ |+| _)
+--- file: server/src/main/scala/com/kestrel/auth/AdminRoutes.scala
+--- before
+package com.kestrel.auth
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class AdminRoutes:
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "health" => Ok("ok")
+--- after
+package com.kestrel.auth
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class AdminRoutes(nodes: IO[List[NodeSessions]]):
+  val routes = HttpRoutes.of[IO]:
+    case GET -> Root / "health"   => Ok("ok")
+    case GET -> Root / "sessions" => nodes.map(SessionStats.cluster).flatMap(stats => Ok(stats.active.toString))
+=== END
+
+=== TURN
+note: [pos cats.foldleft-combine-pattern] metrics rollup script merges latency histograms with foldLeft(Monoid[...].empty)
+--- file: scripts/latency-rollup.sc
+--- before
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class Histogram(buckets: Map[String, Long])
+
+given Monoid[Histogram] = Monoid.instance(Histogram(Map.empty), (a, b) => Histogram(a.buckets |+| b.buckets))
+
+val shards = List(
+  Histogram(Map("le_100" -> 40L, "le_500" -> 7L)),
+  Histogram(Map("le_100" -> 31L, "le_500" -> 12L))
+)
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class Histogram(buckets: Map[String, Long])
+
+given Monoid[Histogram] = Monoid.instance(Histogram(Map.empty), (a, b) => Histogram(a.buckets |+| b.buckets))
+
+val shards = List(
+  Histogram(Map("le_100" -> 40L, "le_500" -> 7L)),
+  Histogram(Map("le_100" -> 31L, "le_500" -> 12L))
+)
+
+val merged = shards.foldLeft(Monoid[Histogram].empty)(_ |+| _)
+merged.buckets.toList.sorted.foreach(println)
+--- file: scripts/latency-shards.sc
+--- before
+--- after
+import scala.io.Source
+
+val shardFiles = List("shard-a.txt", "shard-b.txt")
+shardFiles.foreach(name => println(Source.fromFile(name).getLines().size))
+=== END
+
+=== TURN
+note: [near no-utils-object] helpers for scheduling windows go in a domain-named module, not Utils
+--- file: server/src/main/scala/com/kestrel/scheduling/TimeWindow.scala
+--- before
+--- after
+package com.kestrel.scheduling
+
+import java.time.Instant
+import java.time.Duration
+
+case class TimeWindow(start: Instant, end: Instant):
+  def contains(instant: Instant): Boolean =
+    !instant.isBefore(start) && instant.isBefore(end)
+
+  def length: Duration =
+    Duration.between(start, end)
+
+object TimeWindow:
+  def starting(start: Instant, length: Duration): TimeWindow =
+    TimeWindow(start, start.plus(length))
+--- file: server/src/main/scala/com/kestrel/scheduling/SlotFinder.scala
+--- before
+package com.kestrel.scheduling
+
+import java.time.Instant
+
+class SlotFinder(busy: List[(Instant, Instant)]):
+  def isFree(at: Instant): Boolean =
+    busy.forall((start, end) => at.isBefore(start) || !at.isBefore(end))
+--- after
+package com.kestrel.scheduling
+
+import java.time.Instant
+
+class SlotFinder(busy: List[TimeWindow]):
+  def isFree(at: Instant): Boolean =
+    busy.forall(window => !window.contains(at))
+=== END
+
+=== TURN
+note: [near repeated-numeric-literal] extract the repeated VAT rate into a named constant referenced by three invoices
+--- file: server/src/main/scala/com/paystream/payments/tax/Vat.scala
+--- before
+--- after
+package com.paystream.payments.tax
+
+object Vat:
+  val StandardRate = BigDecimal("0.21")
+
+  def on(net: BigDecimal): BigDecimal =
+    net * StandardRate
+--- file: server/src/main/scala/com/paystream/payments/tax/InvoiceTotals.scala
+--- before
+package com.paystream.payments.tax
+
+object InvoiceTotals:
+  def gross(net: BigDecimal): BigDecimal =
+    net + net * 0.21
+
+  def vatOnly(net: BigDecimal): BigDecimal =
+    net * 0.21
+--- after
+package com.paystream.payments.tax
+
+object InvoiceTotals:
+  def gross(net: BigDecimal): BigDecimal =
+    net + Vat.on(net)
+
+  def vatOnly(net: BigDecimal): BigDecimal =
+    Vat.on(net)
+--- file: server/src/main/scala/com/paystream/payments/tax/CreditNotes.scala
+--- before
+package com.paystream.payments.tax
+
+object CreditNotes:
+  def vatRefund(net: BigDecimal): BigDecimal =
+    -(net * 0.21)
+--- after
+package com.paystream.payments.tax
+
+object CreditNotes:
+  def vatRefund(net: BigDecimal): BigDecimal =
+    -Vat.on(net)
+=== END
+
+=== TURN
+note: [near repeated-numeric-literal] same jitter factor written twice only, below the threshold
+--- file: server/src/main/scala/com/kestrel/scheduling/Jitter.scala
+--- before
+--- after
+package com.kestrel.scheduling
+
+import scala.concurrent.duration.*
+import scala.util.Random
+
+object Jitter:
+  def apply(base: FiniteDuration, random: Random): FiniteDuration =
+    val spread = base.toMillis * 0.25
+    (base.toMillis + (random.nextDouble() * spread).toLong).millis
+--- file: server/src/main/scala/com/kestrel/scheduling/PollingLoop.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class PollingLoop(poll: IO[Unit]):
+  def run(interval: FiniteDuration): IO[Nothing] =
+    (poll >> IO.sleep(interval)).foreverM
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import scala.concurrent.duration.*
+
+class PollingLoop(poll: IO[Unit]):
+  def run(interval: FiniteDuration): IO[Nothing] =
+    val spread = interval.toMillis * 0.25
+    (poll >> IO.sleep(interval + spread.toLong.millis)).foreverM
+=== END
+
+=== TURN
+note: [near duplicate-import-block] webhook verifier shares most imports with the signer but adds one more, so the blocks differ
+--- file: server/src/main/scala/com/paystream/payments/webhooks/WebhookSigner.scala
+--- before
+package com.paystream.payments.webhooks
+
+import java.nio.charset.StandardCharsets
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+class WebhookSigner(secret: Array[Byte]):
+  def sign(payload: String): Array[Byte] =
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(secret, "HmacSHA256"))
+    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
+--- after
+package com.paystream.payments.webhooks
+
+import java.nio.charset.StandardCharsets
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+class WebhookSigner(secret: Array[Byte]):
+  def sign(payload: String): Array[Byte] =
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(secret, "HmacSHA256"))
+    mac.doFinal(payload.getBytes(StandardCharsets.UTF_8))
+
+  def signHex(payload: String): String =
+    sign(payload).map(byte => f"$byte%02x").mkString
+--- file: server/src/main/scala/com/paystream/payments/webhooks/WebhookVerifier.scala
+--- before
+--- after
+package com.paystream.payments.webhooks
+
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+
+class WebhookVerifier(signer: WebhookSigner):
+  def verify(payload: String, signatureHex: String): Boolean =
+    MessageDigest.isEqual(
+      signer.signHex(payload).getBytes(StandardCharsets.UTF_8),
+      signatureHex.getBytes(StandardCharsets.UTF_8)
+    )
+=== END
+
+=== TURN
+note: [near foldleft-combine-pattern] script sums refund maps with combineAll instead of foldLeft(empty)(_ |+| _)
+--- file: scripts/refund-summary.sc
+--- before
+--- after
+import cats.syntax.foldable.*
+import scala.io.Source
+
+val refunds = Source.fromFile("refunds.csv").getLines().drop(1).toList.map: line =>
+  line.split(',') match
+    case Array(reason, amount) => Map(reason -> amount.trim.toLong)
+    case _                     => Map.empty[String, Long]
+
+val byReason = refunds.combineAll
+
+byReason.toList.sortBy(_._1).foreach((reason, total) => println(s"$reason: $total"))
+--- file: scripts/refund-count.sc
+--- before
+--- after
+import scala.io.Source
+
+val lines = Source.fromFile("refunds.csv").getLines().drop(1).toList
+println(lines.foldLeft(0)((count, _) => count + 1))
+=== END
+
+=== TURN
+note: [near no-utils-object] fix: dissolve the old Utils object into a domain-named PasswordPolicy module
+--- file: server/src/main/scala/com/kestrel/auth/Utils.scala
+--- before
+package com.kestrel.auth
+
+object Utils:
+  def strongEnough(password: String): Boolean =
+    password.length >= 12 && password.exists(_.isDigit) && password.exists(_.isUpper)
+--- after
+package com.kestrel.auth
+
+object PasswordPolicy:
+  def strongEnough(password: String): Boolean =
+    password.length >= 12 && password.exists(_.isDigit) && password.exists(_.isUpper)
+--- file: server/src/main/scala/com/kestrel/auth/RegistrationService.scala
+--- before
+package com.kestrel.auth
+
+import cats.effect.IO
+
+class RegistrationService(users: UserRepository):
+  def register(email: Email, password: String): IO[Either[RegistrationError, UserId]] =
+    if Utils.strongEnough(password) then users.create(email, password).map(Right(_))
+    else IO.pure(Left(RegistrationError.WeakPassword))
+--- after
+package com.kestrel.auth
+
+import cats.effect.IO
+
+class RegistrationService(users: UserRepository):
+  def register(email: Email, password: String): IO[Either[RegistrationError, UserId]] =
+    if PasswordPolicy.strongEnough(password) then users.create(email, password).map(Right(_))
+    else IO.pure(Left(RegistrationError.WeakPassword))
+=== END
+
+=== TURN
+note: [near foldleft-combine-pattern] package-less settlement report uses foldMap instead of foldLeft(Monoid.empty)
+--- file: server/src/main/scala/SettlementReport.scala
+--- before
+import cats.syntax.foldable.*
+
+case class Settlement(merchant: String, amountMinor: Long)
+
+object SettlementReport:
+  def total(settlements: List[Settlement]): Long =
+    settlements.map(_.amountMinor).sum
+--- after
+import cats.syntax.foldable.*
+
+case class Settlement(merchant: String, amountMinor: Long)
+
+object SettlementReport:
+  def total(settlements: List[Settlement]): Long =
+    settlements.foldMap(_.amountMinor)
+
+  def perMerchant(settlements: List[Settlement]): Map[String, Long] =
+    settlements.foldMap(settlement => Map(settlement.merchant -> settlement.amountMinor))
+--- file: server/src/test/scala/SettlementReportSuite.scala
+--- before
+--- after
+import munit.FunSuite
+
+class SettlementReportSuite extends FunSuite:
+  test("perMerchant groups amounts by merchant"):
+    val settlements = List(Settlement("m1", 100L), Settlement("m1", 50L), Settlement("m2", 7L))
+    assertEquals(SettlementReport.perMerchant(settlements), Map("m1" -> 150L, "m2" -> 7L))
+=== END
+
+=== TURN
+note: [clean] add session expiry check to the service and a test for it
+--- file: server/src/main/scala/com/kestrel/auth/SessionExpiry.scala
+--- before
+--- after
+package com.kestrel.auth
+
+import java.time.Duration
+import java.time.Instant
+
+object SessionExpiry:
+  def isExpired(session: Session, now: Instant, ttl: Duration): Boolean =
+    session.openedAt.plus(ttl).isBefore(now)
+--- file: server/src/test/scala/com/kestrel/auth/SessionExpirySuite.scala
+--- before
+--- after
+package com.kestrel.auth
+
+import java.time.Duration
+import java.time.Instant
+import munit.FunSuite
+
+class SessionExpirySuite extends FunSuite:
+  test("session older than its ttl is expired"):
+    val openedAt = Instant.parse("2026-01-01T00:00:00Z")
+    val session = Session(SessionId("s-1"), UserId("u-1"), openedAt)
+    assert(SessionExpiry.isExpired(session, openedAt.plus(Duration.ofHours(2)), Duration.ofHours(1)))
+
+  test("fresh session is not expired"):
+    val openedAt = Instant.parse("2026-01-01T00:00:00Z")
+    val session = Session(SessionId("s-2"), UserId("u-2"), openedAt)
+    assert(!SessionExpiry.isExpired(session, openedAt.plusSeconds(30), Duration.ofHours(1)))
+=== END
+
+=== TURN
+note: [clean] add a cancel endpoint to the payment intent routes and the service method behind it
+--- file: server/src/main/scala/com/paystream/payments/intents/IntentService.scala
+--- before
+package com.paystream.payments.intents
+
+import cats.effect.IO
+
+class IntentService(repository: IntentRepository):
+  def confirm(id: IntentId): IO[Intent] =
+    repository.updateStatus(id, IntentStatus.Confirmed)
+--- after
+package com.paystream.payments.intents
+
+import cats.effect.IO
+
+class IntentService(repository: IntentRepository):
+  def confirm(id: IntentId): IO[Intent] =
+    repository.updateStatus(id, IntentStatus.Confirmed)
+
+  def cancel(id: IntentId): IO[Intent] =
+    repository.updateStatus(id, IntentStatus.Cancelled)
+--- file: server/src/main/scala/com/paystream/payments/intents/IntentRoutes.scala
+--- before
+package com.paystream.payments.intents
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class IntentRoutes(service: IntentService):
+  val routes = HttpRoutes.of[IO]:
+    case POST -> Root / "intents" / id / "confirm" =>
+      service.confirm(IntentId(id)).flatMap(intent => Ok(intent.status.toString))
+--- after
+package com.paystream.payments.intents
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import org.http4s.dsl.io.*
+
+class IntentRoutes(service: IntentService):
+  val routes = HttpRoutes.of[IO]:
+    case POST -> Root / "intents" / id / "confirm" =>
+      service.confirm(IntentId(id)).flatMap(intent => Ok(intent.status.toString))
+    case POST -> Root / "intents" / id / "cancel" =>
+      service.cancel(IntentId(id)).flatMap(intent => Ok(intent.status.toString))
+=== END
+
+=== TURN
+note: [clean] introduce a closed enum for job states and use it in the job runner
+--- file: server/src/main/scala/com/kestrel/scheduling/JobState.scala
+--- before
+--- after
+package com.kestrel.scheduling
+
+enum JobState:
+  case Queued, Running, Succeeded, Failed
+
+  def terminal: Boolean = this match
+    case Succeeded | Failed => true
+    case Queued | Running   => false
+--- file: server/src/main/scala/com/kestrel/scheduling/JobRunner.scala
+--- before
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class JobRunner(states: Ref[IO, Map[JobId, String]]):
+  def start(id: JobId): IO[Unit] =
+    states.update(_.updated(id, "running"))
+--- after
+package com.kestrel.scheduling
+
+import cats.effect.IO
+import cats.effect.Ref
+
+class JobRunner(states: Ref[IO, Map[JobId, JobState]]):
+  def start(id: JobId): IO[Unit] =
+    states.update(_.updated(id, JobState.Running))
+
+  def finish(id: JobId, ok: Boolean): IO[Unit] =
+    states.update(_.updated(id, if ok then JobState.Succeeded else JobState.Failed))
+=== END
+
+=== TURN
+note: [clean] add an error-rate gauge computed from counters, plus a property test
+--- file: server/src/main/scala/com/kestrel/metrics/ErrorRate.scala
+--- before
+--- after
+package com.kestrel.metrics
+
+object ErrorRate:
+  def of(errors: Long, total: Long): Option[Double] =
+    Option.when(total > 0)(errors.toDouble / total.toDouble)
+--- file: server/src/test/scala/com/kestrel/metrics/ErrorRateSuite.scala
+--- before
+--- after
+package com.kestrel.metrics
+
+import munit.ScalaCheckSuite
+import org.scalacheck.Gen
+import org.scalacheck.Prop.forAll
+
+class ErrorRateSuite extends ScalaCheckSuite:
+  property("error rate stays within the unit interval"):
+    forAll(Gen.choose(1L, 10000L)): total =>
+      forAll(Gen.choose(0L, total)): errors =>
+        ErrorRate.of(errors, total).exists(rate => rate >= 0 && rate <= 1)
+
+  test("no rate without traffic"):
+    assertEquals(ErrorRate.of(0L, 0L), None)
+=== END

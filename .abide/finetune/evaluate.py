@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Real-code check: what abide would do on our own diffs with stock Kev-4B vs the fine-tune, each as served.
 
-    cd tools/kev && uv run --extra serve python ../../.abide/finetune/evaluate.py ../../.abide/finetune/runs/<run>/checkpoint
+    cd tools/kev && uv run --extra serve python ../../.abide/finetune/evaluate.py ../../.abide/finetune/runs/<run>/checkpoint [real/<file>.jsonl]
+
+The optional second argument picks the real set: real/real.jsonl (judgment rules, the default) or
+real/mech-real-records.jsonl (mechanical groups, gate-labelled by build_real_mech.py + label_mechanical.py).
 
 Runs on this Mac (real/real.jsonl never leaves it). The synthetic development comparison, temperature fit and bootstrap
 come from the Modal run (runs/scala-v1/result.json); this script only covers the real diffs: per rule, how many clean
@@ -25,12 +28,12 @@ CONTEXT = {"max_state": SERVE_MAX_STATE, "max_branch": SERVE_MAX_BRANCH, "max_pa
 ACT, FLAG = 0.8, 0.5
 
 
-def real_report(run, out):
+def real_report(run, out, real_file):
     """Per rule: clean diffs that land in the note / repair bands, and the violation probabilities, at the served temperature."""
     temperature = read_meta(Checkpoint(run).path).temperature
     predictor = LocalPredictor(run, "mps", LoadOptions(temperature=1.0, merge=True), context=CONTEXT)
     try:
-        rows = evaluate_records(load_records(DATA / "real/real.jsonl"), predictor, out)[1]
+        rows = evaluate_records(load_records(DATA / real_file), predictor, out)[1]
     finally:
         del predictor; gc.collect(); torch.mps.empty_cache()
     by_rule = {}
@@ -42,10 +45,10 @@ def real_report(run, out):
     return {"temperature": temperature, "rules": by_rule}
 
 
-def main(checkpoint):
-    out = Path(checkpoint).parent / "eval"
+def main(checkpoint, real_file="real/real.jsonl"):
+    out = Path(checkpoint).parent / ("eval" if real_file == "real/real.jsonl" else f"eval-{Path(real_file).stem}")
     shutil.rmtree(out, ignore_errors=True)   # kev.benchmark refuses to write into an existing directory
-    real = {"baseline": real_report(BASELINE, out / "baseline"), "finetuned": real_report(checkpoint, out / "finetuned")}
+    real = {"baseline": real_report(BASELINE, out / "baseline", real_file), "finetuned": real_report(checkpoint, out / "finetuned", real_file)}
     (out / "real.json").write_text(json.dumps(real, indent=2))
     b, f = real["baseline"], real["finetuned"]
     print(f"real diffs, as served (baseline T {b['temperature']:.2f}, finetuned T {f['temperature']:.2f}): clean diffs that get a note / a forced repair")
@@ -56,4 +59,4 @@ def main(checkpoint):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    main(*sys.argv[1:3])

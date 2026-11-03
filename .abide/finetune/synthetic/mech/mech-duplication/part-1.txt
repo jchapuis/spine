@@ -1,0 +1,953 @@
+=== TURN
+note: [pos factor-out.no-utils-object] extract invoice number formatting into a new Utils object used by the renderer
+--- file: server/src/main/scala/com/acme/invoicing/Utils.scala
+--- before
+--- after
+package com.acme.invoicing
+
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+
+object Utils:
+  private val compact = DateTimeFormatter.ofPattern("yyyyMMdd")
+
+  def invoiceNumber(issuedOn: LocalDate, sequence: Int): String =
+    s"INV-${issuedOn.format(compact)}-${sequence.toString.reverse.padTo(5, '0').reverse}"
+
+  def normaliseReference(raw: String): String =
+    raw.trim.toUpperCase.replaceAll("\\s+", "-")
+--- file: server/src/main/scala/com/acme/invoicing/InvoiceRenderer.scala
+--- before
+package com.acme.invoicing
+
+import cats.effect.IO
+
+class InvoiceRenderer(templates: TemplateStore):
+  def render(invoice: Invoice): IO[String] =
+    templates
+      .load("invoice")
+      .map: template =>
+        template
+          .replace("{{customer}}", invoice.customerName)
+          .replace("{{total}}", invoice.total.toString)
+--- after
+package com.acme.invoicing
+
+import cats.effect.IO
+
+class InvoiceRenderer(templates: TemplateStore):
+  def render(invoice: Invoice): IO[String] =
+    templates
+      .load("invoice")
+      .map: template =>
+        template
+          .replace("{{number}}", Utils.invoiceNumber(invoice.issuedOn, invoice.sequence))
+          .replace("{{customer}}", invoice.customerName)
+          .replace("{{total}}", invoice.total.toString)
+=== END
+=== TURN
+note: [clean] add overdue filter to the invoice repository and cover it with a test
+--- file: server/src/main/scala/com/ledgerly/invoicing/InvoiceRepository.scala
+--- before
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+import skunk.Session
+import skunk.implicits.*
+
+class InvoiceRepository(session: Session[IO]):
+  def findByCustomer(customerId: CustomerId): IO[List[Invoice]] =
+    session.execute(InvoiceSql.byCustomer)(customerId)
+--- after
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+import java.time.LocalDate
+import skunk.Session
+import skunk.implicits.*
+
+class InvoiceRepository(session: Session[IO]):
+  def findByCustomer(customerId: CustomerId): IO[List[Invoice]] =
+    session.execute(InvoiceSql.byCustomer)(customerId)
+
+  def findOverdue(today: LocalDate): IO[List[Invoice]] =
+    session.execute(InvoiceSql.overdue)(today)
+--- file: server/src/main/scala/com/ledgerly/invoicing/InvoiceSql.scala
+--- before
+package com.ledgerly.invoicing
+
+import skunk.*
+import skunk.implicits.*
+
+object InvoiceSql:
+  val byCustomer: Query[CustomerId, Invoice] =
+    sql"""
+      SELECT id, customer_id, due_on, amount_cents, status
+      FROM invoice
+      WHERE customer_id = ${InvoiceCodecs.customerId}
+    """.query(InvoiceCodecs.invoice)
+--- after
+package com.ledgerly.invoicing
+
+import skunk.*
+import skunk.codec.temporal.date
+import skunk.implicits.*
+
+object InvoiceSql:
+  val byCustomer: Query[CustomerId, Invoice] =
+    sql"""
+      SELECT id, customer_id, due_on, amount_cents, status
+      FROM invoice
+      WHERE customer_id = ${InvoiceCodecs.customerId}
+    """.query(InvoiceCodecs.invoice)
+
+  val overdue: Query[java.time.LocalDate, Invoice] =
+    sql"""
+      SELECT id, customer_id, due_on, amount_cents, status
+      FROM invoice
+      WHERE due_on < $date AND status = 'open'
+    """.query(InvoiceCodecs.invoice)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same VAT rate line pasted into three tax calculators
+--- file: server/src/main/scala/com/acme/tax/DomesticTaxCalculator.scala
+--- before
+--- after
+package com.acme.tax
+
+class DomesticTaxCalculator:
+  def taxFor(net: BigDecimal): BigDecimal =
+    val vatRate = BigDecimal("0.21")
+    net * vatRate
+--- file: server/src/main/scala/com/acme/tax/EuTaxCalculator.scala
+--- before
+package com.acme.tax
+
+class EuTaxCalculator(registry: VatRegistry):
+  def taxFor(net: BigDecimal, country: CountryCode): BigDecimal =
+    net * registry.rateFor(country)
+--- after
+package com.acme.tax
+
+class EuTaxCalculator(registry: VatRegistry):
+  def taxFor(net: BigDecimal, country: CountryCode): BigDecimal =
+    net * registry.rateFor(country)
+
+  def fallbackTaxFor(net: BigDecimal): BigDecimal =
+    val vatRate = BigDecimal("0.21")
+    net * vatRate
+--- file: server/src/main/scala/com/acme/tax/ReverseChargeCalculator.scala
+--- before
+--- after
+package com.acme.tax
+
+class ReverseChargeCalculator:
+  def selfAssessed(net: BigDecimal, buyerRegistered: Boolean): BigDecimal =
+    val vatRate = BigDecimal("0.21")
+    if buyerRegistered then net * vatRate else BigDecimal(0)
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new credit note service copies the invoice service import block verbatim
+--- file: server/src/main/scala/com/ledgerly/billing/InvoiceService.scala
+--- before
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+
+class InvoiceService(repository: InvoiceRepository)(using logger: Logger[IO]):
+  def issueAll(drafts: List[DraftInvoice]): IO[List[Invoice]] =
+    drafts.traverse: draft =>
+      repository.insert(draft) <* logger.info(s"issued invoice for ${draft.customerId}")
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+
+class InvoiceService(repository: InvoiceRepository)(using logger: Logger[IO]):
+  def issueAll(drafts: List[DraftInvoice]): IO[List[Invoice]] =
+    drafts.traverse: draft =>
+      repository.insert(draft) <* logger.info(s"issued invoice for ${draft.customerId}")
+
+  def voidInvoice(id: InvoiceId): IO[Unit] =
+    repository.markVoid(id) *> logger.info(s"voided invoice $id")
+--- file: server/src/main/scala/com/ledgerly/billing/CreditNoteService.scala
+--- before
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.syntax.traverse.*
+import org.typelevel.log4cats.Logger
+
+class CreditNoteService(repository: CreditNoteRepository)(using logger: Logger[IO]):
+  def issueAll(requests: List[CreditRequest]): IO[List[CreditNote]] =
+    requests.traverse: request =>
+      repository.insert(request) <* logger.info(s"issued credit note for ${request.invoiceId}")
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] monthly revenue scala-cli script sums per-plan maps with foldLeft(Map.empty)(_ |+| _)
+--- file: scripts/monthly-revenue.sc
+--- before
+--- after
+import cats.syntax.semigroup.*
+import java.time.YearMonth
+
+case class Charge(plan: String, month: YearMonth, cents: Long)
+
+val charges = List(
+  Charge("starter", YearMonth.of(2026, 9), 1900L),
+  Charge("team", YearMonth.of(2026, 9), 9900L),
+  Charge("starter", YearMonth.of(2026, 9), 1900L)
+)
+
+val revenueByPlan = charges
+  .map(charge => Map(charge.plan -> charge.cents))
+  .foldLeft(Map.empty[String, Long])(_ |+| _)
+
+revenueByPlan.toList.sortBy(_._1).foreach((plan, cents) => println(s"$plan: $cents"))
+--- file: scripts/README.txt
+--- before
+Run scripts with scala-cli.
+--- after
+Run scripts with scala-cli.
+monthly-revenue.sc prints revenue per plan for the current month.
+=== END
+=== TURN
+note: [near factor-out.repeated-numeric-literal] late fee rate extracted to a named constant and referenced from three places
+--- file: server/src/main/scala/com/acme/billing/LateFees.scala
+--- before
+--- after
+package com.acme.billing
+
+object LateFees:
+  val MonthlyRate = BigDecimal("0.015")
+  val GraceDays = 14
+--- file: server/src/main/scala/com/acme/billing/LateFeeCalculator.scala
+--- before
+package com.acme.billing
+
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
+
+class LateFeeCalculator:
+  def feeFor(invoice: Invoice, today: LocalDate): BigDecimal =
+    val daysLate = ChronoUnit.DAYS.between(invoice.dueOn, today)
+    if daysLate > 14 then invoice.amount * BigDecimal("0.015") else BigDecimal(0)
+--- after
+package com.acme.billing
+
+import java.time.LocalDate
+import java.time.temporal.ChronoUnit
+
+class LateFeeCalculator:
+  def feeFor(invoice: Invoice, today: LocalDate): BigDecimal =
+    val daysLate = ChronoUnit.DAYS.between(invoice.dueOn, today)
+    if daysLate > LateFees.GraceDays then invoice.amount * LateFees.MonthlyRate else BigDecimal(0)
+--- file: server/src/test/scala/com/acme/billing/LateFeeCalculatorSuite.scala
+--- before
+package com.acme.billing
+
+import java.time.LocalDate
+import munit.FunSuite
+
+class LateFeeCalculatorSuite extends FunSuite:
+  test("no fee inside the grace period"):
+    val invoice = Invoice.sample.copy(dueOn = LocalDate.of(2026, 3, 1))
+    assertEquals(LateFeeCalculator().feeFor(invoice, LocalDate.of(2026, 3, 10)), BigDecimal(0))
+--- after
+package com.acme.billing
+
+import java.time.LocalDate
+import munit.FunSuite
+
+class LateFeeCalculatorSuite extends FunSuite:
+  test("no fee inside the grace period"):
+    val invoice = Invoice.sample.copy(dueOn = LocalDate.of(2026, 3, 1))
+    assertEquals(LateFeeCalculator().feeFor(invoice, LocalDate.of(2026, 3, 10)), BigDecimal(0))
+
+  test("fee applies the monthly rate after the grace period"):
+    val invoice = Invoice.sample.copy(dueOn = LocalDate.of(2026, 3, 1), amount = BigDecimal(1000))
+    assertEquals(LateFeeCalculator().feeFor(invoice, LocalDate.of(2026, 4, 1)), BigDecimal(15))
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] add a Utils object to tax with rounding helpers and use it from the calculator
+--- file: server/src/main/scala/com/ledgerly/tax/Utils.scala
+--- before
+--- after
+package com.ledgerly.tax
+
+import scala.math.BigDecimal.RoundingMode
+
+object Utils:
+  def roundToCents(amount: BigDecimal): BigDecimal =
+    amount.setScale(2, RoundingMode.HALF_EVEN)
+
+  def percent(amount: BigDecimal, rate: TaxRate): BigDecimal =
+    roundToCents(amount * rate.value)
+--- file: server/src/main/scala/com/ledgerly/tax/SalesTaxCalculator.scala
+--- before
+package com.ledgerly.tax
+
+class SalesTaxCalculator(rates: RateTable):
+  def taxFor(line: InvoiceLine): BigDecimal =
+    line.amount * rates.rateFor(line.region).value
+--- after
+package com.ledgerly.tax
+
+class SalesTaxCalculator(rates: RateTable):
+  def taxFor(line: InvoiceLine): BigDecimal =
+    Utils.percent(line.amount, rates.rateFor(line.region))
+=== END
+=== TURN
+note: [near factor-out.duplicate-import-block] statement exporter shares most imports with the invoice exporter but adds fs2.text
+--- file: server/src/main/scala/com/acme/invoicing/InvoiceCsvExporter.scala
+--- before
+--- after
+package com.acme.invoicing
+
+import cats.effect.IO
+import fs2.Stream
+import fs2.io.file.Files
+import fs2.io.file.Path
+
+class InvoiceCsvExporter(repository: InvoiceRepository):
+  def export(target: Path): IO[Unit] =
+    repository.streamAll
+      .map(invoice => s"${invoice.id},${invoice.customerName},${invoice.total}\n")
+      .through(fs2.text.utf8.encode)
+      .through(Files[IO].writeAll(target))
+      .compile
+      .drain
+
+  def header: Stream[IO, String] = Stream.emit("id,customer,total\n")
+--- file: server/src/main/scala/com/acme/invoicing/StatementCsvExporter.scala
+--- before
+--- after
+package com.acme.invoicing
+
+import cats.effect.IO
+import fs2.Stream
+import fs2.io.file.Files
+import fs2.io.file.Path
+import fs2.text
+
+class StatementCsvExporter(statements: StatementRepository):
+  def export(customerId: CustomerId, target: Path): IO[Unit] =
+    (Stream.emit("date,description,balance\n") ++ statements.linesFor(customerId).map(_.toCsvRow))
+      .through(text.utf8.encode)
+      .through(Files[IO].writeAll(target))
+      .compile
+      .drain
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] package-less tax summary helper totals regional amounts via foldLeft(Monoid.empty)(_ |+| _)
+--- file: server/src/main/scala/TaxSummary.scala
+--- before
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class RegionalTax(region: String, collected: BigDecimal)
+
+object TaxSummary:
+  given Monoid[BigDecimal] = Monoid.instance(BigDecimal(0), _ + _)
+
+  def totalCollected(entries: List[RegionalTax]): BigDecimal =
+    entries.map(_.collected).foldLeft(Monoid.empty[BigDecimal])(_ |+| _)
+
+  def byRegion(entries: List[RegionalTax]): Map[String, BigDecimal] =
+    entries.groupMapReduce(_.region)(_.collected)(_ + _)
+--- file: server/src/test/scala/TaxSummarySuite.scala
+--- before
+--- after
+import munit.FunSuite
+
+class TaxSummarySuite extends FunSuite:
+  test("totals collected tax across regions"):
+    val entries = List(RegionalTax("BE", BigDecimal(21)), RegionalTax("FR", BigDecimal(20)))
+    assertEquals(TaxSummary.totalCollected(entries), BigDecimal(41))
+=== END
+=== TURN
+note: [clean] add a currency field to the payment received event and its codec
+--- file: server/src/main/scala/com/ledgerly/billing/PaymentReceived.scala
+--- before
+package com.ledgerly.billing
+
+import java.time.Instant
+
+case class PaymentReceived(invoiceId: InvoiceId, amountCents: Long, receivedAt: Instant)
+--- after
+package com.ledgerly.billing
+
+import java.time.Instant
+
+case class PaymentReceived(invoiceId: InvoiceId, amountCents: Long, currency: Currency, receivedAt: Instant)
+--- file: server/src/main/scala/com/ledgerly/billing/PaymentCodecs.scala
+--- before
+package com.ledgerly.billing
+
+import io.circe.Codec
+import io.circe.generic.semiauto.deriveCodec
+
+object PaymentCodecs:
+  given Codec[InvoiceId] = Codec.from(
+    io.circe.Decoder.decodeUUID.map(InvoiceId(_)),
+    io.circe.Encoder.encodeUUID.contramap(_.value)
+  )
+  given Codec[PaymentReceived] = deriveCodec
+--- after
+package com.ledgerly.billing
+
+import io.circe.Codec
+import io.circe.generic.semiauto.deriveCodec
+
+object PaymentCodecs:
+  given Codec[InvoiceId] = Codec.from(
+    io.circe.Decoder.decodeUUID.map(InvoiceId(_)),
+    io.circe.Encoder.encodeUUID.contramap(_.value)
+  )
+  given Codec[Currency] = Codec.from(
+    io.circe.Decoder.decodeString.emap(Currency.parse),
+    io.circe.Encoder.encodeString.contramap(_.code)
+  )
+  given Codec[PaymentReceived] = deriveCodec
+--- file: server/src/test/scala/com/ledgerly/billing/PaymentCodecsSuite.scala
+--- before
+--- after
+package com.ledgerly.billing
+
+import io.circe.syntax.*
+import java.time.Instant
+import java.util.UUID
+import munit.FunSuite
+
+class PaymentCodecsSuite extends FunSuite:
+  import PaymentCodecs.given
+
+  test("payment received round-trips through json"):
+    val event = PaymentReceived(InvoiceId(UUID.randomUUID()), 4200L, Currency.Eur, Instant.EPOCH)
+    assertEquals(event.asJson.as[PaymentReceived], Right(event))
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] enterprise discount case line pasted into monthly, annual and quote pricing
+--- file: server/src/main/scala/com/acme/billing/VolumeDiscounts.scala
+--- before
+package com.acme.billing
+
+object VolumeDiscounts:
+  def monthlyRate(tier: Tier): BigDecimal = tier match
+    case Tier.Enterprise => BigDecimal("0.30")
+    case Tier.Team       => BigDecimal("0.10")
+    case Tier.Starter    => BigDecimal(0)
+--- after
+package com.acme.billing
+
+object VolumeDiscounts:
+  def monthlyRate(tier: Tier): BigDecimal = tier match
+    case Tier.Enterprise => BigDecimal("0.30")
+    case Tier.Team       => BigDecimal("0.10")
+    case Tier.Starter    => BigDecimal(0)
+
+  def annualRate(tier: Tier): BigDecimal = tier match
+    case Tier.Enterprise => BigDecimal("0.30")
+    case Tier.Team       => BigDecimal("0.15")
+    case Tier.Starter    => BigDecimal("0.05")
+--- file: server/src/main/scala/com/acme/billing/QuoteBuilder.scala
+--- before
+package com.acme.billing
+
+class QuoteBuilder(catalog: PriceCatalog):
+  def quote(tier: Tier, seats: Int): Quote =
+    Quote(tier, seats, catalog.listPrice(tier) * seats)
+--- after
+package com.acme.billing
+
+class QuoteBuilder(catalog: PriceCatalog):
+  def quote(tier: Tier, seats: Int): Quote =
+    val discount = tier match
+      case Tier.Enterprise => BigDecimal("0.30")
+      case _               => BigDecimal(0)
+    Quote(tier, seats, catalog.listPrice(tier) * seats * (1 - discount))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] tax rate routes copied from the invoice routes, same tapir/http4s import set
+--- file: server/src/main/scala/com/ledgerly/invoicing/InvoiceRoutes.scala
+--- before
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import sttp.tapir.server.http4s.Http4sServerInterpreter
+
+class InvoiceRoutes(logic: InvoiceLogic):
+  val routes: HttpRoutes[IO] =
+    Http4sServerInterpreter[IO]().toRoutes(List(InvoiceEndpoints.list.serverLogic(logic.list)))
+--- after
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import sttp.tapir.server.http4s.Http4sServerInterpreter
+
+class InvoiceRoutes(logic: InvoiceLogic):
+  val routes: HttpRoutes[IO] =
+    Http4sServerInterpreter[IO]().toRoutes(
+      List(
+        InvoiceEndpoints.list.serverLogic(logic.list),
+        InvoiceEndpoints.get.serverLogic(logic.get)
+      )
+    )
+--- file: server/src/main/scala/com/ledgerly/invoicing/TaxRateRoutes.scala
+--- before
+--- after
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+import org.http4s.HttpRoutes
+import sttp.tapir.server.http4s.Http4sServerInterpreter
+
+class TaxRateRoutes(logic: TaxRateLogic):
+  val routes: HttpRoutes[IO] =
+    Http4sServerInterpreter[IO]().toRoutes(List(TaxRateEndpoints.list.serverLogic(logic.list)))
+=== END
+=== TURN
+note: [near cats.foldleft-combine-pattern] invoice totals script uses combineAll instead of folding over Monoid.empty
+--- file: scripts/invoice-totals.sc
+--- before
+import cats.syntax.semigroup.*
+
+case class LineTotal(net: BigDecimal, tax: BigDecimal)
+
+val lines = List(LineTotal(BigDecimal(100), BigDecimal(21)), LineTotal(BigDecimal(40), BigDecimal(8)))
+println(lines.map(_.net).reduce(_ + _))
+--- after
+import cats.syntax.foldable.*
+
+case class LineTotal(net: BigDecimal, tax: BigDecimal)
+
+val lines = List(LineTotal(BigDecimal(100), BigDecimal(21)), LineTotal(BigDecimal(40), BigDecimal(8)))
+val netByIndex = lines.zipWithIndex.map((line, index) => Map(index -> line.net))
+println(lines.map(_.net).sum)
+println(netByIndex.combineAll)
+--- file: scripts/tax-totals.sc
+--- before
+--- after
+import cats.syntax.foldable.*
+
+val taxes = List(Map("BE" -> BigDecimal(21)), Map("FR" -> BigDecimal(20)), Map("BE" -> BigDecimal(6)))
+println(taxes.combineAll)
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] billing period helpers dumped into object Utils with a test
+--- file: server/src/main/scala/com/acme/billing/period/Utils.scala
+--- before
+--- after
+package com.acme.billing.period
+
+import java.time.LocalDate
+import java.time.YearMonth
+
+object Utils:
+  def periodStart(month: YearMonth): LocalDate = month.atDay(1)
+
+  def periodEnd(month: YearMonth): LocalDate = month.atEndOfMonth
+
+  def contains(month: YearMonth, date: LocalDate): Boolean =
+    !date.isBefore(periodStart(month)) && !date.isAfter(periodEnd(month))
+--- file: server/src/test/scala/com/acme/billing/period/UtilsSuite.scala
+--- before
+--- after
+package com.acme.billing.period
+
+import java.time.LocalDate
+import java.time.YearMonth
+import munit.FunSuite
+
+class UtilsSuite extends FunSuite:
+  test("period covers the last day of the month"):
+    assert(Utils.contains(YearMonth.of(2026, 2), LocalDate.of(2026, 2, 28)))
+=== END
+=== TURN
+note: [near factor-out.no-utils-object] rounding helpers placed in a domain-named Money module as extensions
+--- file: server/src/main/scala/com/ledgerly/billing/Money.scala
+--- before
+--- after
+package com.ledgerly.billing
+
+import scala.math.BigDecimal.RoundingMode
+
+object Money:
+  extension (amount: BigDecimal)
+    def toCents: Long = (amount * 100).setScale(0, RoundingMode.HALF_EVEN).toLong
+    def roundedForInvoice: BigDecimal = amount.setScale(2, RoundingMode.HALF_EVEN)
+--- file: server/src/main/scala/com/ledgerly/billing/InvoiceLineBuilder.scala
+--- before
+package com.ledgerly.billing
+
+class InvoiceLineBuilder:
+  def build(description: String, quantity: Int, unitPrice: BigDecimal): InvoiceLine =
+    InvoiceLine(description, quantity, unitPrice * quantity)
+--- after
+package com.ledgerly.billing
+
+import Money.*
+
+class InvoiceLineBuilder:
+  def build(description: String, quantity: Int, unitPrice: BigDecimal): InvoiceLine =
+    InvoiceLine(description, quantity, (unitPrice * quantity).roundedForInvoice)
+=== END
+=== TURN
+note: [clean] stream invoice reminders with a bounded parallelism and add a reminder message type
+--- file: server/src/main/scala/com/acme/invoicing/ReminderJob.scala
+--- before
+package com.acme.invoicing
+
+import cats.effect.IO
+import fs2.Stream
+
+class ReminderJob(repository: InvoiceRepository, mailer: Mailer):
+  def run: IO[Unit] =
+    repository.streamOverdue
+      .evalMap(invoice => mailer.send(invoice.customerEmail, s"Invoice ${invoice.id} is overdue"))
+      .compile
+      .drain
+--- after
+package com.acme.invoicing
+
+import cats.effect.IO
+import fs2.Stream
+
+class ReminderJob(repository: InvoiceRepository, mailer: Mailer):
+  def run: IO[Unit] =
+    repository.streamOverdue
+      .map(ReminderMessage.overdue)
+      .parEvalMapUnordered(8)(message => mailer.send(message.recipient, message.body))
+      .compile
+      .drain
+--- file: server/src/main/scala/com/acme/invoicing/ReminderMessage.scala
+--- before
+--- after
+package com.acme.invoicing
+
+case class ReminderMessage(recipient: Email, body: String)
+
+object ReminderMessage:
+  def overdue(invoice: Invoice): ReminderMessage =
+    ReminderMessage(invoice.customerEmail, s"Invoice ${invoice.id} is overdue since ${invoice.dueOn}")
+=== END
+=== TURN
+note: [pos cats.foldleft-combine-pattern] ledger reconciliation script merges per-account balances with foldLeft(Monoid[...].empty)(_ |+| _)
+--- file: scripts/reconcile-ledger.sc
+--- before
+--- after
+import cats.Monoid
+import cats.syntax.semigroup.*
+
+case class Entry(account: String, cents: Long)
+
+val bankEntries = List(Entry("receivables", 12000L), Entry("fees", -350L))
+val ledgerEntries = List(Entry("receivables", 11000L), Entry("fees", -350L), Entry("refunds", -1000L))
+
+def balances(entries: List[Entry]): Map[String, Long] =
+  entries
+    .map(entry => Map(entry.account -> entry.cents))
+    .foldLeft(Monoid[Map[String, Long]].empty)(_ |+| _)
+
+val drift = balances(bankEntries) |+| balances(ledgerEntries).view.mapValues(-_).toMap
+drift.filter((_, cents) => cents != 0L).foreach((account, cents) => println(s"$account drifts by $cents"))
+--- file: scripts/reconcile-ledger.md
+--- before
+--- after
+Compares bank and ledger balances per account and prints the accounts that drift.
+=== END
+=== TURN
+note: [near factor-out.repeated-numeric-literal] withholding rate appears only twice, in the calculator and its test
+--- file: server/src/main/scala/com/ledgerly/tax/WithholdingCalculator.scala
+--- before
+--- after
+package com.ledgerly.tax
+
+class WithholdingCalculator:
+  def withheld(gross: BigDecimal, residency: Residency): BigDecimal =
+    residency match
+      case Residency.Domestic => BigDecimal(0)
+      case Residency.Foreign  => gross * BigDecimal("0.30")
+--- file: server/src/test/scala/com/ledgerly/tax/WithholdingCalculatorSuite.scala
+--- before
+--- after
+package com.ledgerly.tax
+
+import munit.FunSuite
+
+class WithholdingCalculatorSuite extends FunSuite:
+  test("foreign payees have the statutory rate withheld"):
+    val gross = BigDecimal(1000)
+    assertEquals(WithholdingCalculator().withheld(gross, Residency.Foreign), gross * BigDecimal("0.30"))
+
+  test("domestic payees have nothing withheld"):
+    assertEquals(WithholdingCalculator().withheld(BigDecimal(1000), Residency.Domestic), BigDecimal(0))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new subscription renewal service and its suite each paste the same import block as the existing dunning suite
+--- file: server/src/test/scala/com/acme/billing/DunningServiceSuite.scala
+--- before
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
+
+class DunningServiceSuite extends CatsEffectSuite:
+  test("sends the first reminder after the due date"):
+    for
+      sent <- Ref.of[IO, List[InvoiceId]](List.empty)
+      _    <- DunningService(FakeMailer(sent)).remind(Invoice.sample)
+      ids  <- sent.get
+    yield assertEquals(ids, List(Invoice.sample.id))
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
+
+class DunningServiceSuite extends CatsEffectSuite:
+  test("sends the first reminder after the due date"):
+    for
+      sent <- Ref.of[IO, List[InvoiceId]](List.empty)
+      _    <- DunningService(FakeMailer(sent)).remind(Invoice.sample)
+      ids  <- sent.get
+    yield assertEquals(ids, List(Invoice.sample.id))
+
+  test("does not remind paid invoices"):
+    for
+      sent <- Ref.of[IO, List[InvoiceId]](List.empty)
+      _    <- DunningService(FakeMailer(sent)).remind(Invoice.sample.copy(status = InvoiceStatus.Paid))
+      ids  <- sent.get
+    yield assertEquals(ids, List.empty)
+--- file: server/src/test/scala/com/acme/billing/RenewalServiceSuite.scala
+--- before
+--- after
+package com.acme.billing
+
+import cats.effect.IO
+import cats.effect.Ref
+import munit.CatsEffectSuite
+
+class RenewalServiceSuite extends CatsEffectSuite:
+  test("renews subscriptions ending today"):
+    for
+      renewed <- Ref.of[IO, List[SubscriptionId]](List.empty)
+      _       <- RenewalService(FakeBilling(renewed)).renewDue(Subscription.endingToday)
+      ids     <- renewed.get
+    yield assertEquals(ids, List(Subscription.endingToday.id))
+=== END
+=== TURN
+note: [clean] tapir endpoint for downloading an invoice pdf plus logic wiring
+--- file: server/src/main/scala/com/ledgerly/invoicing/InvoicePdfEndpoints.scala
+--- before
+--- after
+package com.ledgerly.invoicing
+
+import sttp.tapir.*
+
+object InvoicePdfEndpoints:
+  val download: PublicEndpoint[InvoiceId, String, Array[Byte], Any] =
+    endpoint.get
+      .in("invoices" / path[InvoiceId]("invoiceId") / "pdf")
+      .errorOut(stringBody)
+      .out(byteArrayBody)
+      .out(header("Content-Type", "application/pdf"))
+--- file: server/src/main/scala/com/ledgerly/invoicing/InvoicePdfLogic.scala
+--- before
+--- after
+package com.ledgerly.invoicing
+
+import cats.effect.IO
+
+trait InvoicePdfLogic:
+  def download(id: InvoiceId): IO[Either[String, Array[Byte]]]
+
+object InvoicePdfLogic:
+  def apply(repository: InvoiceRepository, renderer: PdfRenderer): InvoicePdfLogic =
+    id =>
+      repository.find(id).flatMap:
+        case Some(invoice) => renderer.render(invoice).map(Right(_))
+        case None          => IO.pure(Left(s"invoice $id not found"))
+=== END
+=== TURN
+note: [near factor-out.duplicate-import-block] two repositories share only two imports, below the block threshold
+--- file: server/src/main/scala/com/acme/tax/TaxRateRepository.scala
+--- before
+--- after
+package com.acme.tax
+
+import cats.effect.IO
+import skunk.Session
+
+class TaxRateRepository(session: Session[IO]):
+  def current(region: Region): IO[Option[TaxRate]] =
+    session.option(TaxRateSql.current)(region)
+--- file: server/src/main/scala/com/acme/tax/ExemptionRepository.scala
+--- before
+--- after
+package com.acme.tax
+
+import cats.effect.IO
+import skunk.Session
+
+class ExemptionRepository(session: Session[IO]):
+  def forCustomer(customerId: CustomerId): IO[List[Exemption]] =
+    session.execute(ExemptionSql.byCustomer)(customerId)
+=== END
+=== TURN
+note: [pos factor-out.repeated-numeric-literal] same FX buffer line copied into three converters
+--- file: server/src/main/scala/com/ledgerly/billing/fx/UsdConverter.scala
+--- before
+--- after
+package com.ledgerly.billing.fx
+
+class UsdConverter(rates: FxRates):
+  def toEur(cents: Long): BigDecimal =
+    val midRate = rates.usdToEur
+    val withBuffer = midRate * BigDecimal("1.02")
+    BigDecimal(cents) * withBuffer / 100
+--- file: server/src/main/scala/com/ledgerly/billing/fx/GbpConverter.scala
+--- before
+--- after
+package com.ledgerly.billing.fx
+
+class GbpConverter(rates: FxRates):
+  def toEur(cents: Long): BigDecimal =
+    val midRate = rates.gbpToEur
+    val withBuffer = midRate * BigDecimal("1.02")
+    BigDecimal(cents) * withBuffer / 100
+--- file: server/src/main/scala/com/ledgerly/billing/fx/ChfConverter.scala
+--- before
+--- after
+package com.ledgerly.billing.fx
+
+class ChfConverter(rates: FxRates):
+  def toEur(cents: Long): BigDecimal =
+    val midRate = rates.chfToEur
+    val withBuffer = midRate * BigDecimal("1.02")
+    BigDecimal(cents) * withBuffer / 100
+=== END
+=== TURN
+note: [pos factor-out.no-utils-object] invoicing gains a Utils object for email masking alongside a notifier that uses it
+--- file: server/src/main/scala/com/ledgerly/invoicing/notify/Utils.scala
+--- before
+--- after
+package com.ledgerly.invoicing.notify
+
+object Utils:
+  def maskEmail(email: String): String =
+    email.split("@").toList match
+      case local :: domain :: Nil => s"${local.take(2)}***@$domain"
+      case _                      => "***"
+--- file: server/src/main/scala/com/ledgerly/invoicing/notify/InvoiceNotifier.scala
+--- before
+package com.ledgerly.invoicing.notify
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class InvoiceNotifier(mailer: Mailer)(using logger: Logger[IO]):
+  def notify(invoice: Invoice): IO[Unit] =
+    mailer.send(invoice.customerEmail, s"Your invoice ${invoice.id} is ready")
+--- after
+package com.ledgerly.invoicing.notify
+
+import cats.effect.IO
+import org.typelevel.log4cats.Logger
+
+class InvoiceNotifier(mailer: Mailer)(using logger: Logger[IO]):
+  def notify(invoice: Invoice): IO[Unit] =
+    mailer.send(invoice.customerEmail, s"Your invoice ${invoice.id} is ready") *>
+      logger.info(s"notified ${Utils.maskEmail(invoice.customerEmail)} about ${invoice.id}")
+=== END
+=== TURN
+note: [clean] fix tax rounding bug by rounding per line instead of on the total, with a regression test
+--- file: server/src/main/scala/com/acme/tax/InvoiceTax.scala
+--- before
+package com.acme.tax
+
+import scala.math.BigDecimal.RoundingMode
+
+object InvoiceTax:
+  def total(lines: List[TaxedLine]): BigDecimal =
+    lines.map(line => line.net * line.rate.value).sum.setScale(2, RoundingMode.HALF_UP)
+--- after
+package com.acme.tax
+
+import scala.math.BigDecimal.RoundingMode
+
+object InvoiceTax:
+  def total(lines: List[TaxedLine]): BigDecimal =
+    lines.map(line => (line.net * line.rate.value).setScale(2, RoundingMode.HALF_UP)).sum
+--- file: server/src/test/scala/com/acme/tax/InvoiceTaxSuite.scala
+--- before
+--- after
+package com.acme.tax
+
+import munit.FunSuite
+
+class InvoiceTaxSuite extends FunSuite:
+  test("tax is rounded per line before summing"):
+    val lines = List.fill(3)(TaxedLine(BigDecimal("0.05"), TaxRate.standard))
+    assertEquals(InvoiceTax.total(lines), BigDecimal("0.03"))
+=== END
+=== TURN
+note: [pos factor-out.duplicate-import-block] new payout repository pasted with the exact skunk import block of the payment repository
+--- file: server/src/main/scala/com/ledgerly/billing/PaymentRepository.scala
+--- before
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.implicits.*
+
+class PaymentRepository(pool: Resource[IO, Session[IO]]):
+  def record(payment: PaymentReceived): IO[Unit] =
+    pool.use(_.execute(PaymentSql.insert)(payment)).void
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.implicits.*
+
+class PaymentRepository(pool: Resource[IO, Session[IO]]):
+  def record(payment: PaymentReceived): IO[Unit] =
+    pool.use(_.execute(PaymentSql.insert)(payment)).void
+
+  def forInvoice(id: InvoiceId): IO[List[PaymentReceived]] =
+    pool.use(_.execute(PaymentSql.byInvoice)(id))
+--- file: server/src/main/scala/com/ledgerly/billing/PayoutRepository.scala
+--- before
+--- after
+package com.ledgerly.billing
+
+import cats.effect.IO
+import cats.effect.Resource
+import skunk.Session
+import skunk.implicits.*
+
+class PayoutRepository(pool: Resource[IO, Session[IO]]):
+  def schedule(payout: Payout): IO[Unit] =
+    pool.use(_.execute(PayoutSql.insert)(payout)).void
+--- file: server/src/main/scala/com/ledgerly/billing/Payout.scala
+--- before
+--- after
+package com.ledgerly.billing
+
+import java.time.LocalDate
+
+case class Payout(merchantId: MerchantId, amountCents: Long, scheduledFor: LocalDate)
+=== END

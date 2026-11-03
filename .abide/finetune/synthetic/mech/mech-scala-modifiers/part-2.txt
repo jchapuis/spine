@@ -1,0 +1,531 @@
+=== EDIT
+note: domain event final case class added next to existing ones
+--- file: server/src/main/scala/com/tempo/scheduling/JobEvent.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class JobStarted(jobId: String, at: Instant)
+--- after
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class JobStarted(jobId: String, at: Instant)
+final case class JobFinished(jobId: String, at: Instant, succeeded: Boolean)
+=== END
+=== EDIT
+note: plain case class added next to existing ones, clean
+--- file: server/src/main/scala/com/tempo/scheduling/RunEvent.scala
+--- before
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class RunQueued(runId: String, at: Instant)
+--- after
+package com.tempo.scheduling
+
+import java.time.Instant
+
+case class RunQueued(runId: String, at: Instant)
+case class RunCompleted(runId: String, at: Instant, exitCode: Int)
+=== END
+=== EDIT
+note: final class for Laminar component wrapper
+--- file: app/src/main/scala/com/orbit/ui/Toast.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Toast:
+  def apply(message: String): HtmlElement = div(cls := "toast", message)
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+final class ToastQueue(messages: Var[List[String]]):
+  def push(message: String): Unit = messages.update(_ :+ message)
+  def view: HtmlElement = div(children <-- messages.signal.map(_.map(Toast(_))))
+
+object Toast:
+  def apply(message: String): HtmlElement = div(cls := "toast", message)
+=== END
+=== EDIT
+note: Laminar component with plain class, clean
+--- file: app/src/main/scala/com/orbit/ui/Banner.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Banner:
+  def apply(text: String): HtmlElement = div(cls := "banner", text)
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Banner:
+  def apply(text: String, dismissed: Var[Boolean]): HtmlElement =
+    div(
+      cls := "banner",
+      hidden <-- dismissed.signal,
+      text,
+      button("Dismiss", onClick.mapTo(true) --> dismissed.writer)
+    )
+=== END
+=== EDIT
+note: private[ui] helper in frontend file
+--- file: app/src/main/scala/com/orbit/ui/Icons.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Icons:
+  def check: HtmlElement = i(cls := "icon icon-check")
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Icons:
+  def check: HtmlElement = icon("check")
+  def cross: HtmlElement = icon("cross")
+
+  private[ui] def icon(name: String): HtmlElement = i(cls := s"icon icon-$name")
+=== END
+=== EDIT
+note: nowarn on unused import in a Laminar file
+--- file: app/src/main/scala/com/orbit/ui/Layout.scala
+--- before
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+
+object Layout:
+  def page(content: HtmlElement): HtmlElement = div(cls := "page", content)
+--- after
+package com.orbit.ui
+
+import com.raquo.laminar.api.L.*
+import scala.annotation.nowarn
+
+@nowarn("msg=unused import")
+object Layout:
+  def page(content: HtmlElement): HtmlElement = div(cls := "page", content)
+=== END
+=== EDIT
+note: case class with Default value via companion, frontend theme
+--- file: app/src/main/scala/com/orbit/ui/Theme.scala
+--- before
+package com.orbit.ui
+
+case class Theme(primaryColor: String, fontSizePx: Int)
+--- after
+package com.orbit.ui
+
+case class Theme(primaryColor: String, fontSizePx: Int)
+
+object Theme:
+  val Default = Theme(primaryColor = "#0b5fff", fontSizePx = 14)
+  val dark = Theme(primaryColor = "#7aa2ff", fontSizePx = 14)
+=== END
+=== EDIT
+note: rename Default to a domain name, fix
+--- file: app/src/main/scala/com/orbit/ui/Palette.scala
+--- before
+package com.orbit.ui
+
+case class Palette(background: String, foreground: String)
+
+object Palette:
+  val Default = Palette("#ffffff", "#111111")
+--- after
+package com.orbit.ui
+
+case class Palette(background: String, foreground: String)
+
+object Palette:
+  val light = Palette("#ffffff", "#111111")
+=== END
+=== EDIT
+note: final override def in a trait implementation
+--- file: server/src/main/scala/com/acme/messaging/KafkaPublisher.scala
+--- before
+package com.acme.messaging
+
+import cats.effect.IO
+
+trait Publisher:
+  def publish(topic: String, payload: String): IO[Unit]
+  def name: String = "publisher"
+--- after
+package com.acme.messaging
+
+import cats.effect.IO
+
+trait Publisher:
+  def publish(topic: String, payload: String): IO[Unit]
+  def name: String = "publisher"
+
+class KafkaPublisher(send: (String, String) => IO[Unit]) extends Publisher:
+  def publish(topic: String, payload: String): IO[Unit] = send(topic, payload)
+  final override def name: String = "kafka"
+=== END
+=== EDIT
+note: override def without final, clean near miss
+--- file: server/src/main/scala/com/acme/messaging/SqsPublisher.scala
+--- before
+package com.acme.messaging
+
+import cats.effect.IO
+
+trait Sender:
+  def send(queue: String, payload: String): IO[Unit]
+  def name: String = "sender"
+--- after
+package com.acme.messaging
+
+import cats.effect.IO
+
+trait Sender:
+  def send(queue: String, payload: String): IO[Unit]
+  def name: String = "sender"
+
+class SqsSender(put: (String, String) => IO[Unit]) extends Sender:
+  def send(queue: String, payload: String): IO[Unit] = put(queue, payload)
+  override def name: String = "sqs"
+=== END
+=== EDIT
+note: protected[messaging] var-free field on abstract class
+--- file: server/src/main/scala/com/acme/messaging/Consumer.scala
+--- before
+package com.acme.messaging
+
+import cats.effect.IO
+
+abstract class Consumer(topic: String):
+  def handle(payload: String): IO[Unit]
+--- after
+package com.acme.messaging
+
+import cats.effect.IO
+
+abstract class Consumer(topic: String):
+  protected[messaging] val groupId: String = s"$topic-consumers"
+
+  def handle(payload: String): IO[Unit]
+=== END
+=== EDIT
+note: final class newtype-like wrapper in auth
+--- file: server/src/main/scala/com/keystone/auth/HashedPassword.scala
+--- before
+--- after
+package com.keystone.auth
+
+final class HashedPassword private (val hash: String):
+  override def toString: String = "HashedPassword(****)"
+
+object HashedPassword:
+  def fromHash(hash: String): HashedPassword = HashedPassword(hash)
+=== END
+=== EDIT
+note: opaque type instead of final class wrapper, clean
+--- file: server/src/main/scala/com/keystone/auth/SessionToken.scala
+--- before
+--- after
+package com.keystone.auth
+
+opaque type SessionToken = String
+
+object SessionToken:
+  def apply(raw: String): SessionToken = raw
+
+  extension (token: SessionToken)
+    def masked: String = token.take(4) + "****"
+=== END
+=== EDIT
+note: nowarn with dotted annotation path on a class
+--- file: server/src/main/scala/com/greenleaf/inventory/LegacyBridge.scala
+--- before
+package com.greenleaf.inventory
+
+class LegacyBridge(endpoint: String):
+  def ping: Boolean = endpoint.nonEmpty
+--- after
+package com.greenleaf.inventory
+
+@annotation.nowarn
+class LegacyBridge(endpoint: String, timeoutMillis: Int):
+  def ping: Boolean = endpoint.nonEmpty
+=== END
+=== EDIT
+note: remove unused parameter instead of nowarn, near miss
+--- file: server/src/main/scala/com/greenleaf/inventory/WarehouseBridge.scala
+--- before
+package com.greenleaf.inventory
+
+import scala.annotation.nowarn
+
+@nowarn
+class WarehouseBridge(endpoint: String, timeoutMillis: Int):
+  def ping: Boolean = endpoint.nonEmpty
+--- after
+package com.greenleaf.inventory
+
+class WarehouseBridge(endpoint: String):
+  def ping: Boolean = endpoint.nonEmpty
+=== END
+=== EDIT
+note: modify method body in file with pre-existing qualified private
+--- file: server/src/main/scala/com/legacy/billing/TaxTables.scala
+--- before
+package com.legacy.billing
+
+object TaxTables:
+  private[billing] val rates = Map("CH" -> 810, "DE" -> 1900)
+
+  def rateFor(country: String): Int = rates.getOrElse(country, 0)
+--- after
+package com.legacy.billing
+
+object TaxTables:
+  private[billing] val rates = Map("CH" -> 810, "DE" -> 1900)
+
+  def rateFor(country: String): Option[Int] = rates.get(country.toUpperCase)
+=== END
+=== EDIT
+note: add http4s middleware, clean
+--- file: server/src/main/scala/com/acme/http/Middlewares.scala
+--- before
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpApp
+import org.http4s.server.middleware.Logger
+
+object Middlewares:
+  def logged(app: HttpApp[IO]): HttpApp[IO] =
+    Logger.httpApp(logHeaders = true, logBody = false)(app)
+--- after
+package com.acme.http
+
+import cats.effect.IO
+import org.http4s.HttpApp
+import org.http4s.server.middleware.GZip
+import org.http4s.server.middleware.Logger
+
+object Middlewares:
+  def logged(app: HttpApp[IO]): HttpApp[IO] =
+    Logger.httpApp(logHeaders = true, logBody = false)(app)
+
+  def compressed(app: HttpApp[IO]): HttpApp[IO] = GZip(app)
+=== END
+=== EDIT
+note: final case class with type parameter for paged response
+--- file: server/src/main/scala/com/acme/http/Paged.scala
+--- before
+--- after
+package com.acme.http
+
+import io.circe.Codec
+
+final case class Paged[A](items: List[A], nextCursor: Option[String]) derives Codec.AsObject
+
+object Paged:
+  def single[A](items: List[A]): Paged[A] = Paged(items, None)
+=== END
+=== EDIT
+note: final def in object helper
+--- file: server/src/main/scala/com/northwind/routing/Haversine.scala
+--- before
+package com.northwind.routing
+
+object Haversine:
+  val earthRadiusKm = 6371.0
+--- after
+package com.northwind.routing
+
+object Haversine:
+  val earthRadiusKm = 6371.0
+
+  final def distanceKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double =
+    val dLat = math.toRadians(lat2 - lat1)
+    val dLon = math.toRadians(lon2 - lon1)
+    val a = math.pow(math.sin(dLat / 2), 2) + math.cos(math.toRadians(lat1)) * math.cos(math.toRadians(lat2)) * math.pow(math.sin(dLon / 2), 2)
+    2 * earthRadiusKm * math.asin(math.sqrt(a))
+=== END
+=== EDIT
+note: drop final from def, fix
+--- file: server/src/main/scala/com/northwind/routing/Bearing.scala
+--- before
+package com.northwind.routing
+
+object Bearing:
+  final def degrees(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Double =
+    math.toDegrees(math.atan2(toLon - fromLon, toLat - fromLat))
+--- after
+package com.northwind.routing
+
+object Bearing:
+  def degrees(fromLat: Double, fromLon: Double, toLat: Double, toLon: Double): Double =
+    math.toDegrees(math.atan2(toLon - fromLon, toLat - fromLat))
+=== END
+=== EDIT
+note: private[routing] class for internal graph node
+--- file: server/src/main/scala/com/northwind/routing/GraphNode.scala
+--- before
+--- after
+package com.northwind.routing
+
+private[routing] case class GraphNode(id: String, neighbours: Set[String]):
+  def degree: Int = neighbours.size
+=== END
+=== EDIT
+note: move helper into sub-package with plain visibility, clean
+--- file: server/src/main/scala/com/northwind/routing/graph/Edge.scala
+--- before
+--- after
+package com.northwind.routing.graph
+
+case class Edge(from: String, to: String, weight: Double):
+  def reversed: Edge = copy(from = to, to = from)
+=== END
+=== EDIT
+note: Default def in companion with params
+--- file: server/src/main/scala/com/datahive/ingest/BatchPolicy.scala
+--- before
+package com.datahive.ingest
+
+import scala.concurrent.duration.*
+
+case class BatchPolicy(maxSize: Int, maxWait: FiniteDuration)
+--- after
+package com.datahive.ingest
+
+import scala.concurrent.duration.*
+
+case class BatchPolicy(maxSize: Int, maxWait: FiniteDuration)
+
+object BatchPolicy:
+  def Default = BatchPolicy(maxSize = 500, maxWait = 5.seconds)
+=== END
+=== EDIT
+note: lowercase default value method name, clean near miss
+--- file: server/src/main/scala/com/datahive/ingest/FlushPolicy.scala
+--- before
+package com.datahive.ingest
+
+import scala.concurrent.duration.*
+
+case class FlushPolicy(maxBytes: Long, maxWait: FiniteDuration)
+--- after
+package com.datahive.ingest
+
+import scala.concurrent.duration.*
+
+case class FlushPolicy(maxBytes: Long, maxWait: FiniteDuration):
+  def withWait(wait: FiniteDuration): FlushPolicy = copy(maxWait = wait)
+
+  def isDefaultSize: Boolean = maxBytes == 1048576L
+=== END
+=== EDIT
+note: string literal mentions final release, clean near miss
+--- file: server/src/main/scala/com/acme/releases/ReleaseNotes.scala
+--- before
+package com.acme.releases
+
+object ReleaseNotes:
+  def header(version: String): String = s"Release $version"
+--- after
+package com.acme.releases
+
+object ReleaseNotes:
+  def header(version: String): String = s"Release $version"
+
+  def finalNotice(version: String): String =
+    s"Version $version is the final release of this line; defaults are unchanged"
+=== END
+=== EDIT
+note: final case class in test path for golden payload
+--- file: server/src/test/scala/com/acme/billing/InvoiceCodecSuite.scala
+--- before
+package com.acme.billing
+
+import munit.FunSuite
+import io.circe.parser.decode
+
+class InvoiceCodecSuite extends FunSuite:
+  test("decodes invoice"):
+    assert(decode[InvoiceDto]("""{"invoiceId":"i1","customerId":"c1","totalCents":10,"currency":"CHF"}""").isRight)
+--- after
+package com.acme.billing
+
+import munit.FunSuite
+import io.circe.Codec
+import io.circe.parser.decode
+
+class InvoiceCodecSuite extends FunSuite:
+  final case class Envelope(invoice: InvoiceDto) derives Codec.AsObject
+
+  test("decodes invoice"):
+    assert(decode[InvoiceDto]("""{"invoiceId":"i1","customerId":"c1","totalCents":10,"currency":"CHF"}""").isRight)
+=== END
+=== EDIT
+note: add munit test, clean
+--- file: server/src/test/scala/com/northwind/routing/HaversineSuite.scala
+--- before
+package com.northwind.routing
+
+import munit.FunSuite
+
+class HaversineSuite extends FunSuite:
+  test("zero distance to itself"):
+    assertEquals(Haversine.distanceKm(46.2, 6.1, 46.2, 6.1), 0.0)
+--- after
+package com.northwind.routing
+
+import munit.FunSuite
+
+class HaversineSuite extends FunSuite:
+  test("zero distance to itself"):
+    assertEquals(Haversine.distanceKm(46.2, 6.1, 46.2, 6.1), 0.0)
+
+  test("geneva to zurich is about 224 km"):
+    assertEqualsDouble(Haversine.distanceKm(46.2044, 6.1432, 47.3769, 8.5417), 224.0, 5.0)
+=== END
+=== EDIT
+note: protected[this] near miss on abstract class
+--- file: server/src/main/scala/com/acme/rules/RuleEngine.scala
+--- before
+package com.acme.rules
+
+abstract class RuleEngine[A]:
+  def evaluate(input: A): Boolean
+--- after
+package com.acme.rules
+
+abstract class RuleEngine[A]:
+  protected[this] def threshold: Int = 10
+
+  def evaluate(input: A): Boolean
+=== END
+=== EDIT
+note: final class in a test double
+--- file: server/src/test/scala/com/acme/messaging/RecordingPublisher.scala
+--- before
+--- after
+package com.acme.messaging
+
+import cats.effect.IO
+import cats.effect.Ref
+
+final class RecordingPublisher(published: Ref[IO, List[(String, String)]]) extends Publisher:
+  def publish(topic: String, payload: String): IO[Unit] =
+    published.update(_ :+ (topic -> payload))
+=== END

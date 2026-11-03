@@ -158,6 +158,41 @@ For each finding, report `file:line`, the term, what it means (checked in the co
 rename's reach: how many sites, and whether it is a config key, env var, metric name, wire field or i18n key that
 something outside the code may read. When those names are not yet deployed, renaming them is free.
 
+### 6d. Simplicity & readability pass — a smaller shape for code that is needed
+
+6b asks whether an addition should exist and 6c whether its terms read to a newcomer; this pass takes the code that
+stays and asks whether a simpler shape does the same job. A site belongs to one pass only: if it can go, it is 6b; if
+its name is opaque on its own, it is 6c; if it must stay but can be smaller, flatter or named after what it does, it is
+6d. Run it once over the **whole** diff, after 6b, and skip code the diff did not add or change. Look especially for
+these:
+
+- **Machinery heavier than its uses.** A typeclass, ADT, wrapper or `trait` + `Impl` with one or two callers where a
+  plain function or value does the same; an indirection layer that only forwards; a generic parameter only ever
+  instantiated once.
+- **An error channel that round-trips.** `Either` turned into a private exception and back, `Option` to `Either` to
+  `Option`, or a retry that encodes its outcome in one channel only to decode it at the next line.
+- **Knobs nobody tunes.** A config field, constructor parameter or default argument that every caller and every
+  environment sets to the same value.
+- **Repetition the diff introduces.** Two helpers doing the same lookup-then-act, copy-pasted blocks or views that
+  differ in one argument, or parallel `match`es over the same enum.
+- **Defensive code for a case the types already rule out.** A guard, fallback or `case _` that cannot be reached.
+- **State types that do not match behaviour.** An enum or ADT with more states than the code distinguishes, two types
+  whose states overlap, or case names that collide with another type's in the same scope.
+- **Names that no longer say what the code does.** A function whose name describes a narrower or older behaviour
+  (`whileSignedIn` that waits for the account to be ready); a half-finished rename that leaves the old word in
+  parameters, tests or logs; one concept under two names, or two concepts under one. A purely terminological
+  near-identical name stays in 6c.
+- **A flow too long or too nested to follow.** A function that does several nameable steps, or nesting that a `for`, an
+  early split or a named `def` per stage would flatten.
+
+For each finding, report `file:line`, what is there, the simpler alternative written out concretely, and its size: the
+lines it saves and the sites it touches. Mark each one **worth it** (less code, fewer concepts, no loss) or **taste**
+(a defensible alternative, not a clear gain), and list the worth-it ones first.
+
+A finding that would reverse a decision the README, a task file, a commit message or a memory records is a decision
+for the user, not a defect: name the record and report it apart. Verify every finding against the code before
+reporting it.
+
 ### 7. Merge & dedupe
 
 Combine mechanical + LLM-judgment findings. Key by `(file, line, rule)`; if the same site appears in both, keep the mechanical one (it has precise line:col).
@@ -179,6 +214,20 @@ Applicable skills: <comma-separated names>
 - **[<severity>]** `<file>:<line>` — `<rule-id>`
   <message>
   Suggested fix: <when mechanical> / <when LLM has a concrete suggestion>
+
+### Necessity (6b)
+- `<file>:<line>` — <addition>; covered by <existing path>; <simpler alternative>, ~<N> lines, behaviour change: <yes/no>
+
+### Jargon (6c)
+- `<file>:<line>` — `<term>` means <meaning>; rename to `<name>`, <N> sites, <external reach>
+
+### Simplicity (6d)
+Worth it:
+- `<file>:<line>` — <what is there> → <simpler alternative>; −<N> lines, <M> sites
+Taste:
+- `<file>:<line>` — …
+Decisions for the user (would reverse <record>):
+- `<file>:<line>` — …
 
 ### Deleted files
 - <path>  — flagged for caller-orphan check (refactor-completeness)
