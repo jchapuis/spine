@@ -119,15 +119,37 @@ Decisions never hold up the PR. Ask them in the inbox and keep going.
 folder the session started in, which is usually the spine root. The message then lands in a separate
 spine project instead of beside the PR's guided review. A worktree path has the same problem.
 
-- If the branch already has a PR, use `plannotator_inbox` `send_message` with
-  `thread: "PR #<number>"`. That is the same thread its guided review lives in.
-- If it has none yet, write the decisions to `<git-dir>/ck-decisions.md`. Right after the PR opens,
-  send them to the `PR #<number>` thread together with the guided review, then delete the file.
+One thread per PR, `thread: "PR #<number>"`. The guided review and every decision about that PR
+go there, so the person reads them together.
 
-Ask each decision as a `:::question` block: what the finding is, at `file:line`, why it is open (which
-of the reasons above applies), the options, and your `Recommended:` pick. Use `Holds up:` only when
-merging should wait for the answer. When the answer arrives, apply it in a follow-up commit. That
-commit goes through the gate like any other.
+- **No PR yet (the usual case, since the gate runs `/ck` just before `gh pr create`).** Write the
+  decisions to `<git-dir>/ck-decisions.md`. Once the PR is open, send them **with** the guided
+  review: `get_guide_brief`, then a single `submit_guide` call. Its `body` carries the decision
+  questions and its `patch` is `gh pr diff <number>`. That is one message, not a guide followed by
+  a separate question. Then delete the file.
+- **PR already open (an incremental `/ck` after new commits).** Before sending, call
+  `read_thread` on that thread. Send the new decisions with `send_message` and `reply_to`, and use
+  `supersedes` to list any earlier questions that this round settled or made moot, so stale cards
+  stop sitting at the top of the person's list.
+- Pass `idempotency_key: "ck-<reviewed sha>"` so a retry never posts twice.
+
+Each decision is a `:::question` block, at most about 8 per round:
+- The first line is the question, in product terms.
+- Then one to three plain sentences of context: what the finding is (with `file:line`), why it is
+  open (which reason above applies), and why you recommend the option you do.
+- Then the choices, each with its consequence after a ` — `, and a `Recommended:` line.
+- Add `Holds up: merging #<number>` only when merging should wait for the answer. Never add
+  `Stopped:`, because the PR goes ahead without the answer.
+
+**Do not wait for the answer.** No `wait_for_reply` and no polling: end the turn, or keep working.
+The reply comes back into the session by itself, headed `Plannotator Inbox: …`, with the choices
+under "Answers to your questions". Apply them in a follow-up commit, which goes through the gate
+like any other. Then use `send_message` with `reply_to` to say in one line what changed. Once
+nothing in the thread is left for the person (the PR is merged and every question is answered),
+call `resolve_message`.
+
+If the person is actively talking with you in this session, ask in the chat instead. The inbox is
+for when they are not watching.
 
 ## Report
 
