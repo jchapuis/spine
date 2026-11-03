@@ -23,6 +23,19 @@ the refactor-completeness audit (diff-audit, config parity, missing tests, stale
 (`.claude/hooks/ck-gate.sh`) blocks `gh pr create` until `/ck` has reviewed the branch up to HEAD,
 so don't run a separate pre-PR review as well.
 
+**Plannotator, at each stage** (read the `plannotator` skill once before you first use it):
+- **Plan.** Once the grilling is done, write the plan in plan mode and exit it. The plan review
+  opens by itself through the hook. Revise from the annotations that come back. Don't start coding
+  until the plan is approved.
+- **Questions.** If I'm in the chat, ask with `AskUserQuestion`. If I've gone quiet during long
+  work, ask through the `plannotator_inbox` instead: a `:::question` with a `Recommended:` pick,
+  and `Holds up:` naming what waits on it. Then carry on with work that doesn't depend on the
+  answer. Never wait or poll; the reply comes back into the session by itself.
+- **PR.** `/ck` runs, the PR opens, and then a single `submit_guide` goes to `thread: "PR #<n>"`
+  under the repo's main checkout. It carries any `/ck` decisions in its body.
+- **Hand-over.** When long work finishes while I'm away, send one short inbox summary with the
+  files worth looking at in `attachments`. Don't send routine progress.
+
 Read the CLAUDE.md root file before you do anything.
-Clarify any doubt with `AskUserQuestion` rather than guessing at it.
+Clarify any doubt rather than guessing at it, in the chat or the inbox as above.
 #$ARGUMENTS
