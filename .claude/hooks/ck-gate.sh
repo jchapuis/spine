@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PreToolUse gate: no PR opens until /ck has reviewed the branch up to HEAD.
+# PreToolUse gate: no PR opens until /ck has reviewed the branch up to HEAD, and a large PR also needs a PR Lens diagram.
 #
 # /ck writes the last sha it reviewed into <git-dir>/ck-reviewed (the stamp; per worktree). This hook
 # blocks a Bash call that opens a PR unless the stamp is HEAD, and tells Claude what to review
@@ -68,16 +68,20 @@ stamp_file=$gitdir/ck-reviewed
 # a .pr-lens/*/manifest.json newer than HEAD. Large means CK_GATE_LARGE_FILES files or
 # CK_GATE_LARGE_LINES changed lines against the default branch.
 check_diagram() {
-  local base mb files lines commit_time manifest
-  base=$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD) || base=origin/master
-  mb=$(git -C "$dir" merge-base "$base" HEAD 2>/dev/null) || return 0
+  local base mb files lines commit_time manifest main_checkout
+  base=$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD) ||
+    for base in origin/main origin/master ""; do git -C "$dir" rev-parse -q --verify "$base" >/dev/null && break; done
+  [[ -n $base ]] && mb=$(git -C "$dir" merge-base "$base" HEAD 2>/dev/null) ||
+    block "cannot tell this PR's base branch to size it (no origin/HEAD, origin/main or origin/master). Run \`git remote set-head origin --auto\`, then retry."
   read -r files lines < <(git -C "$dir" diff --numstat "$mb" HEAD | awk '{f++; l += $1 + $2} END {print f+0, l+0}')
   ((files >= ${CK_GATE_LARGE_FILES:-20} || lines >= ${CK_GATE_LARGE_LINES:-600})) || return 0
+  # The render may sit in this checkout or, for a linked worktree, in the main one.
   commit_time=$(git -C "$dir" log -1 --format=%ct HEAD)
-  for manifest in "$(git -C "$dir" rev-parse --show-toplevel)"/.pr-lens/*/manifest.json; do
-    [[ -f $manifest ]] && (($(stat -c %Y "$manifest") >= commit_time)) && return 0
+  main_checkout=$(dirname "$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir)")
+  for manifest in "$(git -C "$dir" rev-parse --show-toplevel)"/.pr-lens/*/manifest.json "$main_checkout"/.pr-lens/*/manifest.json; do
+    [[ -f $manifest ]] && (($(perl -e 'print((stat shift)[9])' "$manifest") >= commit_time)) && return 0
   done
-  block "large PR ($files files, $lines changed lines against $base). Render a PR Lens diagram of the diff for the inbox guide first: pr-lens skill steps 1-4 (write, validate, render light; no canvas push, no --attach), then retry."
+  block "large PR ($files files, $lines changed lines against $base). Render a PR Lens diagram of the diff for the inbox guide first, from the repo's top folder: pr-lens skill steps 1-4 (write, validate, render with the light theme; no canvas push, no --attach), then retry."
 }
 
 [[ -s $stamp_file ]] ||

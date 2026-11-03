@@ -143,7 +143,7 @@ go there, so the person reads them together.
   file is used up whichever session opens the PR.
 - **Large PR (20+ files or 600+ changed lines): add a PR Lens diagram to the guide.** After the
   last commit and before `gh pr create`, follow the `pr-lens` skill steps 1 to 4: write the
-  graph, validate it, and render it light. Skip `canvas push` and `--attach`, because the diagram
+  graph, validate it, and render it with the light theme. Skip `canvas push` and `--attach`, because the diagram
   stays on this machine. In the `submit_guide` call, show the top architecture view in `body` as
   `![<what it shows>](<absolute path to the svg>)`, and list the SVG under `attachments` too.
   Add a data-flow view only when the change has a sequence worth following. The gate blocks a

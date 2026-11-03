@@ -8,14 +8,15 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 repo=$tmp/repo
 git init -q "$repo" && git -C "$repo" commit -q --allow-empty -m one && git -C "$repo" commit -q --allow-empty -m two
+git -C "$repo" update-ref refs/remotes/origin/master HEAD
 stamp=$repo/.git/ck-reviewed
 failures=0
 
 expect() { # expect <exit code> <command> [cwd]
-  local got
-  jq -n --arg c "$2" --arg d "${3:-$repo}" '{tool_input: {command: $c}, cwd: $d}' | "$gate" 2>/dev/null
+  local got err
+  err=$(jq -n --arg c "$2" --arg d "${3:-$repo}" '{tool_input: {command: $c}, cwd: $d}' | "$gate" 2>&1)
   got=$?
-  [[ $got == "$1" ]] || { printf 'FAIL want %s got %s: %s\n' "$1" "$got" "$2"; failures=$((failures + 1)); }
+  [[ $got == "$1" ]] || { printf 'FAIL want %s got %s: %s\n  %s\n' "$1" "$got" "$2" "$err"; failures=$((failures + 1)); }
 }
 
 # No stamp: everything that opens a PR blocks.
@@ -53,6 +54,9 @@ git -C "$repo" rev-parse HEAD >"$stamp" && expect 2 'gh pr create'
 mkdir -p "$repo/.pr-lens/overview" && touch "$repo/.pr-lens/overview/manifest.json" && expect 0 'gh pr create'
 touch -d '2000-01-01' "$repo/.pr-lens/overview/manifest.json" && expect 2 'gh pr create'
 CK_GATE_LARGE_LINES=10000 expect 0 'gh pr create'
+# No origin/HEAD and no origin/master: origin/main is used, and with no base at all the gate says so.
+git -C "$repo" update-ref -d refs/remotes/origin/master && expect 2 'gh pr create'
+git -C "$repo" update-ref refs/remotes/origin/main HEAD~1 && touch "$repo/.pr-lens/overview/manifest.json" && expect 0 'gh pr create'
 
 # Unreadable input blocks only what looks like a PR.
 printf '{bad gh pr create' | "$gate" 2>/dev/null; [[ $? == 2 ]] || { echo 'FAIL bad input with a PR'; failures=$((failures + 1)); }

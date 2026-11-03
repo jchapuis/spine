@@ -20,7 +20,7 @@ tasks/              # Planning files (gitignored)
   commands/         # Custom slash commands available in Claude Code
   skills/           # Shared skill packages loaded by Claude on demand
   agents/           # Subagent types (review-worker, used by /ck)
-  hooks/            # ck-gate.sh (blocks PR creation until /ck has reviewed the branch) and its tests
+  hooks/            # ck-gate.sh (blocks PR creation until /ck has reviewed the branch; large PRs also need a diagram) and its tests
 .abide/
   rubric.json       # Per-edit rules for abide; this file is linked into every project
   finetune/         # Training pipeline for the local model abide queries
@@ -152,6 +152,9 @@ Code is checked at three points, each cheaper than the next one:
   (`gh pr create`, `gh api …/pulls` POSTs, the GraphQL `createPullRequest` call) unless the stamp is
   HEAD. When newer commits sit on top of the stamp, it asks for `/ck <stamp>..HEAD`, so only the
   new work gets reviewed. Its tests are in `.claude/hooks/ck-gate.test.sh`.
+- Once the stamp is HEAD, a large PR (20+ files or 600+ changed lines against the default branch;
+  override with `CK_GATE_LARGE_FILES` / `CK_GATE_LARGE_LINES`) also needs a `.pr-lens/*/manifest.json`
+  rendered after HEAD. See "Diagrams for large PRs" below.
 - It is registered in the user settings (`~/.claude-perso/settings.json`), so sessions in every
   project get it. On a machine without the spine, it does nothing.
 - It only covers PRs that Claude opens. Before pushing follow-up commits to an open PR, run
