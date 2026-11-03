@@ -169,6 +169,10 @@ options, context the repo doesn't have, or a change that goes past the diff.
   inbox, and every PR gets one thread, `PR #<n>`, under the repo's main checkout. That thread holds
   the guided review (a walkthrough of the diff in reading order) together with `/ck`'s open decisions, sent as one message. Answers come back
   into the session that asked, and the follow-up commit gets an incremental `/ck`.
+- **Diagrams for large PRs.** At 20+ files or 600+ changed lines, the gate also wants a
+  [PR Lens](https://prlens.dev) diagram of the diff, rendered after the last commit. It goes with
+  the guided review as an image. It is never pushed to prlens.dev or attached to the PR, because
+  the repos are private.
 - **`/pr-guide`.** Puts a shareable, encrypted guided-review link in the PR description.
 
 ---

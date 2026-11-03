@@ -141,11 +141,21 @@ go there, so the person reads them together.
   and its `patch` is `gh pr diff <number>`. That is one message, not a guide followed by a separate
   question. Then delete the file. The global CLAUDE.md's post-PR guide step does the same, so the
   file is used up whichever session opens the PR.
+- **Large PR (20+ files or 600+ changed lines): add a PR Lens diagram to the guide.** After the
+  last commit and before `gh pr create`, follow the `pr-lens` skill steps 1 to 4: write the
+  graph, validate it, and render it light. Skip `canvas push` and `--attach`, because the diagram
+  stays on this machine. In the `submit_guide` call, show the top architecture view in `body` as
+  `![<what it shows>](<absolute path to the svg>)`, and list the SVG under `attachments` too.
+  Add a data-flow view only when the change has a sequence worth following. The gate blocks a
+  large PR until a render newer than HEAD exists.
 - **PR already open (an incremental `/ck` after new commits).** Skip the file. Call `read_thread`
   on that thread first, and don't re-ask a decision that is already open there. Send the new ones
   with `send_message` and `reply_to`, and use `supersedes` to list earlier questions that this run
   settled or made moot, so stale cards stop sitting at the top of the person's list.
 - Pass `idempotency_key: "ck-<reviewed sha>"` so a retry of the same send never posts twice.
+- Send with this session's own `plannotator_inbox` tool, even when the patch is long. A message sent
+  some other way, such as through a separate `plannotator inbox mcp` process, routes the reply to that
+  process instead of to this session.
 
 Each decision is a `:::question` block, at most about 8 per run:
 - The first line is the question, in product terms.

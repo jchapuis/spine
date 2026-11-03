@@ -64,11 +64,27 @@ gitdir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) ||
 head=$(git -C "$dir" rev-parse HEAD)
 stamp_file=$gitdir/ck-reviewed
 
+# A large PR also needs a PR Lens diagram for its inbox guide, rendered after the last commit:
+# a .pr-lens/*/manifest.json newer than HEAD. Large means CK_GATE_LARGE_FILES files or
+# CK_GATE_LARGE_LINES changed lines against the default branch.
+check_diagram() {
+  local base mb files lines commit_time manifest
+  base=$(git -C "$dir" symbolic-ref -q --short refs/remotes/origin/HEAD) || base=origin/master
+  mb=$(git -C "$dir" merge-base "$base" HEAD 2>/dev/null) || return 0
+  read -r files lines < <(git -C "$dir" diff --numstat "$mb" HEAD | awk '{f++; l += $1 + $2} END {print f+0, l+0}')
+  ((files >= ${CK_GATE_LARGE_FILES:-20} || lines >= ${CK_GATE_LARGE_LINES:-600})) || return 0
+  commit_time=$(git -C "$dir" log -1 --format=%ct HEAD)
+  for manifest in "$(git -C "$dir" rev-parse --show-toplevel)"/.pr-lens/*/manifest.json; do
+    [[ -f $manifest ]] && (($(stat -c %Y "$manifest") >= commit_time)) && return 0
+  done
+  block "large PR ($files files, $lines changed lines against $base). Render a PR Lens diagram of the diff for the inbox guide first: pr-lens skill steps 1-4 (write, validate, render light; no canvas push, no --attach), then retry."
+}
+
 [[ -s $stamp_file ]] ||
   block "no /ck review recorded for this branch ($dir). Run /ck over the whole branch, apply its fixes, then retry."
 
 stamp=$(tr -d '[:space:]' <"$stamp_file")
-[[ $stamp == "$head" ]] && exit 0
+[[ $stamp == "$head" ]] && { check_diagram; exit 0; }
 
 git -C "$dir" merge-base --is-ancestor "$stamp" HEAD 2>/dev/null &&
   block "/ck reviewed up to ${stamp:0:12}, but HEAD is ${head:0:12}. Run /ck ${stamp}..HEAD to review only the newer commits, then retry."

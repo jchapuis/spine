@@ -46,6 +46,14 @@ git -C "$repo" rev-parse HEAD >"$stamp" && expect 0 'gh pr create'
 git -C "$repo" rev-parse HEAD~1 >"$stamp" && expect 2 'gh pr create'
 echo deadbeef >"$stamp" && expect 2 'gh pr create'
 
+# A large PR also needs a PR Lens render newer than HEAD; a small one does not.
+git -C "$repo" update-ref refs/remotes/origin/master HEAD
+seq 1 700 >"$repo/big.txt" && git -C "$repo" add big.txt && git -C "$repo" commit -q -m big
+git -C "$repo" rev-parse HEAD >"$stamp" && expect 2 'gh pr create'
+mkdir -p "$repo/.pr-lens/overview" && touch "$repo/.pr-lens/overview/manifest.json" && expect 0 'gh pr create'
+touch -d '2000-01-01' "$repo/.pr-lens/overview/manifest.json" && expect 2 'gh pr create'
+CK_GATE_LARGE_LINES=10000 expect 0 'gh pr create'
+
 # Unreadable input blocks only what looks like a PR.
 printf '{bad gh pr create' | "$gate" 2>/dev/null; [[ $? == 2 ]] || { echo 'FAIL bad input with a PR'; failures=$((failures + 1)); }
 printf '{bad' | "$gate" 2>/dev/null; [[ $? == 0 ]] || { echo 'FAIL bad input without a PR'; failures=$((failures + 1)); }
