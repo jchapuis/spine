@@ -21,8 +21,8 @@ metrics:
 # kev-4b-spine-scala
 
 [Kev-4B](https://huggingface.co/jaredpalmer/kev-4b) fine-tuned to judge Scala 3 code changes against a team's
-conventions: six judgment rules no linter can express, plus ten groups covering 49 mechanical rules from the
-team's compliance gate (ripgrep and Scalafix). Each rule or group is one yes/no question. It is meant to be served
+conventions: six judgment rules that need reading the code, plus ten groups covering 49 mechanical rules: pattern
+checks that the team's commit-time gate also runs with ripgrep and Scalafix. Each rule or group is one yes/no question. It is meant to be served
 with [kev](https://github.com/jaredpalmer/kev) (`python -m kev.serve --run jchapuis/kev-4b-spine-scala`).
 [abide](https://github.com/coldteadotai/abide) then queries it on every edit a coding agent makes, through kev's
 TypeSafe-compatible `/v1/systemone` API.
@@ -50,36 +50,42 @@ Mechanical groups (the rules each covers are listed in
 `mech-scala-modifiers`, `mech-scala-syntax`, `mech-scala-ascriptions`, `mech-effects`, `mech-duplication` (whole
 turn) and `mech-frontend` (Laminar code).
 
-The state is what abide sends: `{"file", "diff"}` for an edit and `{"files", "diff"}` for a whole turn.
+The input is what abide sends: `{"file", "diff"}` for an edit and `{"files", "diff"}` for a whole turn.
 
 ## Results
+
+abide acts on two thresholds: at a probability of 0.5 or more it adds a note for the agent ("noted"), and at 0.8 or
+more it makes the agent repair the edit before going on ("blocked"). The real-diff rows count both, on violations
+and on clean code.
 
 | | Kev-4B | this model |
 |---|---|---|
 | held-out accuracy (5,366 questions, synthetic and real) | — | **0.985** |
 | decided within a 5% error budget | — | **100%** |
-| real diffs, judgment rules: violations blocked (p ≥ 0.8) | 0 / 8 | **3 / 8** |
-| real diffs, judgment rules: clean checks noted (p ≥ 0.5) / blocked | 111 / 1 of 792 | **1 / 0** |
-| real diffs, mechanical groups: violations blocked | 0 / 29 | **19 / 29**¹ |
-| real diffs, mechanical groups: clean checks noted / blocked | 559 / 10 of 1,237 | **7 / 5**¹ |
+| real diffs¹, judgment rules: violations blocked | 0 / 8 | **3 / 8** |
+| real diffs¹, judgment rules: clean checks noted / blocked | 111 / 1 of 792 | **1 / 0** |
+| real diffs¹, mechanical groups: violations blocked | 0 / 29 | **19 / 29** |
+| real diffs¹, mechanical groups: clean checks noted / blocked | 559 / 10 of 1,237 | **7 / 5** |
 
 Kev-4B scored 0.630 on the earlier synthetic-only held-out set (2,208 questions), where this recipe without real
-code reached 0.972. The real diffs are 200 changes from our own repositories, gate-labelled for the mechanical
-groups. They were scored privately and were never used for training. The public decision-v7 regression check was
+code reached 0.972. The real diffs come from private repositories: 200 records for the judgment rules and 366 for the
+mechanical groups, the latter labelled by the gate. They were scored locally and never used for training. The public decision-v7 regression check was
 0.858 for the previous version (Kev-4B: 0.862); it was not rerun for this one.
 
-¹ Measured with this model at temperature 1.00. The rerun at the served temperature (1.52) stopped after 347 of the
-366 real records, so it is not reported. Temperature scaling does not move the p ≥ 0.5 notes, and can only lower the
-blocked counts.
+¹ Kev-4B is measured at its served temperature (2.41) and this model at temperature 1.00, not its served 1.52; the
+run at 1.52 stopped after 347 of the 366 mechanical records. A temperature above 1 pulls every probability toward
+0.5, so notes do not change and blocks can only drop. On those 347 records, 1.52 blocks 17 of the 29 violations and
+3 clean checks, against 19 and 5 at 1.00.
 
-**Limitations.** `mech-duplication` (the same number or import block repeated across files) is the weakest group
+**Limitations.** `mech-duplication` (repetition across files, such as the same number or import block) is the weakest group
 (0.81 held-out, 0 of 5 real violations caught). `scala-plain-readable-names` and within-diff duplication still miss
 violations, mostly as false negatives. The compliance gate stays the final check at commit time.
 
 ## Training
 
-One epoch with kev's `kev-finetune` recipe (lr 2e-5, batch 2 × accum 4, 2,000 public replay records), with state
-limit 1,536 tokens, on 6,826 records:
+One epoch with kev's `kev-finetune` recipe (lr 2e-5, batch 2 × accum 4, 2,000 public replay records), with inputs
+capped at 1,536 tokens. The records came from three sources, split about 70 / 15 / 15 into training (6,826 records),
+calibration and development:
 
 - **Judgment rules:** 1,466 synthetic Scala diffs written by LLM generators from a labelling spec. Blind
   re-labelling agreed with 96–100% of their labels per rule.
