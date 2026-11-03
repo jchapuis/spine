@@ -1,42 +1,63 @@
 #!/usr/bin/env bash
 # PreToolUse gate: no PR opens until /ck has reviewed the branch up to HEAD.
 #
-# /ck writes the sha it reviewed up to into <git-dir>/ck-reviewed (per worktree). This hook blocks
-# `gh pr create` and `gh api …/pulls` POSTs unless that stamp is HEAD, and tells Claude what to
-# review instead: the whole branch when there is no stamp, only <stamp>..HEAD when there is one.
-# Exit 2 blocks the call and hands stderr back to Claude.
+# /ck writes the last sha it reviewed into <git-dir>/ck-reviewed (the stamp; per worktree). This hook
+# blocks a Bash call that opens a PR unless the stamp is HEAD, and tells Claude what to review
+# instead: the whole branch when there is no stamp, only <stamp>..HEAD when there is one.
+# Exit 2 blocks the call and hands stderr back to Claude. Tests: ck-gate.test.sh beside this file.
 set -uo pipefail
 
 input=$(cat)
-cmd=$(jq -r '.tool_input.command // empty' <<<"$input")
-cwd=$(jq -r '.cwd // empty' <<<"$input")
-
-# Only `gh` in command position counts: heredoc bodies and quoted strings are dropped first, so a commit
-# message or PR body that mentions `gh pr create` does not trip the gate.
-code_only() {
-  perl -0777 -pe 's/([\x27"])([^\s\x27"]*)\1/$2/g; s/<<-?\s*([\x27"]?)(\w+)\1[^\n]*\n.*?^\s*\2\s*$//gms; s/\x27[^\x27]*\x27/\x27\x27/gs; s/"(?:\\.|[^"\\])*"/""/gs' <<<"$1"
-}
-at_cmd='(^|[;&|(]|\$\()[[:space:]]*'
-
-opens_pr() {
-  grep -Eq "${at_cmd}gh[[:space:]]+pr[[:space:]]+create\b" <<<"$1" && return 0
-  # `gh api repos/o/r/pulls` (no number after it) creating a PR: explicit POST, or fields, which make gh POST.
-  grep -Eq "${at_cmd}gh[[:space:]]+api\b.*repos/[^[:space:]/]+/[^[:space:]/]+/pulls([[:space:]]|$)" <<<"$1" &&
-    grep -Eq '(-X|--method)[[:space:]=]*POST|[[:space:]](-f|-F|--field|--raw-field|--input)[[:space:]=]' <<<"$1"
-}
-
-opens_pr "$(code_only "$cmd")" || exit 0
 
 block() { printf 'ck-gate: %s\n' "$1" >&2; exit 2; }
 
-# The repo is the last `cd <dir>` before the gh call, else the shell's cwd.
-dir=$cwd
-target=$(grep -Eo '(^|[;&|[:space:]])cd[[:space:]]+[^;&|]+' <<<"${cmd%%gh *}" | tail -n1 |
-  sed -E 's/^[;&|[:space:]]*cd[[:space:]]+//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//')
-if [[ -n $target ]]; then
-  target=${target/#\~/$HOME}
-  [[ $target = /* ]] && dir=$target || dir=$cwd/$target
+# Without jq or perl, or with input we cannot read, the command cannot be checked: block only what
+# looks like it opens a PR, so a broken machine does not silently lose the gate.
+if ! command -v jq >/dev/null || ! command -v perl >/dev/null ||
+  ! cmd=$(jq -er '.tool_input.command' <<<"$input" 2>/dev/null); then
+  grep -Eq 'gh.*(pr[[:space:]]+(create|new)|/pulls|createPullRequest)' <<<"$input" &&
+    block "cannot parse this command (jq or perl missing, or unreadable hook input), so cannot check it for /ck."
+  exit 0
 fi
+cwd=$(jq -r '.cwd // empty' <<<"$input")
+
+# Prints the directory a PR-opening command runs in, or nothing when the command opens no PR.
+# Heredoc bodies and quoted strings are dropped first, so a commit message or PR body that mentions
+# `gh pr create` does not count. The rest is split into simple commands; `cd`s are followed in order,
+# and env assignments, wrappers (env, command, xargs…) and gh's global flags (-R) are skipped.
+read -r -d '' find_pr_dir <<'PERL'
+my ($cmd, $dir) = @ARGV;
+my $home = $ENV{HOME};
+if (($cmd =~ /\bgh\s+api\s+graphql\b/ && $cmd =~ /createPullRequest/) ||
+    $cmd =~ /\b(?:ba|z)?sh\s+-c\b.*\bgh\b.*\bpr\s+(?:create|new)\b/s) { print $dir; exit }
+$_ = $cmd;
+s/(['"])([^\s'"]*)\1/$2/g;
+s/<<-?\s*(['"]?)(\w+)\1[^\n]*\n.*?^\s*\2\s*$//gms;
+s/'[^']*'/''/gs;
+s/"(?:\\.|[^"\\])*"/""/gs;
+for my $seg (split /\|\||&&|\$\(|[;|&\n(){}`]/) {
+  my @w = split ' ', $seg;
+  shift @w while @w && ($w[0] =~ /^\w+=/ ||
+    $w[0] =~ /^(?:!|if|then|elif|else|while|until|do|env|command|exec|time|nohup|sudo|xargs)$/);
+  next unless @w;
+  if ($w[0] eq 'cd') {
+    my $t = $w[1] // $home;
+    $t =~ s/^~(?=\/|$)/$home/;
+    $dir = $t =~ m{^/} ? $t : "$dir/$t";
+    next;
+  }
+  next unless shift(@w) eq 'gh';
+  while (@w && $w[0] =~ /^-/) { my $f = shift @w; shift @w if $f =~ /^(?:-R|--repo|--hostname)$/ }
+  if (@w >= 2 && $w[0] eq 'pr' && $w[1] =~ /^(?:create|new)$/) { print $dir; exit }
+  my $s = join ' ', @w;
+  if (@w && $w[0] eq 'api' && $s !~ /(?:-X|--method)[\s=]*GET\b/ &&
+      $s =~ m{\brepos/[^\s/]+/[^\s/]+/pulls(?:\s|$)} &&
+      $s =~ /(?:-X|--method)[\s=]*POST\b|\s(?:-f|-F|--field|--raw-field|--input)(?:\s|=)/) { print $dir; exit }
+}
+PERL
+
+dir=$(perl -e "$find_pr_dir" -- "$cmd" "$cwd")
+[[ -n $dir ]] || exit 0
 
 gitdir=$(git -C "$dir" rev-parse --absolute-git-dir 2>/dev/null) ||
   block "cannot tell which repository this PR is for (resolved '$dir', not a git checkout). cd into the repo first."
@@ -49,8 +70,7 @@ stamp_file=$gitdir/ck-reviewed
 stamp=$(tr -d '[:space:]' <"$stamp_file")
 [[ $stamp == "$head" ]] && exit 0
 
-if git -C "$dir" merge-base --is-ancestor "$stamp" HEAD 2>/dev/null; then
+git -C "$dir" merge-base --is-ancestor "$stamp" HEAD 2>/dev/null &&
   block "/ck reviewed up to ${stamp:0:12}, but HEAD is ${head:0:12}. Run /ck ${stamp}..HEAD to review only the newer commits, then retry."
-fi
 
-block "/ck stamp ${stamp:0:12} is not an ancestor of HEAD (rebase or amend?). If the rebase changed no content — check with \`git range-diff\` against the reviewed commits — write HEAD to $stamp_file and retry; otherwise run /ck over the whole branch."
+block "/ck reviewed ${stamp:0:12}, which is not an ancestor of HEAD (rebase or amend?). If the rebase changed no content — check with \`git range-diff\` against the reviewed commits — write HEAD to $stamp_file and retry; otherwise run /ck over the whole branch."

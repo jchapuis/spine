@@ -21,7 +21,8 @@ Before each commit, run the **compliance-gate** skill inline:
 Before opening a PR, run **`/ck`**: code review plus the full compliance gate, which also covers
 the refactor-completeness audit (diff-audit, config parity, missing tests, stale docs). A hook
 (`.claude/hooks/ck-gate.sh`) blocks `gh pr create` until `/ck` has reviewed the branch up to HEAD,
-so don't run a separate pre-PR review as well.
+so don't run a separate pre-PR review as well. Before pushing follow-up commits to an open PR, run
+`/ck <stamp>..HEAD` yourself; the hook doesn't cover pushes.
 
 **Plannotator, at each stage** (read the `plannotator` skill once before you first use it):
 - **Plan.** Once the grilling is done, write the plan in plan mode and exit it. The plan review
@@ -31,8 +32,9 @@ so don't run a separate pre-PR review as well.
   work, ask through the `plannotator_inbox` instead: a `:::question` with a `Recommended:` pick,
   and `Holds up:` naming what waits on it. Then carry on with work that doesn't depend on the
   answer. Never wait or poll; the reply comes back into the session by itself.
-- **PR.** `/ck` runs, the PR opens, and then a single `submit_guide` goes to `thread: "PR #<n>"`
-  under the repo's main checkout. It carries any `/ck` decisions in its body.
+- **PR.** Follow `/ck`'s "Send decisions to the Plannotator Inbox" section. Its decisions go out
+  with the PR's guided review. `/pr-guide` is a separate thing: it puts a shareable guide link in
+  the PR description.
 - **Hand-over.** When long work finishes while I'm away, send one short inbox summary with the
   files worth looking at in `attachments`. Don't send routine progress.
 

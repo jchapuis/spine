@@ -2,9 +2,10 @@
 description: Run /code-review and /compliance-gate in parallel sonnet agents
 ---
 
-Run this **before committing or pushing**, not after. Findings that arrive once the branch is
-public cost a rewrite, a force-push and a second CI round; the same findings an hour earlier cost
-an edit.
+Run this **before the work goes public**: before the PR opens, and before follow-up commits are
+pushed to an open PR. Findings that arrive once the branch is public cost a rewrite, a force-push
+and a second CI round; the same findings an hour earlier cost an edit. A hook enforces the first
+case (see "Stamp the review").
 
 Resolve the target first, and state it to both agents explicitly:
 
@@ -42,7 +43,7 @@ Agent 1 — code review:
 > re-deriving it.
 
 Agent 2 — compliance gate:
-> Invoke the `compliance-gate` skill and follow it exactly, scoped to the same target. When the target includes uncommitted work, run the mechanical layer with `--diff branch` **and** `--diff workdir`: `branch` sees committed work only, and only `workdir` lists untracked files. Return every
+> Invoke the `compliance-gate` skill and follow it exactly, scoped to the same target. When the target includes uncommitted work, run the mechanical layer with `--diff branch` **and** `--diff workdir`: `branch` sees committed work only, and only `workdir` lists untracked files. Pass `--base` as the target range's base (`origin/master` for a whole branch). Run the `refactor-completeness` audit over the target too: diff-audit, config parity, missing tests and stale docs. `/go` relies on this pass for it. Return every
 > violation with file:line, the skill it breaks, and the fix. Name the skills you checked that
 > passed clean. Run the skill's necessity pass (step 6b) over the whole target against its stated
 > intent (PR body or commit messages) and report its findings in their own section. Run the jargon
@@ -99,15 +100,26 @@ mechanical layer on the touched files), then **commit them as their own commit**
 
 ## Stamp the review
 
-Write the reviewed sha to the stamp, using the target's checkout (its worktree, if it has one):
+The stamp is a file, `<git-dir>/ck-reviewed`, that holds the last sha `/ck` reviewed up to. Each
+worktree has its own. The PR gate (`.claude/hooks/ck-gate.sh`, a `PreToolUse` hook in the user
+settings, so it applies to sessions in every project) lets a PR open only when the stamp is HEAD.
+Otherwise it asks for `/ck <stamp>..HEAD`, which reviews only the newer commits.
+
+Stamp **only when the stamp would be true**:
+- The target ran from the previous stamp, or from the merge-base when there was none, up to HEAD.
+  If it was a narrower target (some paths, or a range that starts later), don't stamp.
+- After the fix commit, the tracked tree is clean (`git -C <path> diff --quiet HEAD`), apart from
+  changes you know are unrelated and will not be pushed. Work that
+  isn't committed isn't in HEAD, so a stamp can't vouch for it.
+
+Then write it, using the target's checkout (its worktree, if it has one):
 
 ```bash
 git -C <path> rev-parse HEAD > "$(git -C <path> rev-parse --absolute-git-dir)/ck-reviewed"
 ```
 
 Stamp **after** the fix commit. Those fixes come straight from the findings, so they count as
-reviewed. The PR gate (`.claude/hooks/ck-gate.sh`) lets `gh pr create` through only when the
-stamp is HEAD. Otherwise it asks for `/ck <stamp>..HEAD`, which reviews only the newer commits.
+reviewed. The gate's own tests are in `.claude/hooks/ck-gate.test.sh`; run them after changing it.
 
 ## Send decisions to the Plannotator Inbox
 
@@ -123,17 +135,19 @@ One thread per PR, `thread: "PR #<number>"`. The guided review and every decisio
 go there, so the person reads them together.
 
 - **No PR yet (the usual case, since the gate runs `/ck` just before `gh pr create`).** Write the
-  decisions to `<git-dir>/ck-decisions.md`. Once the PR is open, send them **with** the guided
-  review: `get_guide_brief`, then a single `submit_guide` call. Its `body` carries the decision
-  questions and its `patch` is `gh pr diff <number>`. That is one message, not a guide followed by
-  a separate question. Then delete the file.
-- **PR already open (an incremental `/ck` after new commits).** Before sending, call
-  `read_thread` on that thread. Send the new decisions with `send_message` and `reply_to`, and use
-  `supersedes` to list any earlier questions that this round settled or made moot, so stale cards
-  stop sitting at the top of the person's list.
-- Pass `idempotency_key: "ck-<reviewed sha>"` so a retry never posts twice.
+  decisions to `<git-dir>/ck-decisions.md`, **overwriting** it so it only ever holds this run's
+  open decisions. Once the PR is open, send them **with** the guided review:
+  `get_guide_brief`, then a single `submit_guide` call. Its `body` carries the decision questions
+  and its `patch` is `gh pr diff <number>`. That is one message, not a guide followed by a separate
+  question. Then delete the file. The global CLAUDE.md's post-PR guide step does the same, so the
+  file is used up whichever session opens the PR.
+- **PR already open (an incremental `/ck` after new commits).** Skip the file. Call `read_thread`
+  on that thread first, and don't re-ask a decision that is already open there. Send the new ones
+  with `send_message` and `reply_to`, and use `supersedes` to list earlier questions that this run
+  settled or made moot, so stale cards stop sitting at the top of the person's list.
+- Pass `idempotency_key: "ck-<reviewed sha>"` so a retry of the same send never posts twice.
 
-Each decision is a `:::question` block, at most about 8 per round:
+Each decision is a `:::question` block, at most about 8 per run:
 - The first line is the question, in product terms.
 - Then one to three plain sentences of context: what the finding is (with `file:line`), why it is
   open (which reason above applies), and why you recommend the option you do.
@@ -143,8 +157,8 @@ Each decision is a `:::question` block, at most about 8 per round:
 
 **Do not wait for the answer.** No `wait_for_reply` and no polling: end the turn, or keep working.
 The reply comes back into the session by itself, headed `Plannotator Inbox: …`, with the choices
-under "Answers to your questions". Apply them in a follow-up commit, which goes through the gate
-like any other. Then use `send_message` with `reply_to` to say in one line what changed. Once
+under "Answers to your questions". Apply them in a follow-up commit, then run `/ck <stamp>..HEAD` before
+pushing it. The gate only guards PR creation, so this step is on you. Then use `send_message` with `reply_to` to say in one line what changed. Once
 nothing in the thread is left for the person (the PR is merged and every question is answered),
 call `resolve_message`.
 
