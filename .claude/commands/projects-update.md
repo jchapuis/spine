@@ -1,4 +1,4 @@
-Update the project registry and prefix shorthands in `projects/projects.md`, and ensure each subproject has symlinks to the shared spine `.claude/skills` and `.claude/commands` folders.
+Update the project registry and prefix shorthands in `projects/projects.md`, and ensure each subproject has symlinks to the shared spine `.claude/skills`, `.claude/commands` and `.claude/agents` folders.
 
 1. Read `projects/projects.md` if it exists (create it if not).
 2. List directories currently present under `projects/`.
@@ -11,7 +11,7 @@ Update the project registry and prefix shorthands in `projects/projects.md`, and
 
 5. For each project directory under `projects/`:
    a. Ensure the project has a `.claude/` directory (create if absent).
-   b. For each of `skills` and `commands`:
+   b. For each of `skills`, `commands` and `agents` (`/ck` needs the `review-worker` agent):
       - If the path `projects/<dir>/.claude/<name>` does not exist or is not already a symlink pointing to the correct target, create (or replace) a relative symlink:
         `projects/<dir>/.claude/<name>` → `../../../.claude/<name>`
       - Use `ln -sfn ../../../.claude/<name> projects/<dir>/.claude/<name>` via Bash.
