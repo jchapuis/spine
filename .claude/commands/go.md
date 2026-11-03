@@ -33,8 +33,7 @@ so don't run a separate pre-PR review as well. Before pushing follow-up commits 
   and `Holds up:` naming what waits on it. Then carry on with work that doesn't depend on the
   answer. Never wait or poll; the reply comes back into the session by itself.
 - **PR.** Follow `/ck`'s "Send decisions to the Plannotator Inbox" section. Its decisions go out
-  with the PR's guided review. `/pr-guide` is a separate thing: it puts a shareable guide link in
-  the PR description.
+  with the PR's guided review.
 - **Hand-over.** When long work finishes while I'm away, send one short inbox summary with the
   files worth looking at in `attachments`. Don't send routine progress.
 

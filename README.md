@@ -173,7 +173,6 @@ options, context the repo doesn't have, or a change that goes past the diff.
   [PR Lens](https://prlens.dev) diagram of the diff, rendered after the last commit. It goes with
   the guided review as an image. It is never pushed to prlens.dev or attached to the PR, because
   the repos are private.
-- **`/pr-guide`.** Puts a shareable, encrypted guided-review link in the PR description.
 
 ---
 
@@ -183,7 +182,6 @@ options, context the repo doesn't have, or a change that goes past the diff.
 |---------|-------------|
 | `/go [args]` | Start work: tooling, skill survey, grilling, Plannotator plan review, `/ck` before the PR |
 | `/ck [target]` | Pre-PR review in two agents; fixes findings, writes the stamp the PR gate checks, sends decisions to the inbox |
-| `/pr-guide [PR]` | Add or refresh a PR's guided-review link |
 | `/ai-assisted-review <branch>` | Review someone else's PR and post findings as inline comments, one at a time |
 | `/task-new` | Create a new task file from the template |
 | `/task-list` | List active and backlog tasks |
