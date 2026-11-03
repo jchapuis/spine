@@ -18,25 +18,12 @@ For any non-trivial change, apply these pre-flight habits:
 Before each commit, run the **compliance-gate** skill inline:
 - detects applicable skills from the diff and reviews against each applicable skill's body, catching judgment-shaped violations that a pattern check can't express
 
-Before opening a PR, run **`/ck`**: code review plus the full compliance gate, which also covers
-the refactor-completeness audit (diff-audit, config parity, missing tests, stale docs). A hook
-(`.claude/hooks/ck-gate.sh`) blocks `gh pr create` until `/ck` has reviewed the branch up to HEAD,
-so don't run a separate pre-PR review as well. Before pushing follow-up commits to an open PR, run
-`/ck <stamp>..HEAD` yourself; the hook doesn't cover pushes.
+Before opening a PR, run **`/ck`** (the `ck-gate` hook blocks `gh pr create` until it has); before
+pushing follow-up commits to an open PR, run `/ck <stamp>..HEAD`.
 
-**Plannotator, at each stage** (read the `plannotator` skill once before you first use it):
-- **Plan.** Once the grilling is done, write the plan in plan mode and exit it. The plan review
-  opens by itself through the hook. Revise from the annotations that come back. Don't start coding
-  until the plan is approved.
-- **Questions.** If I'm in the chat, ask with `AskUserQuestion`. If I've gone quiet during long
-  work, ask through the `plannotator_inbox` instead: a `:::question` with a `Recommended:` pick,
-  and `Holds up:` naming what waits on it. Then carry on with work that doesn't depend on the
-  answer. Never wait or poll; the reply comes back into the session by itself.
-- **PR.** Follow `/ck`'s "Send decisions to the Plannotator Inbox" section. Its decisions go out
-  with the PR's guided review.
-- **Hand-over.** When long work finishes while I'm away, send one short inbox summary with the
-  files worth looking at in `attachments`. Don't send routine progress.
+**Plannotator:** write the plan in plan mode, and don't code until its review is approved. If I've
+gone quiet during long work, ask through the `plannotator_inbox` rather than the chat, and keep going.
 
 Read the CLAUDE.md root file before you do anything.
-Clarify any doubt rather than guessing at it, in the chat or the inbox as above.
+Clarify any doubt rather than guessing at it.
 #$ARGUMENTS
