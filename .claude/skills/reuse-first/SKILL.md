@@ -4,6 +4,15 @@ description: Pre-coding survey discipline. Use BEFORE adding new helpers, valida
 
 triggers:
   - file_patterns: ['**/*.scala', '**/*.sc']
+
+mechanical_checks:
+  - id: reuse-first.hand-written-js-facade
+    tool: ripgrep
+    severity: warning
+    pattern: '@js\.native'
+    paths: ['**/*.scala']
+    message: 'Hand-written JS facade — use scala-js-dom or the ScalablyTyped `typings.*` for the package first; keep it only when no usable definitions exist, and say why in the PR'
+    references: ['reuse-first#js-interop--definitions-before-facades']
 ---
 
 # Reuse-First — Look Before You Write
@@ -14,6 +23,7 @@ triggers:
 - Before adding a dependency, **scan transitive deps** — `coursier resolve --tree` / `sbt dependencyTree` (Scala) or `pip show` / `uv pip list` (Python). Many libraries pull in what you need.
 - Before writing imperative iteration / nested `if` / nested `flatMap`, **reach for a combinator**. The trigger list is below; the operator vocabulary lives in dedicated skills (cross-linked).
 - Before writing a custom non-blank/non-empty/range validator, **check Iron**.
+- Before writing a `@js.native` facade, **check scala-js-dom and the ScalablyTyped `typings.*`** (see *JS interop* below).
 - Before threading the same dependency through every method, **use Scala 3 `using`/`given`**.
 - Before reaching for a Java API, **check for the Scala-native idiom**. `java.util.regex.Pattern` → `scala.util.matching.Regex`; `scala.io.Source` → os-lib `os.read.lines`. Java interop is fine when no Scala idiom exists; prefer the Scala-native one when it does — it reads as project idiom and avoids the interop seams (`null`, checked exceptions) the rest of the code is built to avoid.
 
@@ -54,6 +64,14 @@ This skill carries only the **trigger list** — the operator names live in dedi
 | bespoke non-blank / non-empty / range / regex validation | `iron` |
 | same dependency threaded through every method | Scala 3 `using` / `given` (see `scala`) |
 
+### JS interop — definitions before facades
+Before writing a `@js.native` facade (`@JSImport`, `@JSGlobal`, a `js.Object` trait describing someone else's API), look for the types that already exist, in this order:
+1. **scala-js-dom** for browser APIs (`dom.crypto`, `dom.TextEncoder`, `dom.fetch`, …). The Scala.js modules set `stUseScalaJsDom := true`, so ScalablyTyped defers to it.
+2. **ScalablyTyped `typings.*`** for npm packages. Every package in a module's `package.json` that isn't in `stIgnore` is already converted: look under `~/.ivy2/local/org.scalablytyped/<scope>__<name>_sjs1_3/` (sources jar) or `typings.<camelName>` in Metals. Adding the package to `package.json` is all it takes to get its types.
+3. **`typings.std`** for anything else in the TypeScript DOM/ES libs.
+
+Hand-write a facade only when none of these ships usable types (no `.d.ts`, or the converted shape can't be called type-safely), and say why in the PR. A test seam over a plugin is still a narrow trait typed with the generated types, not a re-declaration of them.
+
 ### Step 4 — When the helper genuinely doesn't exist
 Then write it — but place it where the next person will find it:
 - Extension methods on the type live next to the type (or in a `*Extensions` companion).
@@ -76,6 +94,7 @@ If any answer is yes → use it. If all are no → write the helper, and place i
 | "I already know this codebase" | The extension may have landed last week. Repo knowledge expires; the search doesn't. |
 | "I'll dedupe it later if a reviewer flags it" | "Later" is a follow-up PR that competes with new work and usually loses. |
 | "Adding the dependency is simpler than checking the tree" | A duplicate dep ships two versions of the same concern; the tree check is one command. |
+| "Writing the facade is quicker than finding the typings" | The typings were generated the moment the package entered `package.json`; the facade is a second, unchecked copy of them. |
 | "A quick loop is fine here" | Imperative iteration is exactly the tell-tale the combinator table exists for — scan it first. |
 
 ## Cross-references

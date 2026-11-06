@@ -15,15 +15,15 @@ For any non-trivial change, apply these pre-flight habits:
 - **fail-loud** — surface failures via Option/Either/Validated/exceptions; no silent fallbacks or sentinel values
 - **factor-out** — scan your diff for repeated constants, fixtures, or 3+-line blocks; extract on the second occurrence, not the third
 
-Before opening any PR, run the **refactor-completeness** audit:
-- diff-audit against master (catch accidental reverts from a stale branch base)
-- schema/config parity (numeric bounds, codec validators, config files, test assertions)
-- new components have at least a smoke test
-- README/comments/docstrings still match the code
-
-Before each commit (and again before opening a PR), run the **compliance-gate** skill:
+Before each commit, run the **compliance-gate** skill inline:
 - detects applicable skills from the diff and reviews against each applicable skill's body, catching judgment-shaped violations that a pattern check can't express
 
+Before opening a PR, run **`/ck`** (the `ck-gate` hook blocks `gh pr create` until it has); before
+pushing follow-up commits to an open PR, run `/ck <stamp>..HEAD`.
+
+**Plannotator:** write the plan in plan mode, and don't code until its review is approved. If I've
+gone quiet during long work, ask through the `plannotator_inbox` rather than the chat, and keep going.
+
 Read the CLAUDE.md root file before you do anything.
-Clarify any doubt with `AskUserQuestion` rather than guessing at it.
+Clarify any doubt rather than guessing at it.
 #$ARGUMENTS

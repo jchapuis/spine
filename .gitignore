@@ -8,6 +8,8 @@ tasks
 .claude/*
 !.claude/skills/
 !.claude/commands/
+!.claude/hooks/
+!.claude/agents/
 
 # Third-party skills installed from elsewhere — only skills written here are tracked.
 # Add a line when you install another one.
@@ -18,6 +20,11 @@ tasks
 .claude/skills/imagegen-frontend-mobile/
 .claude/skills/imagegen-frontend-web/
 .claude/skills/redesign-existing-projects/
+.claude/skills/pr-lens/
+.claude/skills/eli5/
+
+# `npx skills add` writes this lock; the skills above are reinstalled by hand, not restored from it.
+skills-lock.json
 
 # The drawing skill is its own repository — github.com/jchapuis/drawing-skill
 .claude/skills/drawing/
