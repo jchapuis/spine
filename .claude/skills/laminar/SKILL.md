@@ -94,6 +94,14 @@ The frontend mirrors the server's layered discipline (`server-architecture`) —
   // Good — current value propagates on subscription
   signal.flatMapSwitch(buildChild)
   ```
+- **Never share a one-shot stream through a `val`** when more than one caller subscribes to it. A one-shot stream emits once: `EventStream.fromValue`, `fromFuture(..., emitOnce = true)`, or a `flatMapSwitch` into one. Airstream's `take(1)` does not unsubscribe its upstream after the first answer. So while any earlier caller stays attached, a shared stream keeps running past its single emission, and a later subscriber joins after it fired and hears nothing, forever. Build the stream per subscription with a `def`, or expose a `Signal`, which replays its current value. This is how `Deferred.settled$` made every lazily loaded service answer only its first live caller (#604), and how a stub that returns one stored `fromValue` stream fires once per test.
+  ```scala
+  // Bad — the second live caller joins after the emission and waits forever
+  private val settled$ = state$.flatMapSwitch(s => EventStream.fromValue(s))
+
+  // Good — each subscription gets its own one-shot stream
+  private def settled$ = state$.flatMapSwitch(s => EventStream.fromValue(s))
+  ```
 - **No `.now()` inside combinators** — use `withCurrentValueOf` / `sample` to keep reactive dependencies explicit. Outside one — a one-shot read at mount, a `Var` nothing observes — `.now()` is the point, not the violation.
 - **Always `.distinct`** when deriving `Signal[Primitive]` (Boolean, String, Int, Double).
 - **Pass `Signal` + `Observer` separately** instead of `Var` as component props.
