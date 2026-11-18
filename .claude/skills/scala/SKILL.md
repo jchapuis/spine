@@ -117,6 +117,12 @@ mechanical_checks:
     rule: 'NoLocalTypeAscription'
     message: 'Drop the type ascription on this local val/var/def — inference handles it. Ascription is for public API only (or recursive defs, where the compiler requires it).'
     references: ['scala#type-ascription-restraint']
+  - id: scala.one-top-level-type-per-file
+    tool: scalafix
+    severity: error
+    rule: 'OneTopLevelTypePerFile'
+    message: 'One top-level type per file — move each extra class / case class / trait / enum / type alias / standalone object to its own file. Only a companion object, nested ADT cases, and the iron `type X = X.T` + `object X` pair (with its constraint aliases) may share the file; def/val/given/extension-only files are fine'
+    references: ['scala#file-per-class-convention']
   - id: scala.no-qualified-private
     tool: ripgrep
     severity: error
