@@ -20,7 +20,8 @@ class OneTopLevelTypePerFile extends SyntacticRule("OneTopLevelTypePerFile") {
       .sortBy(_.tree.pos.start)
     val stem = fileStem(doc.input)
     distinctTypes match {
-      case Nil | _ :: Nil => Patch.empty
+      case _ if stem.exists(isAggregateName) => Patch.empty
+      case Nil | _ :: Nil                    => Patch.empty
       case all =>
         val principal = all.find(declaration => stem.contains(declaration.name)).getOrElse(all.head)
         all.filterNot(_ eq principal).map { extra =>
@@ -75,6 +76,9 @@ class OneTopLevelTypePerFile extends SyntacticRule("OneTopLevelTypePerFile") {
       case Type.Select(Term.Name(owner), Type.Name("T")) => owner == alias.name.value
       case _                                             => false
     }
+
+  private def isAggregateName(stem: String): Boolean =
+    stem.headOption.exists(_.isLower)
 
   private def kindOfClass(defn: Defn.Class): String =
     if (defn.mods.exists(_.is[Mod.Case])) "case class" else "class"

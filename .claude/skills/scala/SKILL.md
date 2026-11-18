@@ -236,7 +236,7 @@ If you're tempted to ascribe "for clarity", **rename instead** — `totalOf(item
 ---
 
 ### File-per-class convention
-Filename matches the principal top-level type. Split files that contain multiple top-level classes / case classes — each gets its own `.scala` file. Sealed ADT cases stay in the same file as the sealed parent; small companion objects stay below their class.
+Filename matches the principal top-level type. Split files that contain multiple top-level classes / case classes — each gets its own `.scala` file. Sealed ADT cases stay in the same file as the sealed parent; small companion objects stay below their class. A file whose name starts with a lowercase letter (`types.scala`, `route.scala`, `errors.scala`) is a deliberate aggregate and is exempt.
 
 **God-file rule.** When a file grows past a few hundred lines, count its concerns — distinct responsibilities a reader could name (rendering + state + parsing + IO wiring…). More than one concern → split by concern, each into its own file or sub-package, before the PR: pure logic into helpers or an algebra (`server-architecture`), component sections via the class-scope refactor (`#class-scope-for-helper-bundles`), related helper clusters into a domain-named sub-package (`#cohesive-sub-packages`). "It grew organically" is how every god file happened; the moment you notice is the moment to split.
 
