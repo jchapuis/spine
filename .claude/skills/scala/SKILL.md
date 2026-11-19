@@ -197,14 +197,13 @@ rectangle(left = startX, top = startY, right = endX, bottom = endY)
 - **Scaladoc** — most of it restates what the signature already says. A doc line that says what the types say is noise; if it says something the types can't, it belongs in the README.
 - **Comments describing code that doesn't exist** — placeholders like "soon filled with X" or workflow comments for steps that were never added.
 
-**The one exception: Scaladoc on the fields of a `*Config` case class.** A tuning value can't name its own reason. Each field gets one `/** … */` line saying what the value means and why its default was chosen, the way `application.conf` comments do on the server. The `NoComments` rule lets exactly these through. Give the reason, not the number: the default sits beside it in code.
 
 Where explanations belong instead:
 - **Prose explanations go in the global README** — not inline, and not a standalone document per topic.
 - **Tests document behavior** — a well-named test case explains an edge case better than a comment above the branch.
 
 Sanctioned exceptions (rare, deliberate):
-- **How a config value was determined** — a tuning constant may carry one comment explaining its derivation, since the derivation isn't recoverable from code.
+- **What a config value means and how its default was determined** — each field of a `*Config` case class carries one `/** … */` line: what the value means and why the default, the way `application.conf` comments do on the server. Give the reason, not the number, since the default sits beside it. The `NoComments` rule lets exactly these through; a tuning constant elsewhere moves into a config case class rather than earning a comment.
 - **A genuinely surprising why** — a non-obvious external constraint (an API quirk, a platform bug workaround). If the reader would ask "why on earth", one comment earns its place.
 
 ---
