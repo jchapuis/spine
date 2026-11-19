@@ -6,6 +6,13 @@ triggers:
   - file_patterns: ['**/*.scala', '**/*.sc']
 
 mechanical_checks:
+  - id: scala.action-named-as-participle
+    tool: ripgrep
+    severity: warning
+    pattern: '^\s*(override\s+)?(private\s+)?def\s+[a-z]+(ed|en)\b[^=]*\)\s*:\s*(IO|F)\['
+    paths: ['**/src/main/**/*.scala']
+    message: 'A method that does work is named for the work, as an imperative verb phrase (`routeToFinish`, `searchWaysToFinish`), never a bare past participle (`routed`, `searched`): the participle reads as a value and hides that something runs'
+    references: ['scala#naming']
   - id: scala.no-final-case-class
     tool: ripgrep
     severity: error
@@ -162,6 +169,7 @@ Lambda parameter syntax: `: param =>` (colon-space), never `{ param =>`.
 ---
 
 ### Naming
+- **Actions are verbs, values are nouns.** A method that does work (an effect, a search, a routing call, scoring, choosing between options) is named with an imperative verb phrase that says what it does and to what: `routeToFinish(position, finish)`, `searchWaysToFinish(plan)`, `chooseWayBack(candidates)`. Never a bare past participle (`routed`, `searched`, `segmented`, `chosen`): it reads like a value someone already computed, so the reader can't see where the work happens. A value or a field is a noun phrase that says what it holds (`placedStep`, not `placed`). The one place a participle fits is a pure copy of its receiver that reads as a phrase about it (`state.markedSent`, `tracking.withHoldingView`), where nothing runs.
 - **No abbreviations** — in lambdas, params, local variables: `location =>` not `l =>`, `role =>` not `r =>`. Exception: `_` for genuinely unused params.
 - **Named parameters at call sites** when multiple args share the same type:
 ```scala
