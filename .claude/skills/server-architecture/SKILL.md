@@ -23,6 +23,13 @@ mechanical_checks:
     files_must_import: ['com\.raquo\.laminar']
     message: 'Frontend (Laminar) code must not import from the server-side `api` package — wire-shape DTOs belong in `shared/model`'
     references: ['server-architecture#dto-ownership']
+  - id: server-architecture.model-imports-layer
+    tool: ripgrep
+    severity: error
+    pattern: '^import\s+\S+\.(alg|services|repositories)\.'
+    paths: ['**/src/main/**/model/**/*.scala']
+    message: 'Model types depend only on other model types, shared types and libraries — move the imported type into `model/` instead of importing it from `alg`, `services` or `repositories`'
+    references: ['server-architecture#dependency-matrix']
 ---
 
 # Server Architecture — Layered Design (Scala / Cats Effect)
@@ -57,6 +64,7 @@ mechanical_checks:
 | Algebra | Other algebras, services, repositories, config |
 | Repository | DB session, model types |
 | Logic trait | Algebras, services, repositories |
+| Model | Other model types, shared types, libraries — never algebras, services or repositories |
 
 **Services**
 - Defined as a `trait` with one implementation per external system.
