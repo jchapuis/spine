@@ -169,7 +169,7 @@ Lambda parameter syntax: `: param =>` (colon-space), never `{ param =>`.
 ---
 
 ### Naming
-- **Actions are verbs, values are nouns.** A method that does work (an effect, a search, a routing call, scoring, choosing between options) is named with an imperative verb phrase that says what it does and to what: `routeToFinish(position, finish)`, `searchWaysToFinish(plan)`, `chooseWayBack(candidates)`. Never a bare past participle (`routed`, `searched`, `segmented`, `chosen`): it reads like a value someone already computed, so the reader can't see where the work happens. A value or a field is a noun phrase that says what it holds (`placedStep`, not `placed`). A pure state update is an action too: `state.updateSensorFeeds(sample)`, `sound.requestLanding(at)`, not `sensorFeedsUpdated` or `landingRequested`. A copy that sets one part can read `withX` (`tracking.withHoldingView(reason)`). Participles stay for facts already reported, such as events and ADT cases (`TargetEvent.LockedIn`, `SoundInput.ClipEnded`).
+- **Actions are verbs, values are nouns.** A method that does work (an effect, a search, a routing call, scoring, choosing between options) is named with an imperative verb phrase that says what it does and to what: `routeToFinish(position, finish)`, `searchWaysToFinish(plan)`, `chooseWayBack(candidates)`. Never a bare past participle (`routed`, `searched`, `segmented`, `chosen`): it reads like a value someone already computed, so the reader can't see where the work happens. A value or a field is a noun phrase that says what it holds (`placedStep`, not `placed`). A method that only returns a copy with fields set is a setter, and reads `withX`, naming the field it sets: `sound.withLandingRequestedAt(at)`, `sound.withPlayingClip(None)`, `tracking.withSensorFeeds(sample)`. Not a verb (`requestLanding` reads as if it did more), and not a participle (`landingRequested`). Verbs stay for methods that compute or decide. Participles stay for facts already reported, such as events and ADT cases (`TargetEvent.LockedIn`, `SoundInput.ClipEnded`).
 - **No abbreviations** — in lambdas, params, local variables: `location =>` not `l =>`, `role =>` not `r =>`. Exception: `_` for genuinely unused params.
 - **Named parameters at call sites** when multiple args share the same type:
 ```scala
@@ -188,7 +188,7 @@ rectangle(left = startX, top = startY, right = endX, bottom = endY)
 ---
 
 ### Comments
-**Default: zero comments.** Naming is the documentation for code; tests are the documentation for behavior. The `scala.no-comments` Scalafix rule is AST-aware and flags *every* comment token — line, block, and Scaladoc alike — leaving only scala-cli directives (`//>`) permitted. The kinds below are why:
+**Default: zero comments.** Naming is the documentation for code; tests are the documentation for behavior. The `scala.no-comments` Scalafix rule is AST-aware and flags *every* comment token — line, block, and Scaladoc alike — leaving only scala-cli directives (`//>`) and `*Config` field Scaladoc permitted. The kinds below are why:
 
 - **What-comments** — restating what the next line does. Rename or restructure instead; needing a comment is proof the name failed.
 - **History comments** — "no longer", "previously", "moved from", "used to". Git holds the history; a comment holding it goes stale and misleads.
@@ -196,6 +196,8 @@ rectangle(left = startX, top = startY, right = endX, bottom = endY)
 - **Config values in comments or docs** — quoting a default or threshold in prose drifts silently when the config changes (see `refactor-completeness`).
 - **Scaladoc** — most of it restates what the signature already says. A doc line that says what the types say is noise; if it says something the types can't, it belongs in the README.
 - **Comments describing code that doesn't exist** — placeholders like "soon filled with X" or workflow comments for steps that were never added.
+
+**The one exception: Scaladoc on the fields of a `*Config` case class.** A tuning value can't name its own reason. Each field gets one `/** … */` line saying what the value means and why its default was chosen, the way `application.conf` comments do on the server. The `NoComments` rule lets exactly these through. Give the reason, not the number: the default sits beside it in code.
 
 Where explanations belong instead:
 - **Prose explanations go in the global README** — not inline, and not a standalone document per topic.
