@@ -1,0 +1,29 @@
+#!/bin/sh
+# Run one of abide's hook commands after making sure the checkout it is about to judge has abide enabled.
+#
+#   abide-ensure <command...>     reads the hook's JSON on stdin, passes it on to <command> unchanged
+#
+# abide reads the rubric from the root of the checkout that holds the edited file. A worktree created by the
+# Agent tool's `isolation: worktree` never runs git's post-checkout hook, so abide-enable never ran there and every
+# edit in it went unchecked. This runs abide-enable on the first edit or turn in any checkout that lacks the
+# rubric link, before abide's own hook, so that first edit is already checked.
+set -u
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+INPUT=$(cat)
+
+TARGET=$(printf '%s' "$INPUT" | jq -r '
+  (.tool_input.file_path // .tool_input.path // null) as $f
+  | (.tool_input.relative_path // null) as $r
+  | if $f then $f elif $r then ((.cwd // ".") + "/" + $r) else (.cwd // empty) end' 2>/dev/null)
+
+if [ -n "$TARGET" ]; then
+  DIR=$TARGET
+  while [ ! -d "$DIR" ] && [ "$DIR" != "/" ]; do DIR=$(dirname -- "$DIR"); done
+  ROOT=$(git -C "$DIR" rev-parse --show-toplevel 2>/dev/null)
+  if [ -n "$ROOT" ] && [ ! -e "$ROOT/.abide/rubric.json" ]; then
+    "$SCRIPT_DIR/abide-enable" "$ROOT" >/dev/null 2>&1
+  fi
+fi
+
+printf '%s' "$INPUT" | "$@"

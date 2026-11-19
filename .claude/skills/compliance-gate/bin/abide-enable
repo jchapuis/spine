@@ -57,7 +57,8 @@ if [ "$UNINSTALL" = 1 ]; then
   echo "abide-enable: removed abide hooks and the rubric link from $PROJECT"
   exit 0
 fi
-jq --arg cmd "node \"$HOOK\"" --arg hook "\"$HOOK\"" --arg shim "node \"$SCRIPT_DIR/abide-serena\"" \
+ENSURE="\"$SCRIPT_DIR/abide-ensure\""
+jq --arg cmd "$ENSURE node \"$HOOK\"" --arg hook "\"$HOOK\"" --arg shim "$ENSURE node \"$SCRIPT_DIR/abide-serena\"" \
   --arg serena "$SERENA_EDITS" "$STRIP | $ADD" "$SETTINGS" > "$TMP" && mv "$TMP" "$SETTINGS"
 
 # The shared rubric (/projects-update makes the same link; an existing file or link is left alone).
