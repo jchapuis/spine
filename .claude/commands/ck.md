@@ -35,6 +35,20 @@ subagent's shell cwd can reset to the main checkout, which is a different branch
 work; a review of that is worthless and reads as plausible. Tell each agent to use `git -C <path>`
 and to stop and re-anchor if what it is reading does not match the stated target.
 
+That warning alone has not held for the code review. `code-review` runs as a forked skill whose
+shell starts in the session's main checkout, and it has reviewed that checkout's unrelated work.
+The reviewer then dropped the result and fell back on a quick read of its own, which looked like a
+clean review. So for a worktree target, take the diff out of the reviewer's hands:
+- Write the target diff to a file yourself first:
+  `git -C <path> diff <base>..<head> > <scratchpad>/ck-<head>.diff`.
+- Pass that file to Agent 1. Tell it the diff file is the target, and that it reads full files from
+  `<path>` by absolute path.
+- When the reports come back, check that every code-review finding names a file and a line in the
+  diff file. If even one does not, the review ran on the wrong tree. Rerun it before you treat it as
+  clean.
+- For a whole pushed PR, `code-review <effort> <PR number>` is safer, because it reads
+  `gh pr diff`, not the working tree.
+
 Agent 1 — code review:
 > Invoke the `code-review` skill with arguments `$ARGUMENTS` (if empty, review the resolved target
 > above, at effort `medium`) and follow it exactly. Return the findings verbatim: file:line,
