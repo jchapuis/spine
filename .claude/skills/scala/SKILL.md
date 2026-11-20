@@ -396,7 +396,7 @@ type Cell = (row: Int, col: Int)
 // Prefer named-tuple literals at construction:
 val origin = (row = 0, col = 0)
 ```
-- **Named tuples stay out of public signatures.** They suit locals, private helpers and folds. A public member's type should read in one glance: when it nests a named tuple inside other type constructors (`Either[HoldReason, NonEmptyList[(metric: TargetMetric, level: TargetLevel[? <: Int])]]`), name the record as a case class, and model its real shape. A list that only ever holds a primary plus an optional fallback is `StepPrescription(primary, fallback: Option[...])`, not a `NonEmptyList`. Keep it private if nothing outside needs it.
+- **Named tuples stay out of public signatures.** They suit locals, private helpers and folds. A public member's type should read in one glance: when it nests a named tuple inside other type constructors (`Either[HoldReason, NonEmptyList[(metric: TargetMetric, level: TargetLevel[? <: Int])]]`), give the record a name (a `type` alias such as `type Departure = (position: GeoPoint, remainingSession: RemainingSession)`, or a case class), and model its real shape. A list that only ever holds a primary plus an optional fallback is `StepPrescription(primary, fallback: Option[...])`, not a `NonEmptyList`. Keep it private if nothing outside needs it.
 
 ---
 
