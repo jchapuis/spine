@@ -169,7 +169,7 @@ Lambda parameter syntax: `: param =>` (colon-space), never `{ param =>`.
 ---
 
 ### Naming
-- **Actions are verbs, values are nouns.** A method that does work (an effect, a search, a routing call, scoring, choosing between options) is named with an imperative verb phrase that says what it does and to what: `routeToFinish(position, finish)`, `searchWaysToFinish(plan)`, `chooseWayBack(candidates)`. Never a bare past participle (`routed`, `searched`, `segmented`, `chosen`): it reads like a value someone already computed, so the reader can't see where the work happens. A value or a field is a noun phrase that says what it holds (`placedStep`, not `placed`). A method that only returns a copy with fields set is a setter, and reads `withX`, naming the field it sets: `sound.withLandingRequestedAt(at)`, `sound.withPlayingClip(None)`, `tracking.withSensorFeeds(sample)`. Not a verb (`requestLanding` reads as if it did more), and not a participle (`landingRequested`). Verbs stay for methods that compute or decide. Participles stay for facts already reported, such as events and ADT cases (`TargetEvent.LockedIn`, `SoundInput.ClipEnded`).
+- **Actions are verbs, values are nouns.** A method that does work (an effect, a search, a routing call, scoring, choosing between options) is named with an imperative verb phrase that says what it does and to what: `routeToFinish(position, finish)`, `searchWaysToFinish(plan)`, `chooseWayBack(candidates)`. Never a bare past participle (`routed`, `searched`, `segmented`, `chosen`): it reads like a value someone already computed, so the reader can't see where the work happens. A value or a field is a noun phrase that says what it holds (`placedStep`, not `placed`). A method that only returns a copy with fields set is a setter, and reads `withX`, naming the field it sets: `sound.withLandingRequestedAt(at)`, `sound.withPlayingClip(None)`, `tracking.withSensorFeeds(sample)`. Not a verb (`requestLanding` reads as if it did more), and not a participle (`landingRequested`). Verbs stay for methods that compute or decide. Participles stay for facts already reported, such as events and ADT cases (`TargetEvent.ReachedBand`, `SoundInput.ClipEnded`).
 - **No abbreviations** — in lambdas, params, local variables: `location =>` not `l =>`, `role =>` not `r =>`. Exception: `_` for genuinely unused params.
 - **Named parameters at call sites** when multiple args share the same type:
 ```scala
@@ -396,6 +396,7 @@ type Cell = (row: Int, col: Int)
 // Prefer named-tuple literals at construction:
 val origin = (row = 0, col = 0)
 ```
+- **Named tuples stay out of public signatures.** They suit locals, private helpers and folds. A public member's type should read in one glance: when it nests a named tuple inside other type constructors (`Either[HoldReason, NonEmptyList[(metric: TargetMetric, level: TargetLevel[? <: Int])]]`), name the record as a case class, and model its real shape. A list that only ever holds a primary plus an optional fallback is `StepPrescription(primary, fallback: Option[...])`, not a `NonEmptyList`. Keep it private if nothing outside needs it.
 
 ---
 
